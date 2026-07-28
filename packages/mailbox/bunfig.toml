@@ -1,0 +1,15 @@
+[test]
+# The coverage floor is a BUILD GATE, not a report. `bun test --coverage` exits
+# non-zero when coverage falls below this ratio, so a regression fails CI
+# instead of scrolling past in the log.
+#
+# 80% lines and functions is the stated standard. Real coverage is far above it;
+# the floor is deliberately not pinned to today's number so a small, justified
+# dip does not break the build while a real regression does.
+#
+# MUST stay the scalar form. Bun 1.3.14 silently IGNORES the table forms
+# (`coverageThreshold = { line = ..., function = ... }` and a
+# `[test.coverageThreshold]` section): they parse without error and enforce
+# nothing, giving a gate that can never fail. The scalar is applied to BOTH the
+# line and the function ratio, which is exactly the floor we want.
+coverageThreshold = 0.8

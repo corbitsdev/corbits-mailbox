@@ -1,0 +1,496 @@
+// Every case here builds the `mailbox` schema from empty. The tables are
+// hard-qualified to that one schema, so the isolation is DROP SCHEMA "mailbox"
+// CASCADE before each case rather than a private search_path — and because the
+// whole suite runs sequentially in one process, dropping it out from under the
+// other files only matters if it stays dropped. It does not: `afterAll`
+// re-runs the (idempotent) migrations, and so does every case, so the suite is
+// ordering-independent. The control-plane stub tables in `public` must exist
+// before any migration run — the FKs land on them.
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import postgres from "postgres";
+import { drizzle } from "drizzle-orm/postgres-js";
+import { sql } from "drizzle-orm";
+import { createMailboxDb } from "./db.js";
+import {
+  MIGRATIONS,
+  MigrationChecksumError,
+  runMailboxMigrations,
+} from "./migrations.js";
+import {
+  createHostControlPlane,
+  seedScope,
+  TEST_DATABASE_URL,
+} from "./test-helpers.js";
+
+const admin = postgres(TEST_DATABASE_URL, { onnotice: () => {} });
+const adminDb = drizzle(admin);
+
+beforeAll(async () => {
+  await createHostControlPlane(adminDb);
+});
+
+afterAll(async () => {
+  // Leave the schema the way every other suite expects to find it, whatever
+  // the last case here did to it.
+  await runMailboxMigrations(adminDb);
+  await admin.end();
+});
+
+/** Drop this package's schema so the next migration run builds from empty. */
+async function dropMailboxSchema(): Promise<void> {
+  await admin.unsafe(`DROP SCHEMA IF EXISTS "mailbox" CASCADE`);
+}
+
+function handle() {
+  const client = postgres(TEST_DATABASE_URL, { onnotice: () => {} });
+  return { client, db: drizzle(client) };
+}
+
+/** Runs `fn` against a freshly-dropped schema and always drains its pool. */
+async function fromEmpty(
+  fn: (h: ReturnType<typeof handle>) => Promise<void>,
+): Promise<void> {
+  await dropMailboxSchema();
+  const h = handle();
+  try {
+    await fn(h);
+  } finally {
+    await h.client.end();
+  }
+}
+
+describe("runMailboxMigrations", () => {
+  test("builds the full schema from an empty database", async () => {
+    await fromEmpty(async ({ db }) => {
+      await runMailboxMigrations(db);
+
+      // The mail plane reads 1-1 with Interchange's `session_mail`: the message
+      // as delivered, plus the cached header columns and this package's scope.
+      // Nothing mutable is on it.
+      const mailColumns = await db.execute<{ column_name: string }>(
+        sql`SELECT column_name FROM information_schema.columns
+            WHERE table_schema = 'mailbox' AND table_name = 'principal_mail'
+            ORDER BY column_name`,
+      );
+      expect(mailColumns.map((c) => c.column_name)).toEqual([
+        "address",
+        "created_at",
+        "direction",
+        "from_address",
+        "id",
+        "message_key",
+        "principal_id",
+        "raw",
+        "refs",
+        "subject",
+        "tenant_id",
+      ]);
+
+      const stateColumns = await db.execute<{ column_name: string }>(
+        sql`SELECT column_name FROM information_schema.columns
+            WHERE table_schema = 'mailbox' AND table_name = 'mailbox'
+            ORDER BY column_name`,
+      );
+      expect(stateColumns.map((c) => c.column_name)).toEqual([
+        "archived_at",
+        "assignee",
+        "classification",
+        "id",
+        "principal_id",
+        "priority",
+        "read_at",
+        "status",
+        "tenant_id",
+        "trashed_at",
+      ]);
+
+      const mailIndexes = await db.execute<{ indexname: string }>(
+        sql`SELECT indexname FROM pg_indexes
+            WHERE schemaname = 'mailbox' AND tablename = 'principal_mail'
+            ORDER BY indexname`,
+      );
+      // The mail plane keeps exactly two access paths: the dedupe constraint
+      // and the keyset the default page seeks on.
+      // `schema-ddl-parity.test.ts` holds schema.ts to this same list.
+      expect(mailIndexes.map((i) => i.indexname)).toEqual([
+        "principal_mail_pkey",
+        "principal_mail_tenant_id_principal_id_created_at_id_idx",
+        "principal_mail_tenant_id_principal_id_message_key_idx",
+      ]);
+
+      const stateIndexes = await db.execute<{ indexname: string }>(
+        sql`SELECT indexname FROM pg_indexes
+            WHERE schemaname = 'mailbox' AND tablename = 'mailbox'
+            ORDER BY indexname`,
+      );
+      // The management layer carries the triage filters and one partial index
+      // per view predicate — eager rows are what make the unread one possible.
+      expect(stateIndexes.map((i) => i.indexname)).toEqual([
+        "mailbox_pkey",
+        "mailbox_tenant_id_principal_id_archived_at_idx",
+        "mailbox_tenant_id_principal_id_assignee_idx",
+        "mailbox_tenant_id_principal_id_classification_idx",
+        "mailbox_tenant_id_principal_id_priority_idx",
+        "mailbox_tenant_id_principal_id_status_idx",
+        "mailbox_tenant_id_principal_id_trashed_at_idx",
+        "mailbox_tenant_id_principal_id_unread_idx",
+      ]);
+
+      // The dedupe index is partial: NULL-key external mail is unconstrained.
+      const partial = await db.execute<{ indexdef: string }>(
+        sql`SELECT indexdef FROM pg_indexes WHERE schemaname = 'mailbox'
+            AND indexname = 'principal_mail_tenant_id_principal_id_message_key_idx'`,
+      );
+      expect(partial[0]?.indexdef).toContain("WHERE (message_key IS NOT NULL)");
+    });
+  });
+
+  test("the keyset index matches the list query's ORDER BY exactly", async () => {
+    await fromEmpty(async ({ db }) => {
+      await runMailboxMigrations(db);
+      const [row] = await db.execute<{ indexdef: string }>(
+        sql`SELECT indexdef FROM pg_indexes WHERE schemaname = 'mailbox'
+            AND indexname = 'principal_mail_tenant_id_principal_id_created_at_id_idx'`,
+      );
+      // Carrying id and matching DESC is what turns the row-value seek into an
+      // Index Cond instead of a Filter plus an Incremental Sort per page.
+      expect(row?.indexdef).toContain(
+        "(tenant_id, principal_id, created_at DESC, id DESC)",
+      );
+    });
+  });
+
+  test("the partial indexes match their view predicates", async () => {
+    await fromEmpty(async ({ db }) => {
+      await runMailboxMigrations(db);
+      const rows = await db.execute<{
+        indexname: string;
+        indexdef: string;
+      }>(
+        sql`SELECT indexname, indexdef FROM pg_indexes
+            WHERE schemaname = 'mailbox'
+              AND indexname LIKE 'mailbox_tenant_id_principal_id_%_idx'
+              AND indexdef LIKE '%WHERE%'
+            ORDER BY indexname`,
+      );
+      const byName = new Map(rows.map((r) => [r.indexname, r.indexdef]));
+      expect([...byName.keys()]).toEqual([
+        "mailbox_tenant_id_principal_id_archived_at_idx",
+        "mailbox_tenant_id_principal_id_trashed_at_idx",
+        "mailbox_tenant_id_principal_id_unread_idx",
+      ]);
+      for (const def of byName.values()) {
+        expect(def).toContain("(tenant_id, principal_id)");
+      }
+      expect(
+        byName.get("mailbox_tenant_id_principal_id_archived_at_idx"),
+      ).toContain("archived_at IS NOT NULL) AND (trashed_at IS NULL");
+      expect(
+        byName.get("mailbox_tenant_id_principal_id_trashed_at_idx"),
+      ).toContain("trashed_at IS NOT NULL");
+      expect(
+        byName.get("mailbox_tenant_id_principal_id_unread_idx"),
+      ).toContain(
+        "read_at IS NULL) AND (archived_at IS NULL) AND (trashed_at IS NULL",
+      );
+    });
+  });
+
+  // The split gives the archived/trash views two possible plans, and which one
+  // wins is a question about the DATA, not about the schema: drive from the
+  // mail keyset (ordering free, but scan until 51 archived messages turn up) or
+  // drive from the mailbox partial index (enumerate the whole view, then sort
+  // it). Both cases below are seeded and asserted rather than assumed.
+  async function seedViewPlan(
+    db: ReturnType<typeof handle>["db"],
+    archivedEvery: number,
+  ) {
+    await seedScope(db, "acme", "user-1");
+    await db.execute(sql`
+      INSERT INTO "mailbox"."principal_mail"
+        ("tenant_id","principal_id","address","direction","raw","created_at")
+      SELECT 'acme','user-1','user-1@acme.example','inbound','\\x00'::bytea,
+             now() - (g || ' seconds')::interval
+      FROM generate_series(1, 20000) g
+    `);
+    // A read mailbox: every message has been opened, so every one has a
+    // management row, and only every `archivedEvery`-th is archived. That is
+    // what makes the archived view SPARSE within a large `mailbox` rather than
+    // simply small — the case where a partial index earns its keep.
+    await db.execute(sql`
+      INSERT INTO "mailbox"."mailbox" ("id","tenant_id","principal_id","read_at","archived_at")
+      SELECT "id", "tenant_id", "principal_id", now(),
+             CASE WHEN m.n % ${sql.raw(String(archivedEvery))} = 0 THEN now() END
+        FROM (SELECT *, row_number() OVER (ORDER BY "created_at") AS n
+                FROM "mailbox"."principal_mail") m
+    `);
+    await db.execute(sql`ANALYZE "mailbox"."principal_mail"`);
+    await db.execute(sql`ANALYZE "mailbox"."mailbox"`);
+    const plan = await db.execute<{ "QUERY PLAN": string }>(sql`
+      EXPLAIN (ANALYZE)
+      SELECT pm."id" FROM "mailbox"."principal_mail" pm
+        LEFT JOIN "mailbox"."mailbox" mb ON mb."id" = pm."id"
+      WHERE pm."tenant_id" = 'acme' AND pm."principal_id" = 'user-1'
+        AND pm."direction" = 'inbound'
+        AND mb."archived_at" IS NOT NULL AND mb."trashed_at" IS NULL
+      ORDER BY pm."created_at" DESC, pm."id" DESC
+      LIMIT 51
+    `);
+    return plan.map((r) => r["QUERY PLAN"]).join("\n");
+  }
+
+  test("a dense archived view pages off the mail keyset with no sort", async () => {
+    await fromEmpty(async ({ db }) => {
+      await runMailboxMigrations(db);
+      // One in twenty archived: a page of 51 is reachable within ~1000 mail
+      // rows, so the planner takes the ordering for free rather than sorting.
+      const text = await seedViewPlan(db, 20);
+      expect(text).toContain(
+        "principal_mail_tenant_id_principal_id_created_at_id_idx",
+      );
+      expect(text).not.toContain("Sort Method");
+    });
+  });
+
+  test("a sparse archived view pages off the mailbox partial index", async () => {
+    await fromEmpty(async ({ db }) => {
+      await runMailboxMigrations(db);
+      // One in four thousand archived: walking the mail keyset would scan the
+      // principal's whole history to fill one page, so the partial index —
+      // which enumerates the entire view directly — wins even with the sort.
+      const text = await seedViewPlan(db, 4000);
+      expect(text).toContain("mailbox_tenant_id_principal_id_archived_at_idx");
+    });
+  });
+
+  test("is idempotent: running twice does not error and applies once", async () => {
+    await fromEmpty(async ({ db }) => {
+      await runMailboxMigrations(db);
+      await runMailboxMigrations(db);
+
+      const rows = await db.execute<{ id: string; count: string }>(
+        sql`SELECT "id", count(*)::text AS count
+            FROM "mailbox"."corbits_mailbox_migrations" GROUP BY "id" ORDER BY "id"`,
+      );
+      expect(rows.map((r) => [r.id, r.count])).toEqual([
+        ["0001_principal_mailbox", "1"],
+      ]);
+    });
+  });
+
+  test("records a checksum per applied migration", async () => {
+    await fromEmpty(async ({ db }) => {
+      await runMailboxMigrations(db);
+      const rows = await db.execute<{ id: string; checksum: string | null }>(
+        sql`SELECT "id", "checksum" FROM "mailbox"."corbits_mailbox_migrations"`,
+      );
+      expect(rows.length).toBe(MIGRATIONS.length);
+      for (const row of rows) {
+        expect(row.checksum).toMatch(/^[0-9a-f]{64}$/);
+      }
+    });
+  });
+
+  test("refuses to boot when a shipped migration was edited after it applied", async () => {
+    await fromEmpty(async ({ db }) => {
+      await runMailboxMigrations(db);
+      // Stand in for someone editing MIGRATIONS[0].statements in place: the
+      // ledger now disagrees with the code, which is exactly the divergence
+      // that used to be invisible — old environments skip the edit forever
+      // while fresh ones get the new DDL.
+      await db.execute(
+        sql`UPDATE "mailbox"."corbits_mailbox_migrations"
+            SET "checksum" = 'deadbeef' WHERE "id" = '0001_principal_mailbox'`,
+      );
+      // A NAMED error, matching both sibling cores: a host catching this to
+      // tell "someone edited a migration" apart from "the database is down"
+      // should not have to regex-match a message string.
+      await expect(runMailboxMigrations(db)).rejects.toThrow(
+        MigrationChecksumError,
+      );
+      await expect(runMailboxMigrations(db)).rejects.toThrow(
+        /has changed since it was applied/,
+      );
+    });
+  });
+
+  test("has no nullable-checksum escape hatch in the ledger", async () => {
+    await fromEmpty(async ({ db }) => {
+      // The adopt-silently branch for "ledgers written before checksums
+      // existed" is gone: 0.1.0 is the first public release, so no such ledger
+      // can exist, and while the column was nullable the runner would accept
+      // exactly one edit to a shipped migration without complaint. NOT NULL is
+      // what makes the documented immutability guarantee unconditional.
+      await runMailboxMigrations(db);
+      // Drizzle wraps driver errors, so the NOT NULL violation is on `.cause`,
+      // not on the message `toThrow` would match.
+      const failure = await db
+        .execute(
+          sql`UPDATE "mailbox"."corbits_mailbox_migrations" SET "checksum" = NULL`,
+        )
+        .then(
+          () => null,
+          (error: unknown) => error,
+        );
+      expect(failure).not.toBeNull();
+      expect(String((failure as { cause?: unknown }).cause)).toMatch(
+        /null value in column "checksum"/,
+      );
+    });
+  });
+
+  test("creates its own ledger table distinct from any host table", async () => {
+    await fromEmpty(async ({ db }) => {
+      await runMailboxMigrations(db);
+      const rows = await db.execute<{ exists: boolean }>(
+        sql`SELECT EXISTS (SELECT 1 FROM information_schema.tables
+            WHERE table_schema = 'mailbox'
+            AND table_name = 'corbits_mailbox_migrations') AS exists`,
+      );
+      expect(rows[0]?.exists).toBe(true);
+    });
+  });
+
+  test("principal_mail's FKs are exactly the control-plane pair, both CASCADE", async () => {
+    // The FKs are the reason there is no separate-database mode: a row can
+    // only belong to a tenant and principal the host knows, and offboarding
+    // either carries the mailbox rows out with it.
+    await fromEmpty(async ({ db }) => {
+      await runMailboxMigrations(db);
+      const rows = await db.execute<{
+        constraint_name: string;
+        table_name: string;
+        delete_rule: string;
+      }>(sql`
+        SELECT tc.constraint_name, ccu.table_name, rc.delete_rule
+          FROM information_schema.table_constraints tc
+          JOIN information_schema.referential_constraints rc
+            ON rc.constraint_name = tc.constraint_name
+           AND rc.constraint_schema = tc.table_schema
+          JOIN information_schema.constraint_column_usage ccu
+            ON ccu.constraint_name = tc.constraint_name
+           AND ccu.constraint_schema = tc.table_schema
+         WHERE tc.table_schema = 'mailbox' AND tc.table_name = 'principal_mail'
+           AND tc.constraint_type = 'FOREIGN KEY'
+         ORDER BY tc.constraint_name
+      `);
+      expect(
+        rows.map((r) => [r.constraint_name, r.table_name, r.delete_rule]),
+      ).toEqual([
+        ["principal_mail_principal_id_principal_id_fk", "principal", "CASCADE"],
+        ["principal_mail_tenant_id_tenant_id_fk", "tenant", "CASCADE"],
+      ]);
+    });
+  });
+
+  test("mailbox FKs: its own mail plane plus the same control-plane pair", async () => {
+    // The key to `principal_mail` is what makes a message and its triage state
+    // one lifecycle; the scope FKs mirror the mail plane's for the same reason
+    // they exist there.
+    await fromEmpty(async ({ db }) => {
+      await runMailboxMigrations(db);
+      const rows = await db.execute<{
+        constraint_name: string;
+        table_name: string;
+        delete_rule: string;
+      }>(sql`
+        SELECT tc.constraint_name, ccu.table_name, rc.delete_rule
+          FROM information_schema.table_constraints tc
+          JOIN information_schema.referential_constraints rc
+            ON rc.constraint_name = tc.constraint_name
+           AND rc.constraint_schema = tc.table_schema
+          JOIN information_schema.constraint_column_usage ccu
+            ON ccu.constraint_name = tc.constraint_name
+           AND ccu.constraint_schema = tc.table_schema
+         WHERE tc.table_schema = 'mailbox' AND tc.table_name = 'mailbox'
+           AND tc.constraint_type = 'FOREIGN KEY'
+         ORDER BY tc.constraint_name
+      `);
+      expect(
+        rows.map((r) => [r.constraint_name, r.table_name, r.delete_rule]),
+      ).toEqual([
+        ["mailbox_id_fkey", "principal_mail", "CASCADE"],
+        ["mailbox_principal_id_principal_id_fk", "principal", "CASCADE"],
+        ["mailbox_tenant_id_tenant_id_fk", "tenant", "CASCADE"],
+      ]);
+    });
+  });
+
+  test("builds into the mailbox schema regardless of the session search_path", async () => {
+    // The DDL is schema-qualified end to end, so a host whose connection
+    // selects some other search_path still gets (and finds) this package's
+    // tables in "mailbox", never a copy in whatever schema is current.
+    await dropMailboxSchema();
+    await admin.unsafe(`DROP SCHEMA IF EXISTS mbx_elsewhere CASCADE`);
+    await admin.unsafe(`CREATE SCHEMA mbx_elsewhere`);
+    const client = postgres(TEST_DATABASE_URL, {
+      onnotice: () => {},
+      connection: { search_path: "mbx_elsewhere" },
+    });
+    try {
+      await runMailboxMigrations(drizzle(client));
+      const found = await admin.unsafe(
+        `SELECT to_regclass('mailbox.principal_mail') AS t,
+                to_regclass('mailbox.mailbox') AS m,
+                to_regclass('mailbox.corbits_mailbox_migrations') AS l,
+                to_regclass('mbx_elsewhere.principal_mail') AS stray`,
+      );
+      expect(found[0]!.t).not.toBeNull();
+      expect(found[0]!.m).not.toBeNull();
+      expect(found[0]!.l).not.toBeNull();
+      expect(found[0]!.stray).toBeNull();
+    } finally {
+      await client.end();
+      await admin.unsafe(`DROP SCHEMA IF EXISTS mbx_elsewhere CASCADE`);
+    }
+  });
+
+  test("closing the handle it opened drains the pool", async () => {
+    const { db, close } = createMailboxDb(TEST_DATABASE_URL);
+    await runMailboxMigrations(db);
+    await close();
+    // A closed pool refuses further work rather than hanging the process.
+    expect(async () => {
+      await db.execute(sql`SELECT 1`);
+    }).toThrow();
+  });
+});
+
+describe("runMailboxMigrations under concurrent cold start", () => {
+  // `CREATE TABLE IF NOT EXISTS` is NOT race-safe: the existence check and the
+  // pg_type insert are not atomic, so without an advisory lock the losers crash
+  // with 23505 on (typname, typnamespace). Pre-creating the ledger only moves
+  // the collision to the principal_mailbox DDL.
+  test("four instances booting at once all succeed", async () => {
+    await dropMailboxSchema();
+    const runners = Array.from({ length: 4 }, () => handle());
+    const results = await Promise.allSettled(
+      runners.map((r) => runMailboxMigrations(r.db)),
+    );
+    await Promise.all(runners.map((r) => r.client.end()));
+
+    const failures = results.flatMap((r) =>
+      r.status === "rejected" ? [String((r.reason as Error).message)] : [],
+    );
+    expect(failures).toEqual([]);
+
+    const ledger = await admin.unsafe(
+      `SELECT id FROM mailbox.corbits_mailbox_migrations ORDER BY id`,
+    );
+    expect(ledger.map((r) => r.id)).toEqual(["0001_principal_mailbox"]);
+  });
+
+  test("a second wave against an already-migrated schema is a no-op for all", async () => {
+    await dropMailboxSchema();
+    const first = handle();
+    await runMailboxMigrations(first.db);
+    await first.client.end();
+
+    const runners = Array.from({ length: 3 }, () => handle());
+    const results = await Promise.allSettled(
+      runners.map((r) => runMailboxMigrations(r.db)),
+    );
+    await Promise.all(runners.map((r) => r.client.end()));
+    expect(results.every((r) => r.status === "fulfilled")).toBe(true);
+  });
+});

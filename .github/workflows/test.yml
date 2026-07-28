@@ -1,0 +1,69 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: mailbox_core
+        ports: ["5433:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      MAILBOX_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5433/mailbox_core
+      MAILBOX_DATABASE_URL: postgres://postgres:postgres@localhost:5433/mailbox_core
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - run: bun install --frozen-lockfile
+
+      - name: typecheck
+        run: bun run typecheck
+
+      - name: unit + integration tests
+        run: bun run --cwd packages/mailbox test:coverage
+
+      # Emits dist/, which is also what the reference host resolves through —
+      # so this proves the published artifact, not just the sources.
+      - name: build
+        run: bun run build
+
+      - name: reference-host acceptance
+        run: bun test --cwd examples/reference-host
+
+      # A consumer on plain Node must be able to install and import the
+      # tarball; Node cannot strip types, so a src-pointing manifest would die
+      # here rather than after publish.
+      - name: node consumer smoke test
+        run: |
+          set -euo pipefail
+          TARBALL="$(cd packages/mailbox && npm pack --silent)"
+          TARBALL="$PWD/packages/mailbox/$TARBALL"
+          mkdir -p "$RUNNER_TEMP/consumer" && cd "$RUNNER_TEMP/consumer"
+          npm init -y >/dev/null && npm pkg set type=module >/dev/null
+          npm install "$TARBALL"
+          node -e '
+            import("@corbits/mailbox").then((m) => {
+              for (const name of ["mountMailbox", "runMailboxMigrations"]) {
+                if (typeof m[name] !== "function") throw new Error(`missing export: ${name}`);
+              }
+              console.log("node consumer ok");
+            });
+          '
