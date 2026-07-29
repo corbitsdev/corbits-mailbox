@@ -136,4 +136,22 @@ describe("SSE heartbeat", () => {
     );
     expect(text).toBe("");
   });
+
+  test("mount refuses a non-positive or non-finite heartbeatIntervalMs", async () => {
+    // Zero/negative would spin a tight sleep/write loop per open connection;
+    // NaN/Infinity are the same class of host misconfiguration. Fail at mount,
+    // not on the first request, same as a bad vocabulary.
+    const db = await withTestDb();
+    const base = {
+      vocabulary: TEST_VOCABULARY,
+      db,
+      bus: createInMemoryMailboxEventBus(),
+      resolvePrincipal: () => SCOPE,
+    };
+    for (const heartbeatIntervalMs of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() =>
+        mountMailbox(new Hono(), { ...base, heartbeatIntervalMs }),
+      ).toThrow(RangeError);
+    }
+  });
 });

@@ -159,4 +159,46 @@ describe("SSE stream", () => {
     // nobody and, more to the point, throws nothing.
     bus.publish(scope, { type: "mailbox", id: "after-close" });
   });
+
+  test("a write failure while draining does not become an unhandled rejection", async () => {
+    // drain() is fired with `void`; a rejected writeSSE must be caught inside
+    // so it closes the stream cleanly instead of escaping as an unhandled
+    // rejection that the process (or a host) has to notice later.
+    const db = await withTestDb();
+    await seedScope(db, "t1", "p1");
+    const bus = createInMemoryMailboxEventBus();
+    const scope = { tenantId: "t1", principalId: "p1" };
+    const app = mountMailbox(new Hono(), {
+      vocabulary: TEST_VOCABULARY,
+      db,
+      bus,
+      resolvePrincipal: () => scope,
+      heartbeatIntervalMs: 50,
+    });
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown) => {
+      rejections.push(reason);
+    };
+    process.on("unhandledRejection", onRejection);
+    try {
+      const res = await app.request("/me/inbox/events");
+      expect(res.status).toBe(200);
+      const reader = res.body!.getReader();
+      await new Promise((r) => setTimeout(r, 50));
+      // Drop the client mid-stream, then publish so drain attempts writes into
+      // a socket that is already gone.
+      await reader.cancel();
+      for (let i = 0; i < 20; i++) {
+        bus.publish(scope, { type: "mailbox", id: `after-cancel-${i}` });
+      }
+      await new Promise((r) => setTimeout(r, 200));
+      expect(rejections).toEqual([]);
+      // Publish after the failure path must still be a no-op, not a throw.
+      expect(() =>
+        bus.publish(scope, { type: "mailbox", id: "still-safe" }),
+      ).not.toThrow();
+    } finally {
+      process.off("unhandledRejection", onRejection);
+    }
+  });
 });

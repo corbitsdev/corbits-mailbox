@@ -23,6 +23,12 @@ export type MailboxEventScope = { tenantId: string; principalId: string };
  * for a (tenant, principal) pair receives every publish to that pair;
  * unsubscribing one connection never affects another connection for the
  * same or any other mailbox (isolation).
+ *
+ * Host buses should isolate listener failures the same way the in-memory
+ * default does: one throwing subscriber must not prevent remaining
+ * subscribers for that scope from receiving the event. Events are
+ * best-effort nudges, so a per-listener failure is swallowable; starving
+ * healthy connections is not.
  */
 export interface MailboxEventBus {
   publish(scope: MailboxEventScope, event: MailboxEvent): void;
@@ -61,6 +67,11 @@ function scopeKey(scope: MailboxEventScope): string {
  * In-memory, single-process fan-out. Good enough as a host's zero-config
  * default; a host running multiple replicas should supply its own bus
  * backed by a shared broker instead.
+ *
+ * Publish isolates per listener: a throw from one subscriber is swallowed
+ * so later subscribers for the same scope still receive the event. That
+ * matches the best-effort nudge contract — a bad SSE handler must not
+ * starve every other open tab for the mailbox.
  */
 export function createInMemoryMailboxEventBus(): MailboxEventBus {
   const listeners = new Map<string, Set<Listener>>();
@@ -69,7 +80,13 @@ export function createInMemoryMailboxEventBus(): MailboxEventBus {
     publish(scope, event) {
       const set = listeners.get(scopeKey(scope));
       if (!set) return;
-      for (const listener of set) listener(event);
+      for (const listener of set) {
+        try {
+          listener(event);
+        } catch {
+          // Best-effort fan-out: one bad listener must not skip the rest.
+        }
+      }
     },
     subscribe(scope, listener) {
       const key = scopeKey(scope);
