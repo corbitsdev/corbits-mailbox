@@ -470,10 +470,12 @@ export function mountMailbox<E extends Env>(
               });
             }
           } catch {
-            // writeSSE rejected (client gone, socket error). Mark closed so
-            // the heartbeat loop exits and no further events queue; do not
-            // rethrow — drain is launched with `void` and a rejection would
-            // otherwise surface as an unhandled promise rejection.
+            // Defensive: absorb writeSSE rejection so a void-launched drain
+            // never becomes an unhandled rejection. Hono's StreamingApi.write
+            // currently swallows writer errors (real disconnect is
+            // stream.aborted / onAbort); this catch still matters if writeSSE
+            // rejects for any other reason or Hono starts propagating.
+            // Mark closed so the heartbeat loop exits and no further events queue.
             closeStream();
           } finally {
             draining = false;
