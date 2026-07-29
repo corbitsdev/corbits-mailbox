@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test } from "bun:test";
-import { sql } from "drizzle-orm";
+import { sql, getTableColumns } from "drizzle-orm";
 import { writeMailboxMessage } from "./write.js";
 import { listUserMailbox, getMailboxMessage } from "./read.js";
 import { trashMailboxMessage } from "./mutations.js";
@@ -261,8 +261,10 @@ describe("getMailboxMessage", () => {
   });
 
   test("list projects from cached columns without needing raw", async () => {
-    // Prove listUserMailbox does not select/decode principal_mail.raw: a
-    // multi-megabyte unparseable frame still lists via subject/from_address.
+    // Behaviour under a multi-megabyte unparseable frame: list still returns
+    // subject/from from caches and never surfaces a snippet. (Select-shape
+    // omit of `raw` is asserted separately below — a null decode would make
+    // these same expectations pass even if raw were still selected.)
     const written = await writeMailboxMessage(db, {
       tenantId: "t1",
       principalId: "p1",
@@ -290,6 +292,18 @@ describe("getMailboxMessage", () => {
     expect(item?.subject).toBe("Cached subject");
     expect(item?.from).toBe("cached@t1.example");
     expect(item?.snippet).toBeUndefined();
+  });
+
+  test("list select shape omits principal_mail.raw", () => {
+    // Mirrors PRINCIPAL_MAIL_LIST_COLUMNS in read.ts: every column except raw.
+    // listUserMailbox spreads that object into .select({...}).
+    const { raw, ...listColumns } = getTableColumns(principalMail);
+    expect(raw).toBeDefined();
+    expect(Object.keys(listColumns)).not.toContain("raw");
+    // Sanity: list still projects the denormalized fields it needs.
+    expect(Object.keys(listColumns)).toEqual(
+      expect.arrayContaining(["subject", "fromAddress", "id", "createdAt"]),
+    );
   });
 
   test("returns null for a message outside the caller's scope", async () => {
