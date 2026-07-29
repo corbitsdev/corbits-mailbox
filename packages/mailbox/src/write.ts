@@ -207,10 +207,17 @@ export async function writeMailboxMessage(
  * underlying id never collide on one row: an approval gate (`gate:<id>`) and
  * the run it belongs to (`run:<id>`) each get their own mailbox message even
  * when `<id>` is identical.
+ *
+ * Inbox keys are length-prefixed (`inbox:${source.length}:${source}:${externalId}`)
+ * so the encoding is injective over the (source, externalId) pair — (`a:b`,`c`)
+ * and (`a`,`b:c`) never share a key. (A NUL-join would also be injective, but
+ * Postgres text rejects U+0000.) Pre-upgrade `inbox:<source>:<externalId>` keys
+ * will not dedupe against the new encoding — no migration is performed;
+ * redelivery after upgrade may insert a second row.
  */
 export const mailboxKey = {
   inbox: (source: string, externalId: string) =>
-    `inbox:${source}:${externalId}`,
+    `inbox:${source.length}:${source}:${externalId}`,
   gate: (gateId: string) => `gate:${gateId}`,
   run: (runId: string) => `run:${runId}`,
 } as const;
@@ -245,9 +252,10 @@ export type DeliveredInboxItem = { messageKey: string; id: string | null };
 /**
  * Shared delivery seam for ingress adapters (mail connectors, webhooks,
  * anything durable-fanning-out into principal mailboxes). Dedupe key is
- * `inbox:<source>:<externalId>` — the same external item re-delivered by a
- * retried adapter never writes twice. Triage logic itself is NOT this
- * package's concern: `enqueue`, if given, is called and nothing more.
+ * `mailboxKey.inbox(source, externalId)` (length-prefixed; injective over
+ * the pair) — the same external item re-delivered by a retried adapter never
+ * writes twice. Triage logic itself is NOT this package's concern:
+ * `enqueue`, if given, is called and nothing more.
  *
  * Throws `RangeError` on a blank tenantId or principalId anywhere in the batch,
  * checked for EVERY item before the first row is written. `writeMailboxMessage`
