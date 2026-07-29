@@ -81,7 +81,7 @@ mounting more than one passes the same function to each.
 | File | Role |
 | --- | --- |
 | `mount.ts` | HTTP surface. Parsing, validation, status codes, SSE. No SQL. |
-| `read.ts` | List and detail projection, keyset paging, frame decoding, snippets. |
+| `read.ts` | List (cached columns, no `raw`) and detail (frame-decoded) projection, keyset paging, snippets on detail. |
 | `mutations.ts` | Read/unread, archive, trash, restore, bulk, enrich, assign. |
 | `write.ts` | `writeMailboxMessage` / `deliverInboxItems` — the host-facing write API. |
 | `persist.ts` | The transport dual-write wrapper and the `authorizeSender` seam. |
@@ -191,11 +191,12 @@ the session's TimeZone, so on a non-UTC host the same cursor silently seeks to
 a different row. `src/read-non-utc-session.test.ts` pins a non-UTC session for
 exactly that reason.
 
-**The raw frame is the authority.** `raw bytea` holds the complete MIME frame;
-`subject` and `from_address` are caches parsed once at write time. A frame the
-MIME parser rejects still persists — detail reads degrade to an empty body
-rather than a 500 — and improving the parser improves *existing* rows, because
-nothing was thrown away at write time.
+**The raw frame is the authority on detail.** `raw bytea` holds the complete
+MIME frame; `subject` and `from_address` are caches parsed once at write time.
+List reads those caches only (no `raw`, no decode, no snippet). A frame the MIME
+parser rejects still persists — detail reads degrade to an empty body rather
+than a 500 — and improving the parser improves *existing* rows, because nothing
+was thrown away at write time.
 
 **Dedupe is partial on purpose.** The unique index on
 `(tenant_id, principal_id, message_key)` is `WHERE message_key IS NOT NULL`.

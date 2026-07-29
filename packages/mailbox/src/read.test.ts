@@ -244,9 +244,12 @@ describe("getMailboxMessage", () => {
     });
     const item = page.items.find((m) => m.id === written!.id);
     // List never decodes the frame, so no snippet and no body.
+    // messageId falls back to the row id (no Message-ID header without raw).
     expect(item?.snippet).toBeUndefined();
     expect(item?.subject).toBe("Long");
     expect(item?.from).toBe("a@t1.example");
+    expect(item?.messageId).toBe(written!.id);
+    expect(item?.to).toEqual(["p1@t1.example"]);
 
     const detail = await getMailboxMessage(db, {
       tenantId: "t1",

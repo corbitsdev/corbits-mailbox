@@ -12,9 +12,12 @@ Postgres schema in the host's database — and the `/api/me/inbox*` routes:
   plus triage columns), created **eagerly with its message in one transaction**. An
   all-NULL row means delivered-and-untouched.
 
-The stored RFC 2822 frame is authoritative on read: subject, sender, recipients and
-snippet are re-derived from it, with the cached columns as fallback, so a malformed
-frame degrades to a partial message rather than a failed request.
+**Detail is frame-authoritative; list is not.** `GET …/inbox/:id` re-derives subject,
+sender, recipients, date, Message-ID and snippet from the stored RFC 2822 frame
+(cached columns as fallback), so a malformed frame degrades to a partial message rather
+than a failed request. **List** never selects `raw` and never decodes: it projects
+`subject`/`from` from the write-time cached columns, omits `snippet`, sets
+`date` from `created_at`, `messageId` to the row id, and `to` to `[address]`.
 
 See [ARCHITECTURE.md](../../ARCHITECTURE.md) for the data model and the design
 rationale behind it.
@@ -233,13 +236,14 @@ only copy of the frame held here.
 `MailboxRefSchema` are real arktype schemas, so a consumer decoding this package's JSON
 validates rather than casts.
 
-- **`from` is always present** — the header → cached column → default chain ends in
-  `""`, so a client never branches on its absence. `subject` has no such default: an
-  empty subject is distinct from no subject.
-- **Body and snippet come from the frame, multipart included.** The read path walks MIME
-  path `1` (or `1.1` when part 1 is itself multipart) via `@intx/mime`, rather than
-  returning the MIME envelope verbatim. An unwalkable frame yields an empty body, never
-  a 500.
+- **`from` is always present** — on detail the header → cached column → default chain
+  ends in `""`; on list only the cached column → default chain applies. Either way a
+  client never branches on its absence. `subject` has no such default: an empty subject
+  is distinct from no subject.
+- **Body and snippet come from the frame on detail only, multipart included.** Detail
+  walks MIME path `1` (or `1.1` when part 1 is itself multipart) via `@intx/mime`,
+  rather than returning the MIME envelope verbatim. An unwalkable frame yields an empty
+  body, never a 500. List omits `snippet` entirely and never loads `raw`.
 - **Message-ID fallback is `hub.invalid`** (`MESSAGE_ID_FALLBACK_DOMAIN`) — RFC 2606
   reserved, guaranteed never to resolve, so a malformed sender cannot mint a routable-
   looking id. `generateMailboxMessageId` is exported.

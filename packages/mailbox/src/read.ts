@@ -480,6 +480,15 @@ const STATE_COLUMNS = {
   assignee: mailbox.assignee,
 } as const;
 
+/**
+ * Every `principal_mail` column except `raw`. List never loads the MIME frame;
+ * subject/from live in the cached columns, and list does not surface body or
+ * snippet. Derived from the table object so a new non-raw column is selected
+ * automatically.
+ */
+const { raw: _rawNotOnList, ...PRINCIPAL_MAIL_LIST_COLUMNS } =
+  getTableColumns(principalMail);
+
 export type MailboxScope = {
   tenantId: string;
   principalId: string;
@@ -567,22 +576,11 @@ export async function listUserMailbox(
           desc(principalMail.id),
         ]
       : [desc(principalMail.createdAt), desc(principalMail.id)];
-  // Explicit columns — every principal_mail column EXCEPT `raw`. Loading the
-  // full MIME frame on every list row was the dominant cost of inbox reads;
-  // subject/from already live in cached columns, and list does not surface a
-  // body or snippet.
+  // PRINCIPAL_MAIL_LIST_COLUMNS omits `raw` — loading the full MIME frame on
+  // every list row was the dominant cost of inbox reads.
   const rows = await db
     .select({
-      id: principalMail.id,
-      tenantId: principalMail.tenantId,
-      principalId: principalMail.principalId,
-      address: principalMail.address,
-      direction: principalMail.direction,
-      subject: principalMail.subject,
-      fromAddress: principalMail.fromAddress,
-      messageKey: principalMail.messageKey,
-      refs: principalMail.refs,
-      createdAt: principalMail.createdAt,
+      ...PRINCIPAL_MAIL_LIST_COLUMNS,
       ...STATE_COLUMNS,
       // Postgres renders the timestamp; a JS Date would drop the microseconds.
       // Formatted explicitly rather than via ::text, whose output depends on
