@@ -224,14 +224,15 @@ describe("getMailboxMessage", () => {
     expect(message?.refs).toBeUndefined();
   });
 
-  test("snippet is truncated to 160 chars", async () => {
+  test("detail still loads the full frame body (list does not)", async () => {
+    const body = "x".repeat(500);
     const written = await writeMailboxMessage(db, {
       tenantId: "t1",
       principalId: "p1",
       address: "p1@t1.example",
       fromAddress: "a@t1.example",
       subject: "Long",
-      body: "x".repeat(500),
+      body,
       messageKey: "long-body",
     });
     const page = await listUserMailbox(db, {
@@ -242,7 +243,50 @@ describe("getMailboxMessage", () => {
       view: "all",
     });
     const item = page.items.find((m) => m.id === written!.id);
-    expect(item?.snippet?.length).toBe(160);
+    // List never decodes the frame, so no snippet and no body.
+    expect(item?.snippet).toBeUndefined();
+    expect(item?.subject).toBe("Long");
+    expect(item?.from).toBe("a@t1.example");
+
+    const detail = await getMailboxMessage(db, {
+      tenantId: "t1",
+      principalId: "p1",
+      id: written!.id,
+    });
+    expect(detail?.body).toBe(body);
+    expect(detail?.snippet?.length).toBe(160);
+  });
+
+  test("list projects from cached columns without needing raw", async () => {
+    // Prove listUserMailbox does not select/decode principal_mail.raw: a
+    // multi-megabyte unparseable frame still lists via subject/from_address.
+    const written = await writeMailboxMessage(db, {
+      tenantId: "t1",
+      principalId: "p1",
+      address: "p1@t1.example",
+      fromAddress: "cached@t1.example",
+      subject: "Cached subject",
+      body: "tiny",
+      messageKey: "large-raw",
+    });
+    const huge = Buffer.alloc(2 * 1024 * 1024, 0xff);
+    await db
+      .update(principalMail)
+      .set({ raw: huge })
+      .where(sql`${principalMail.id} = ${written!.id}`);
+
+    const page = await listUserMailbox(db, {
+      priorities: TEST_VOCABULARY.priorities,
+      tenantId: "t1",
+      principalId: "p1",
+      limit: 50,
+      view: "all",
+    });
+    const item = page.items.find((m) => m.id === written!.id);
+    expect(item).toBeDefined();
+    expect(item?.subject).toBe("Cached subject");
+    expect(item?.from).toBe("cached@t1.example");
+    expect(item?.snippet).toBeUndefined();
   });
 
   test("returns null for a message outside the caller's scope", async () => {

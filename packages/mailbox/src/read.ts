@@ -373,11 +373,17 @@ function readRowRefs(
   return parsed.length > 0 ? parsed : undefined;
 }
 
-// Raw frame is authoritative; for each field, fall back header-value ->
-// cached column -> default. Never throws — a malformed frame degrades to
-// the cached columns rather than failing the read.
+// On the detail path the raw frame is authoritative: for each field, fall
+// back header-value -> cached column -> default. On the list path `decoded`
+// is null (list never selects `principal_mail.raw`), so subject/from come
+// only from the cached columns and snippet is omitted. Never throws — a
+// malformed frame degrades to the cached columns rather than failing the read.
+//
+// `raw` is intentionally absent from the row type: list selects every
+// principal_mail column except it, and toMailboxMessage never needs it
+// (the caller decodes outside and threads the result through `decoded`).
 function toMailboxMessage(
-  row: MailboxJoinedRow,
+  row: Omit<MailboxJoinedRow, "raw">,
   decoded: DecodedFrame | null,
   dropped: DroppedRefs,
 ): MailboxMessage {
@@ -503,6 +509,10 @@ export type MailboxPage = {
  * List the caller's durable inbound mailbox, newest first, scoped to
  * (tenantId, principalId). Keyset pagination ordered createdAt DESC, id DESC;
  * fetches limit+1 rows to detect whether another page follows.
+ *
+ * Does NOT select `principal_mail.raw` and does NOT call `decodeMailFrame`.
+ * Subject/from come from the cached columns; snippet is omitted. Detail
+ * (`getMailboxMessage`) is the only path that loads the full MIME frame.
  */
 export async function listUserMailbox(
   db: MailboxDb,
@@ -557,9 +567,22 @@ export async function listUserMailbox(
           desc(principalMail.id),
         ]
       : [desc(principalMail.createdAt), desc(principalMail.id)];
+  // Explicit columns — every principal_mail column EXCEPT `raw`. Loading the
+  // full MIME frame on every list row was the dominant cost of inbox reads;
+  // subject/from already live in cached columns, and list does not surface a
+  // body or snippet.
   const rows = await db
     .select({
-      ...getTableColumns(principalMail),
+      id: principalMail.id,
+      tenantId: principalMail.tenantId,
+      principalId: principalMail.principalId,
+      address: principalMail.address,
+      direction: principalMail.direction,
+      subject: principalMail.subject,
+      fromAddress: principalMail.fromAddress,
+      messageKey: principalMail.messageKey,
+      refs: principalMail.refs,
+      createdAt: principalMail.createdAt,
       ...STATE_COLUMNS,
       // Postgres renders the timestamp; a JS Date would drop the microseconds.
       // Formatted explicitly rather than via ::text, whose output depends on
@@ -583,9 +606,7 @@ export async function listUserMailbox(
   const hasMore = rows.length > scope.limit;
   const pageRows = hasMore ? rows.slice(0, scope.limit) : rows;
   const dropped = newDroppedRefs();
-  const items = pageRows.map((row) =>
-    toMailboxMessage(row, decodeMailFrame(row.raw), dropped),
-  );
+  const items = pageRows.map((row) => toMailboxMessage(row, null, dropped));
   reportDroppedRefs(dropped);
   await applySenderDisplays(items, scope.tenantId, scope.resolveSenderDisplays);
   const page: MailboxPage = { items };

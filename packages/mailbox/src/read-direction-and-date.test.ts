@@ -123,13 +123,20 @@ describe("direction filtering", () => {
 });
 
 describe("date header -> createdAt fallback", () => {
-  async function dateOf(headers: string, createdAt: string): Promise<string> {
-    await insert({
+  async function insertDated(
+    headers: string,
+    createdAt: string,
+  ): Promise<string> {
+    return insert({
       direction: "inbound",
       headers,
       createdAt,
       subject: "S",
     });
+  }
+
+  async function listDate(headers: string, createdAt: string): Promise<string> {
+    await insertDated(headers, createdAt);
     const page = await listUserMailbox(db, {
       priorities: TEST_VOCABULARY.priorities,
       ...SCOPE,
@@ -139,23 +146,41 @@ describe("date header -> createdAt fallback", () => {
     return page.items[0]!.date;
   }
 
-  test("a valid Date header wins over created_at", async () => {
-    const date = await dateOf(
+  async function detailDate(
+    headers: string,
+    createdAt: string,
+  ): Promise<string> {
+    const id = await insertDated(headers, createdAt);
+    const detail = await getMailboxMessage(db, { ...SCOPE, id });
+    return detail!.date;
+  }
+
+  test("list uses created_at (never opens the frame for a Date header)", async () => {
+    // List no longer selects/decodes raw, so the Date header cannot win here.
+    const date = await listDate(
+      "From: a@b.c\r\nDate: Tue, 21 Jul 2026 09:30:00 +0000",
+      "2026-07-25T12:00:00Z",
+    );
+    expect(date).toBe("2026-07-25T12:00:00.000Z");
+  });
+
+  test("detail: a valid Date header wins over created_at", async () => {
+    const date = await detailDate(
       "From: a@b.c\r\nDate: Tue, 21 Jul 2026 09:30:00 +0000",
       "2026-07-25T12:00:00Z",
     );
     expect(date).toBe("2026-07-21T09:30:00.000Z");
   });
 
-  test("no Date header at all falls back to created_at", async () => {
-    const date = await dateOf("From: a@b.c", "2026-07-25T12:00:00Z");
+  test("detail: no Date header at all falls back to created_at", async () => {
+    const date = await detailDate("From: a@b.c", "2026-07-25T12:00:00Z");
     expect(date).toBe("2026-07-25T12:00:00.000Z");
   });
 
-  test("an UNPARSEABLE Date header falls back to created_at, not NaN", async () => {
+  test("detail: an UNPARSEABLE Date header falls back to created_at, not NaN", async () => {
     // The branch that had no coverage: `new Date(header)` yields Invalid Date,
     // whose toISOString() throws. Falling back is the only safe answer.
-    const date = await dateOf(
+    const date = await detailDate(
       "From: a@b.c\r\nDate: not a date at all",
       "2026-07-25T12:00:00Z",
     );
