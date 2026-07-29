@@ -9,6 +9,14 @@ always called out under their own heading.
 
 ## [Unreleased]
 
+### Security
+
+- Require `drizzle-orm` `>= 0.45.2` (peer and dev pins, plus a root
+  override) past [GHSA-gpj5-g38j-94v9](https://github.com/advisories/GHSA-gpj5-g38j-94v9)
+  — identifier SQL injection in `drizzle-orm` `<= 0.45.1`. Nested
+  `@intx/*` deps that still declare `^0.45.1` resolve to `0.45.2` via the
+  override.
+
 ## [0.1.0] — 2026-07-27
 
 Initial public release. Nothing has been published before this, so everything is
