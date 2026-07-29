@@ -156,8 +156,17 @@ collide (NUL-join is injective too, but Postgres text rejects U+0000). The
 `inbox:<source>:<externalId>` keys: length-prefix under `inbox:` alone would
 false-collide when a historical source was pure decimal. Pre-upgrade rows will
 not dedupe against the new encoding and cannot false-collide with it; no
-migration is performed. It validates the whole batch before the first write, so
-a bad item cannot leave the good ones half-delivered.
+migration is performed.
+
+After blank-scope prevalidation, **the entire batch commits in one transaction**
+(or none): a mid-batch FK / driver failure rolls back every new row from that
+call. Deduped keys (`id: null`) are no-ops inside the transaction. Bus publish
+and the optional host `enqueue` hook run only after commit, and only for newly
+inserted ids. `enqueue` is best-effort — a throw is logged with the message id
+and never rejects the delivery (same posture as bus publish). A host whose hook
+permanently fails on the first try must triage independently; retries of the
+same items will dedupe and skip enqueue.
+
 `writeMailboxMessage` inserts a single row. Idempotency keys are namespaced
 (`mailboxKey.inbox`/`.gate`/`.run`).
 

@@ -348,6 +348,200 @@ describe("deliverInboxItems", () => {
     );
     expect(enqueued.length).toBe(1);
   });
+
+  test("mid-batch FK failure rolls back every new row from the same call", async () => {
+    // One transaction for the whole batch: a later nonblank-but-unknown principal
+    // must not leave the earlier good item committed.
+    await expect(
+      deliverInboxItems(db, [
+        {
+          tenantId: "t1",
+          principalId: "p1",
+          address: "p1@t1.example",
+          fromAddress: "sender@ext.example",
+          subject: "Good",
+          body: "Body",
+          source: "gmail",
+          externalId: "atomic-good",
+        },
+        {
+          tenantId: "t1",
+          principalId: "nobody-seeded-this",
+          address: "ghost@t1.example",
+          fromAddress: "sender@ext.example",
+          subject: "Bad",
+          body: "Body",
+          source: "gmail",
+          externalId: "atomic-bad",
+        },
+      ]),
+    ).rejects.toThrow();
+
+    const surviving = await getMailboxMessage(db, {
+      tenantId: "t1",
+      principalId: "p1",
+      // If the good row had committed, its key would still be findable via a
+      // redelivery returning id=null. Redelivery must insert (id !== null).
+      id: "placeholder",
+    });
+    expect(surviving).toBeNull();
+
+    const redelivery = await deliverInboxItems(db, [
+      {
+        tenantId: "t1",
+        principalId: "p1",
+        address: "p1@t1.example",
+        fromAddress: "sender@ext.example",
+        subject: "Good",
+        body: "Body",
+        source: "gmail",
+        externalId: "atomic-good",
+      },
+    ]);
+    expect(redelivery[0]?.id).not.toBeNull();
+  });
+
+  test("deduped keys are no-ops inside the batch without breaking atomicity", async () => {
+    const item = {
+      tenantId: "t1",
+      principalId: "p1",
+      address: "p1@t1.example",
+      fromAddress: "sender@ext.example",
+      subject: "Already",
+      body: "Body",
+      source: "gmail",
+      externalId: "atomic-dedupe",
+    };
+    const [first] = await deliverInboxItems(db, [item]);
+    expect(first?.id).not.toBeNull();
+
+    // Replay of the first + a new sibling in one call: the dedupe is a no-op
+    // and the new row still commits.
+    const batch = await deliverInboxItems(db, [
+      item,
+      { ...item, externalId: "atomic-dedupe-sibling" },
+    ]);
+    expect(batch[0]?.id).toBeNull();
+    expect(batch[1]?.id).not.toBeNull();
+
+    // Same shape, but the new sibling is followed by an FK failure: the sibling
+    // must roll back; the already-committed first item stays.
+    await expect(
+      deliverInboxItems(db, [
+        item,
+        { ...item, externalId: "atomic-dedupe-should-roll-back" },
+        {
+          ...item,
+          principalId: "nobody-seeded-this",
+          address: "ghost@t1.example",
+          externalId: "atomic-dedupe-fk",
+        },
+      ]),
+    ).rejects.toThrow();
+
+    const rolledBack = await deliverInboxItems(db, [
+      { ...item, externalId: "atomic-dedupe-should-roll-back" },
+    ]);
+    expect(rolledBack[0]?.id).not.toBeNull();
+  });
+
+  test("enqueue throw does not reject delivery after commit", async () => {
+    const results = await deliverInboxItems(
+      db,
+      [
+        {
+          tenantId: "t1",
+          principalId: "p1",
+          address: "p1@t1.example",
+          fromAddress: "sender@ext.example",
+          subject: "Hook boom",
+          body: "Body",
+          source: "gmail",
+          externalId: "enqueue-throw",
+        },
+      ],
+      {
+        enqueue: () => {
+          throw new Error("hook boom");
+        },
+      },
+    );
+    expect(results[0]?.id).not.toBeNull();
+    const detail = await getMailboxMessage(db, {
+      tenantId: "t1",
+      principalId: "p1",
+      id: results[0]!.id!,
+    });
+    expect(detail).not.toBeNull();
+  });
+
+  test("deduped deliveries skip enqueue", async () => {
+    const item = {
+      tenantId: "t1",
+      principalId: "p1",
+      address: "p1@t1.example",
+      fromAddress: "sender@ext.example",
+      subject: "Once",
+      body: "Body",
+      source: "gmail",
+      externalId: "enqueue-skip-dedupe",
+    };
+    await deliverInboxItems(db, [item], {
+      enqueue: () => {
+        /* first delivery may call */
+      },
+    });
+    const enqueued: string[] = [];
+    const replay = await deliverInboxItems(db, [item], {
+      enqueue: ({ id }) => enqueued.push(id),
+    });
+    expect(replay[0]?.id).toBeNull();
+    expect(enqueued).toEqual([]);
+  });
+
+  test("bus publish and enqueue run only after a successful batch commit", async () => {
+    const bus = createInMemoryMailboxEventBus();
+    const received: string[] = [];
+    bus.subscribe({ tenantId: "t1", principalId: "p1" }, (event) =>
+      received.push(event.id),
+    );
+    const enqueued: string[] = [];
+
+    await expect(
+      deliverInboxItems(
+        db,
+        [
+          {
+            tenantId: "t1",
+            principalId: "p1",
+            address: "p1@t1.example",
+            fromAddress: "sender@ext.example",
+            subject: "Would publish",
+            body: "Body",
+            source: "gmail",
+            externalId: "post-commit-good",
+          },
+          {
+            tenantId: "t1",
+            principalId: "nobody-seeded-this",
+            address: "ghost@t1.example",
+            fromAddress: "sender@ext.example",
+            subject: "FK boom",
+            body: "Body",
+            source: "gmail",
+            externalId: "post-commit-bad",
+          },
+        ],
+        {
+          bus,
+          enqueue: ({ id }) => enqueued.push(id),
+        },
+      ),
+    ).rejects.toThrow();
+
+    expect(received).toEqual([]);
+    expect(enqueued).toEqual([]);
+  });
 });
 
 describe("mailboxKey namespaces", () => {
