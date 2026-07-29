@@ -1,7 +1,12 @@
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, spyOn } from "bun:test";
 import { Hono } from "hono";
+import { SSEStreamingApi } from "hono/streaming";
 import { mountMailbox, MAX_PENDING_SSE_EVENTS } from "./mount.js";
-import { createInMemoryMailboxEventBus } from "./bus.js";
+import {
+  createInMemoryMailboxEventBus,
+  type MailboxEventBus,
+  type MailboxEventScope,
+} from "./bus.js";
 import { withTestDb, seedScope, TEST_VOCABULARY } from "./test-helpers.js";
 import { writeMailboxMessage } from "./write.js";
 
@@ -164,17 +169,44 @@ describe("SSE stream", () => {
     // drain() is fired with `void`; a rejected writeSSE must be caught inside
     // so it closes the stream cleanly instead of escaping as an unhandled
     // rejection that the process (or a host) has to notice later.
+    //
+    // Hono's StreamingApi.write swallows writer errors, so cancelling the
+    // client never makes writeSSE reject in practice. Stub writeSSE to force
+    // the drain catch path and assert cleanup + unsubscribe.
     const db = await withTestDb();
     await seedScope(db, "t1", "p1");
-    const bus = createInMemoryMailboxEventBus();
     const scope = { tenantId: "t1", principalId: "p1" };
+    const realBus = createInMemoryMailboxEventBus();
+    let activeSubs = 0;
+    const bus: MailboxEventBus = {
+      publish(s, event) {
+        realBus.publish(s, event);
+      },
+      subscribe(s: MailboxEventScope, listener) {
+        activeSubs++;
+        const off = realBus.subscribe(s, listener);
+        let done = false;
+        return () => {
+          // mount unsubscribes from onAbort and finally; count once.
+          if (done) return;
+          done = true;
+          activeSubs--;
+          off();
+        };
+      },
+    };
     const app = mountMailbox(new Hono(), {
       vocabulary: TEST_VOCABULARY,
       db,
       bus,
       resolvePrincipal: () => scope,
+      // Short heartbeat so the loop notices `closed` and runs finally promptly.
       heartbeatIntervalMs: 50,
     });
+    const writeSSE = spyOn(
+      SSEStreamingApi.prototype,
+      "writeSSE",
+    ).mockRejectedValue(new Error("simulated socket death"));
     const rejections: unknown[] = [];
     const onRejection = (reason: unknown) => {
       rejections.push(reason);
@@ -184,21 +216,25 @@ describe("SSE stream", () => {
       const res = await app.request("/me/inbox/events");
       expect(res.status).toBe(200);
       const reader = res.body!.getReader();
+      // give the handler a tick to register its subscription
       await new Promise((r) => setTimeout(r, 50));
-      // Drop the client mid-stream, then publish so drain attempts writes into
-      // a socket that is already gone.
-      await reader.cancel();
-      for (let i = 0; i < 20; i++) {
-        bus.publish(scope, { type: "mailbox", id: `after-cancel-${i}` });
-      }
+      expect(activeSubs).toBe(1);
+      // One publish is enough: drain awaits writeSSE, which rejects.
+      bus.publish(scope, { type: "mailbox", id: "force-drain-reject" });
+      // Wait past one heartbeat so the loop exits on `closed` and finally
+      // unsubscribes.
       await new Promise((r) => setTimeout(r, 200));
+      expect(writeSSE).toHaveBeenCalled();
       expect(rejections).toEqual([]);
+      expect(activeSubs).toBe(0);
       // Publish after the failure path must still be a no-op, not a throw.
       expect(() =>
         bus.publish(scope, { type: "mailbox", id: "still-safe" }),
       ).not.toThrow();
+      await reader.cancel();
     } finally {
       process.off("unhandledRejection", onRejection);
+      writeSSE.mockRestore();
     }
   });
 });

@@ -80,6 +80,8 @@ export type MountMailboxOpts = {
    * SSE keep-alive period. Defaults to 25s — under the 30s idle timeout most
    * proxies default to. Overridable so a test can observe a heartbeat without
    * waiting 25 seconds for one; there is no other reason to change it.
+   * Non-finite or `<= 0` values throw `RangeError` at mount (same posture as a
+   * bad vocabulary), not on the first request.
    */
   heartbeatIntervalMs?: number;
 };
