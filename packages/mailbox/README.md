@@ -149,12 +149,15 @@ const delivered = await deliverInboxItems(db, items, { bus });
 ```
 
 `deliverInboxItems` is the ingress-adapter seam, deduping on
-`mailboxKey.inbox(source, externalId)` — a length-prefixed encoding
-(`inbox:<source.length>:<source>:<externalId>`) so pairs that contain `:` cannot
-collide (NUL-join is injective too, but Postgres text rejects U+0000).
-Pre-upgrade rows keyed as `inbox:<source>:<externalId>` will not dedupe against
-the new encoding; no migration is performed. It validates the whole batch before
-the first write, so a bad item cannot leave the good ones half-delivered.
+`mailboxKey.inbox(source, externalId)` — a versioned length-prefixed encoding
+(`inbox2:<source.length>:<source>:<externalId>`) so pairs that contain `:` cannot
+collide (NUL-join is injective too, but Postgres text rejects U+0000). The
+`inbox2:` prefix keeps the space disjoint from pre-upgrade
+`inbox:<source>:<externalId>` keys: length-prefix under `inbox:` alone would
+false-collide when a historical source was pure decimal. Pre-upgrade rows will
+not dedupe against the new encoding and cannot false-collide with it; no
+migration is performed. It validates the whole batch before the first write, so
+a bad item cannot leave the good ones half-delivered.
 `writeMailboxMessage` inserts a single row. Idempotency keys are namespaced
 (`mailboxKey.inbox`/`.gate`/`.run`).
 

@@ -208,16 +208,20 @@ export async function writeMailboxMessage(
  * the run it belongs to (`run:<id>`) each get their own mailbox message even
  * when `<id>` is identical.
  *
- * Inbox keys are length-prefixed (`inbox:${source.length}:${source}:${externalId}`)
- * so the encoding is injective over the (source, externalId) pair — (`a:b`,`c`)
- * and (`a`,`b:c`) never share a key. (A NUL-join would also be injective, but
- * Postgres text rejects U+0000.) Pre-upgrade `inbox:<source>:<externalId>` keys
- * will not dedupe against the new encoding — no migration is performed;
- * redelivery after upgrade may insert a second row.
+ * Inbox keys use a versioned length-prefixed encoding
+ * (`inbox2:${source.length}:${source}:${externalId}`) so the encoding is
+ * injective over the (source, externalId) pair — (`a:b`,`c`) and (`a`,`b:c`)
+ * never share a key. (A NUL-join would also be injective, but Postgres text
+ * rejects U+0000.) The `inbox2:` prefix keeps the space disjoint from pre-upgrade
+ * `inbox:<source>:<externalId>` keys: length-prefix alone would false-collide
+ * when a historical source was pure decimal (e.g. old `inbox:5:gmail:123` ==
+ * length-prefixed `inbox:5:gmail:123` for source=`gmail`). Pre-upgrade rows will
+ * not dedupe against the new encoding and cannot false-collide with it — no
+ * migration is performed; redelivery after upgrade may insert a second row.
  */
 export const mailboxKey = {
   inbox: (source: string, externalId: string) =>
-    `inbox:${source.length}:${source}:${externalId}`,
+    `inbox2:${source.length}:${source}:${externalId}`,
   gate: (gateId: string) => `gate:${gateId}`,
   run: (runId: string) => `run:${runId}`,
 } as const;
@@ -252,9 +256,9 @@ export type DeliveredInboxItem = { messageKey: string; id: string | null };
 /**
  * Shared delivery seam for ingress adapters (mail connectors, webhooks,
  * anything durable-fanning-out into principal mailboxes). Dedupe key is
- * `mailboxKey.inbox(source, externalId)` (length-prefixed; injective over
- * the pair) — the same external item re-delivered by a retried adapter never
- * writes twice. Triage logic itself is NOT this package's concern:
+ * `mailboxKey.inbox(source, externalId)` (versioned length-prefixed;
+ * injective over the pair) — the same external item re-delivered by a retried
+ * adapter never writes twice. Triage logic itself is NOT this package's concern:
  * `enqueue`, if given, is called and nothing more.
  *
  * Throws `RangeError` on a blank tenantId or principalId anywhere in the batch,

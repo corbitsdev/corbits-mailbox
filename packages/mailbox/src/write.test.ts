@@ -391,11 +391,14 @@ describe("mailboxKey namespaces", () => {
     expect(await writeMailboxMessage(db, args)).toBeNull();
   });
 
-  test("inbox keys are length-prefixed and injective over source/externalId", () => {
-    expect(mailboxKey.inbox("gmail", "123")).toBe("inbox:5:gmail:123");
-    expect(mailboxKey.inbox("a:b", "c")).toBe("inbox:3:a:b:c");
-    expect(mailboxKey.inbox("a", "b:c")).toBe("inbox:1:a:b:c");
+  test("inbox keys are versioned length-prefixed and injective over source/externalId", () => {
+    expect(mailboxKey.inbox("gmail", "123")).toBe("inbox2:5:gmail:123");
+    expect(mailboxKey.inbox("a:b", "c")).toBe("inbox2:3:a:b:c");
+    expect(mailboxKey.inbox("a", "b:c")).toBe("inbox2:1:a:b:c");
     expect(mailboxKey.inbox("a:b", "c")).not.toBe(mailboxKey.inbox("a", "b:c"));
+    // disjoint from pre-upgrade `inbox:<source>:<externalId>` (no false collision
+    // when historical source was pure decimal, e.g. source="5")
+    expect(mailboxKey.inbox("gmail", "123")).not.toBe("inbox:5:gmail:123");
     // gate/run stay colon-prefixed single-segment namespaces
     expect(mailboxKey.gate("wf-1")).toBe("gate:wf-1");
     expect(mailboxKey.run("wf-1")).toBe("run:wf-1");
