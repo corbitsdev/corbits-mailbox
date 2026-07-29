@@ -377,15 +377,8 @@ describe("deliverInboxItems", () => {
       ]),
     ).rejects.toThrow();
 
-    const surviving = await getMailboxMessage(db, {
-      tenantId: "t1",
-      principalId: "p1",
-      // If the good row had committed, its key would still be findable via a
-      // redelivery returning id=null. Redelivery must insert (id !== null).
-      id: "placeholder",
-    });
-    expect(surviving).toBeNull();
-
+    // Redelivery of the good item must insert (id !== null). If the first
+    // call had partially committed, onConflictDoNothing would return null.
     const redelivery = await deliverInboxItems(db, [
       {
         tenantId: "t1",
