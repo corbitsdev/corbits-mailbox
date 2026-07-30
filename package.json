@@ -14,5 +14,8 @@
     "@types/bun": "1.1.14",
     "@types/node": "22.10.5",
     "typescript": "5.7.2"
+  },
+  "overrides": {
+    "drizzle-orm": "0.45.2"
   }
 }
