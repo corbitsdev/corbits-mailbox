@@ -209,7 +209,7 @@ describe("writeMailboxMessage", () => {
 });
 
 describe("deliverInboxItems", () => {
-  test("dedupes on inbox:<source>:<externalId>", async () => {
+  test("dedupes on mailboxKey.inbox(source, externalId)", async () => {
     const item = {
       tenantId: "t1",
       principalId: "p1",
@@ -224,7 +224,80 @@ describe("deliverInboxItems", () => {
     const second = await deliverInboxItems(db, [item]);
     expect(first[0]?.id).not.toBeNull();
     expect(second[0]?.id).toBeNull();
-    expect(second[0]?.messageKey).toBe("inbox:gmail:ext-1");
+    expect(second[0]?.messageKey).toBe(mailboxKey.inbox("gmail", "ext-1"));
+  });
+
+  test("colon-bearing source/externalId pairs do not collide", async () => {
+    const base = {
+      tenantId: "t1",
+      principalId: "p1",
+      address: "p1@t1.example",
+      fromAddress: "sender@ext.example",
+      subject: "Ext mail",
+      body: "Body",
+    };
+    // ("a:b","c") vs ("a","b:c") used to share `inbox:a:b:c` under colon-join.
+    const left = await deliverInboxItems(db, [
+      { ...base, source: "a:b", externalId: "c" },
+    ]);
+    const right = await deliverInboxItems(db, [
+      { ...base, source: "a", externalId: "b:c" },
+    ]);
+    expect(left[0]?.id).not.toBeNull();
+    expect(right[0]?.id).not.toBeNull();
+    expect(left[0]?.id).not.toBe(right[0]?.id);
+    expect(left[0]?.messageKey).not.toBe(right[0]?.messageKey);
+    expect(left[0]?.messageKey).toBe(mailboxKey.inbox("a:b", "c"));
+    expect(right[0]?.messageKey).toBe(mailboxKey.inbox("a", "b:c"));
+  });
+
+  test("true replay still returns id=null", async () => {
+    const item = {
+      tenantId: "t1",
+      principalId: "p1",
+      address: "p1@t1.example",
+      fromAddress: "sender@ext.example",
+      subject: "Replay",
+      body: "Body",
+      source: "a:b",
+      externalId: "c",
+    };
+    const first = await deliverInboxItems(db, [item]);
+    const replay = await deliverInboxItems(db, [item]);
+    expect(first[0]?.id).not.toBeNull();
+    expect(replay[0]?.id).toBeNull();
+    expect(replay[0]?.messageKey).toBe(first[0]?.messageKey);
+  });
+
+  test("empty and unicode source/externalId components stay distinct", async () => {
+    const base = {
+      tenantId: "t1",
+      principalId: "p1",
+      address: "p1@t1.example",
+      fromAddress: "sender@ext.example",
+      subject: "Unicode",
+      body: "Body",
+    };
+    const pairs: Array<[string, string]> = [
+      ["", "x"],
+      ["x", ""],
+      ["café", "id"],
+      ["cafe", "id"],
+      ["src", "外部"],
+      ["src", "外部-2"],
+    ];
+    const delivered = [];
+    for (const [source, externalId] of pairs) {
+      const [row] = await deliverInboxItems(db, [
+        { ...base, source, externalId },
+      ]);
+      delivered.push(row);
+    }
+    const ids = delivered.map((r) => r?.id);
+    const keys = delivered.map((r) => r?.messageKey);
+    expect(ids.every((id) => id !== null && id !== undefined)).toBe(true);
+    expect(new Set(ids).size).toBe(pairs.length);
+    expect(new Set(keys).size).toBe(pairs.length);
   });
 
   test("multi-recipient delivery creates one row per recipient", async () => {
@@ -318,7 +391,16 @@ describe("mailboxKey namespaces", () => {
     expect(await writeMailboxMessage(db, args)).toBeNull();
   });
 
-  test("inbox keys are namespaced by source and external id", () => {
-    expect(mailboxKey.inbox("gmail", "123")).toBe("inbox:gmail:123");
+  test("inbox keys are versioned length-prefixed and injective over source/externalId", () => {
+    expect(mailboxKey.inbox("gmail", "123")).toBe("inbox2:5:gmail:123");
+    expect(mailboxKey.inbox("a:b", "c")).toBe("inbox2:3:a:b:c");
+    expect(mailboxKey.inbox("a", "b:c")).toBe("inbox2:1:a:b:c");
+    expect(mailboxKey.inbox("a:b", "c")).not.toBe(mailboxKey.inbox("a", "b:c"));
+    // disjoint from pre-upgrade `inbox:<source>:<externalId>` (no false collision
+    // when historical source was pure decimal, e.g. source="5")
+    expect(mailboxKey.inbox("gmail", "123")).not.toBe("inbox:5:gmail:123");
+    // gate/run stay colon-prefixed single-segment namespaces
+    expect(mailboxKey.gate("wf-1")).toBe("gate:wf-1");
+    expect(mailboxKey.run("wf-1")).toBe("run:wf-1");
   });
 });
