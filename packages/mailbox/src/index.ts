@@ -68,7 +68,9 @@ export {
   mailboxKey,
   MAX_MAILBOX_REFS,
   MAX_MAILBOX_FRAME_BYTES,
+  assertMailboxFrameBytes,
 } from "./write.js";
+
 
 export type {
   WriteMailboxMessageArgs,

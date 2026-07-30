@@ -44,11 +44,12 @@ always called out under their own heading.
   logged and swallowed (same posture as bus publish).
 - **Hard caps on frame size and transport recipient fan-out.** Frames above
   `MAX_MAILBOX_FRAME_BYTES` (1 MiB) and transport recipient lists longer than
-  `MAX_MAILBOX_RECIPIENTS` (50) are refused with `RangeError` before multi-row
-  insert construction. Direct write and `createMailboxPersist` both enforce the
-  frame-byte cap; the recipient cap applies on the transport path only.
+  `MAX_MAILBOX_RECIPIENTS` (50) are refused with `RangeError` before durable
+  insert. Direct write and `createMailboxPersist` both enforce the frame-byte
+  cap; the recipient cap applies on the transport path only.
 
 ## [0.1.0] — 2026-07-27
+
 
 
 Initial public release. Nothing has been published before this, so everything is

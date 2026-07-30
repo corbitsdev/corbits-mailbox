@@ -603,14 +603,13 @@ describe("frame size hard cap", () => {
     return rows[0]!.n;
   }
 
-
-  // Headers + Message-ID/Date vary slightly; leave headroom under the cap so
-  // acceptance is not flaky on UUID/Date length, and use a body larger than
-  // the cap so rejection is unambiguous after headers are added.
+  // Headers add a few hundred bytes; leave headroom under the cap so near-cap
+  // acceptance is not flaky on UUID/Date length. Body alone equal to the cap
+  // forces the built frame over for rejection tests.
   const nearCapBody = "x".repeat(MAX_MAILBOX_FRAME_BYTES - 2048);
   const overCapBody = "x".repeat(MAX_MAILBOX_FRAME_BYTES);
 
-  test("writeMailboxMessage accepts a frame at the boundary and refuses above it", async () => {
+  test("writeMailboxMessage accepts a near-cap frame and refuses an oversize one", async () => {
     const base = {
       tenantId: "t1",
       principalId: "p1",
@@ -656,6 +655,36 @@ describe("frame size hard cap", () => {
           body: overCapBody,
           source: "gmail",
           externalId: "frame-over",
+        },
+      ]),
+    ).rejects.toThrow(RangeError);
+    expect(await mailRowCount()).toBe(0);
+  });
+
+  test("deliverInboxItems prevalidates frame size for the whole batch", async () => {
+    // Good item first: a mid-loop-only check would insert it before the oversize
+    // item aborted; prevalidation must refuse before any write.
+    await expect(
+      deliverInboxItems(db, [
+        {
+          tenantId: "t1",
+          principalId: "p1",
+          address: "p1@t1.example",
+          fromAddress: "sender@ext.example",
+          subject: "ok",
+          body: "small",
+          source: "gmail",
+          externalId: "batch-ok",
+        },
+        {
+          tenantId: "t1",
+          principalId: "p2",
+          address: "p2@t1.example",
+          fromAddress: "sender@ext.example",
+          subject: "too big",
+          body: overCapBody,
+          source: "gmail",
+          externalId: "batch-over",
         },
       ]),
     ).rejects.toThrow(RangeError);
