@@ -42,11 +42,18 @@ always called out under their own heading.
   rolls back every new row from that call. Bus publish and optional host
   `enqueue` run only after commit for newly inserted ids; enqueue throws are
   logged and swallowed (same posture as bus publish).
+
+### Breaking
+
 - **Hard caps on frame size and transport recipient fan-out.** Frames above
   `MAX_MAILBOX_FRAME_BYTES` (1 MiB) and transport recipient lists longer than
   `MAX_MAILBOX_RECIPIENTS` (50) are refused with `RangeError` before durable
   insert. Direct write and `createMailboxPersist` both enforce the frame-byte
-  cap; the recipient cap applies on the transport path only.
+  cap; the recipient cap applies on the transport path only (raw address-list
+  length, not post-resolve principal count — hosts must chunk larger fan-out).
+  Inputs that previously inserted now throw on the direct-write path; on the
+  transport dual-write path the same refusal is logged and swallowed so
+  upstream success is unchanged.
 
 ## [0.1.0] — 2026-07-27
 

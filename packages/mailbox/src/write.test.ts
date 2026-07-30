@@ -660,7 +660,39 @@ describe("frame size hard cap", () => {
     expect(await mailRowCount()).toBe(0);
   });
 
-  test("deliverInboxItems refuses body at the frame-byte cap with no durable write", async () => {
+  test("writeMailboxMessage refuses when headers plus body exceed the frame cap", async () => {
+    // Each field alone is under the cap; the built MIME frame is not.
+    const half = Math.floor(MAX_MAILBOX_FRAME_BYTES / 2);
+    await expect(
+      writeMailboxMessage(db, {
+        tenantId: "t1",
+        principalId: "p1",
+        address: "p1@t1.example",
+        fromAddress: "agent@t1.example",
+        subject: "s".repeat(half),
+        body: "b".repeat(half),
+        messageKey: "frame-cap-sum",
+      }),
+    ).rejects.toThrow(RangeError);
+    expect(await mailRowCount()).toBe(0);
+  });
+
+  test("deliverInboxItems accepts a near-cap frame and refuses body at the cap", async () => {
+    const ok = await deliverInboxItems(db, [
+      {
+        tenantId: "t1",
+        principalId: "p1",
+        address: "p1@t1.example",
+        fromAddress: "sender@ext.example",
+        subject: "near",
+        body: nearCapBody,
+        source: "gmail",
+        externalId: "near-cap",
+      },
+    ]);
+    expect(ok).toHaveLength(1);
+    expect(ok[0]!.id).not.toBeNull();
+    expect(ok[0]!.messageKey).toBe(mailboxKey.inbox("gmail", "near-cap"));
 
     // Body alone === MAX cannot produce a legal frame; prevalidation must refuse
     // before opening a transaction (not only body > MAX).
@@ -678,7 +710,7 @@ describe("frame size hard cap", () => {
         },
       ]),
     ).rejects.toThrow(RangeError);
-    expect(await mailRowCount()).toBe(0);
+    expect(await mailRowCount()).toBe(1);
   });
 
   test("deliverInboxItems refuses an oversized frame with no durable write", async () => {

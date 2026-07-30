@@ -180,7 +180,6 @@ function assertMailboxStringFieldsFit(args: {
  * `MAX_MAILBOX_FRAME_BYTES` here as defense in depth.
  */
 async function insertMailboxMessage(
-
   tx: MailboxInsertTx,
   args: WriteMailboxMessageArgs,
   raw: Uint8Array,

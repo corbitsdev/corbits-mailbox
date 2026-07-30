@@ -20,8 +20,6 @@ import {
   assertMailboxFrameBytes,
 } from "./write.js";
 
-
-
 let db: MailboxDb;
 
 const SENDER = "ins_dep-heartbeat@acme.example";
@@ -446,7 +444,7 @@ describe("frame size and recipient hard caps", () => {
   });
 
   test("raw at the frame byte cap inserts; one byte over refuses and leaves zero rows", async () => {
-    const { upstream, result } = recordingUpstream();
+    const { upstream, calls, result } = recordingUpstream();
     const persist = createMailboxPersist(db, {
       upstream,
       authorizeSender: () => ACTIVE,
@@ -472,6 +470,8 @@ describe("frame size and recipient hard caps", () => {
       ),
     ).toBe(result);
     expect(await rowsFor("acme", "user-2")).toHaveLength(0);
+    // Both frames were delegated upstream regardless of mailbox refusal.
+    expect(calls).toHaveLength(2);
   });
 
   test("recipient list at the cap resolves; one over refuses mailbox insert", async () => {
@@ -488,7 +488,7 @@ describe("frame size and recipient hard caps", () => {
     ];
     expect(atCapRecipients).toHaveLength(MAX_MAILBOX_RECIPIENTS);
 
-    const { upstream, result } = recordingUpstream();
+    const { upstream, calls, result } = recordingUpstream();
     const persist = createMailboxPersist(db, {
       upstream,
       authorizeSender: () => ACTIVE,
@@ -514,5 +514,7 @@ describe("frame size and recipient hard caps", () => {
     // Over-cap path never reaches insert; prior at-cap rows remain the only ones.
     const total = await db.select().from(principalMail);
     expect(total).toHaveLength(MAX_MAILBOX_RECIPIENTS);
+    // Upstream still ran for both calls (dual-write independence).
+    expect(calls).toHaveLength(2);
   });
 });
