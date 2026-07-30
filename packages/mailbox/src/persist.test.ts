@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { and, eq, sql } from "drizzle-orm";
 import {
   createMailboxPersist,
+  MAX_MAILBOX_RECIPIENTS,
   type MailboxPersistArgs,
   type SenderAuthorization,
   type PersistedMailboxRow,
@@ -14,6 +15,8 @@ import { buildMailFrame } from "./frame.js";
 import { principalMail } from "./schema.js";
 import { withTestDb, seedScope } from "./test-helpers.js";
 import type { MailboxDb } from "./db.js";
+import { MAX_MAILBOX_FRAME_BYTES } from "./write.js";
+
 
 let db: MailboxDb;
 
@@ -426,3 +429,78 @@ describe("transport insert idempotency", () => {
     expect(await rowsFor("acme", "user-1")).toHaveLength(4);
   });
 });
+
+describe("frame size and recipient hard caps", () => {
+  test("raw at the frame byte cap inserts; one byte over refuses and leaves zero rows", async () => {
+    const { upstream, result } = recordingUpstream();
+    const persist = createMailboxPersist(db, {
+      upstream,
+      authorizeSender: () => ACTIVE,
+    });
+
+    const atCap = new Uint8Array(MAX_MAILBOX_FRAME_BYTES);
+    atCap.fill(0x41);
+    expect(
+      await persist(args({ raw: atCap, recipients: ["usr_user-1@acme.example"] })),
+    ).toBe(result);
+    expect(await rowsFor("acme", "user-1")).toHaveLength(1);
+
+    // Fresh DB state for the over-cap case would be cleaner, but dual-write
+    // independence means over-cap is swallowed inside attemptMailboxWrite —
+    // upstream still succeeds and no *additional* row is written for over-cap.
+    const over = new Uint8Array(MAX_MAILBOX_FRAME_BYTES + 1);
+    over.fill(0x42);
+    expect(
+      await persist(
+        args({
+          raw: over,
+          recipients: ["usr_user-2@acme.example"],
+        }),
+      ),
+    ).toBe(result);
+    expect(await rowsFor("acme", "user-2")).toHaveLength(0);
+  });
+
+  test("recipient list at the cap resolves; one over refuses mailbox insert", async () => {
+    // Seed enough principals so the at-cap list can resolve after filter.
+    const extraIds = Array.from({ length: MAX_MAILBOX_RECIPIENTS - 2 }, (_, i) =>
+      `extra-${i}`,
+    );
+    await seedScope(db, "acme", ...extraIds);
+
+    const atCapRecipients = [
+      "usr_user-1@acme.example",
+      "usr_user-2@acme.example",
+      ...extraIds.map((id) => `usr_${id}@acme.example`),
+    ];
+    expect(atCapRecipients).toHaveLength(MAX_MAILBOX_RECIPIENTS);
+
+    const { upstream, result } = recordingUpstream();
+    const persist = createMailboxPersist(db, {
+      upstream,
+      authorizeSender: () => ACTIVE,
+    });
+
+    expect(await persist(args({ recipients: atCapRecipients }))).toBe(result);
+    expect(await rowsFor("acme", "user-1")).toHaveLength(1);
+    expect(await rowsFor("acme", "user-2")).toHaveLength(1);
+
+    const overRecipients = [
+      ...atCapRecipients,
+      "usr_one-too-many@acme.example",
+    ];
+    expect(
+      await persist(
+        args({
+          recipients: overRecipients,
+          // Distinct raw so transport idempotency does not collapse with above
+          raw: frame("over-recipient-cap"),
+        }),
+      ),
+    ).toBe(result);
+    // Over-cap path never reaches insert; prior at-cap rows remain the only ones.
+    const total = await db.select().from(principalMail);
+    expect(total).toHaveLength(MAX_MAILBOX_RECIPIENTS);
+  });
+});
+

@@ -4,11 +4,14 @@ import {
   deliverInboxItems,
   mailboxKey,
   MAX_MAILBOX_REFS,
+  MAX_MAILBOX_FRAME_BYTES,
 } from "./write.js";
 import { getMailboxMessage } from "./read.js";
 import { createInMemoryMailboxEventBus } from "./bus.js";
 import { withTestDb, seedScope } from "./test-helpers.js";
 import type { MailboxDb } from "./db.js";
+import { sql } from "drizzle-orm";
+
 
 let db: MailboxDb;
 
@@ -591,3 +594,72 @@ describe("mailboxKey namespaces", () => {
     expect(mailboxKey.run("wf-1")).toBe("run:wf-1");
   });
 });
+
+describe("frame size hard cap", () => {
+  async function mailRowCount(): Promise<number> {
+    const rows = await db.execute<{ n: number }>(
+      sql`SELECT count(*)::int AS n FROM "mailbox"."principal_mail"`,
+    );
+    return rows[0]!.n;
+  }
+
+
+  // Headers + Message-ID/Date vary slightly; leave headroom under the cap so
+  // acceptance is not flaky on UUID/Date length, and use a body larger than
+  // the cap so rejection is unambiguous after headers are added.
+  const nearCapBody = "x".repeat(MAX_MAILBOX_FRAME_BYTES - 2048);
+  const overCapBody = "x".repeat(MAX_MAILBOX_FRAME_BYTES);
+
+  test("writeMailboxMessage accepts a frame at the boundary and refuses above it", async () => {
+    const base = {
+      tenantId: "t1",
+      principalId: "p1",
+      address: "p1@t1.example",
+      fromAddress: "agent@t1.example",
+      subject: "cap",
+    };
+    const ok = await writeMailboxMessage(db, {
+      ...base,
+      body: nearCapBody,
+      messageKey: "frame-cap-ok",
+    });
+    expect(ok).not.toBeNull();
+
+    await expect(
+      writeMailboxMessage(db, {
+        ...base,
+        body: overCapBody,
+        messageKey: "frame-cap-over",
+      }),
+    ).rejects.toThrow(RangeError);
+    await expect(
+      writeMailboxMessage(db, {
+        ...base,
+        body: overCapBody,
+        messageKey: "frame-cap-over",
+      }),
+    ).rejects.toThrow(/mailbox frame exceeds/);
+
+    // Only the near-cap row exists.
+    expect(await mailRowCount()).toBe(1);
+  });
+
+  test("deliverInboxItems refuses an oversized frame with no durable write", async () => {
+    await expect(
+      deliverInboxItems(db, [
+        {
+          tenantId: "t1",
+          principalId: "p1",
+          address: "p1@t1.example",
+          fromAddress: "sender@ext.example",
+          subject: "too big",
+          body: overCapBody,
+          source: "gmail",
+          externalId: "frame-over",
+        },
+      ]),
+    ).rejects.toThrow(RangeError);
+    expect(await mailRowCount()).toBe(0);
+  });
+});
+

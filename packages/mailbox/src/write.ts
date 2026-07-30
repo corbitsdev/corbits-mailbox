@@ -70,6 +70,13 @@ export function assertMailboxTenantId(tenantId: string): void {
 // row's jsonb blob unboundedly; extras past the cap are dropped (logged).
 export const MAX_MAILBOX_REFS = 20;
 
+// Hard ceiling on a single durable frame (headers + body after build, or raw
+// bytes on the transport path). Multi-megabyte MIME would be copied once per
+// recipient and re-decoded on detail reads; refuse at the write boundary with
+// RangeError (same posture as the bulk-id and page-limit caps — never clamp).
+export const MAX_MAILBOX_FRAME_BYTES = 1_048_576;
+
+
 // `messageKey` is the caller's own identifier and is absent for externally
 // delivered mail, which is never deduped — the warning below carries whatever
 // the caller actually supplied rather than minting an id nobody can correlate.
@@ -138,7 +145,13 @@ async function insertMailboxMessage(
   };
   if (args.inReplyTo !== undefined) frameArgs.inReplyTo = args.inReplyTo;
   const raw = buildMailFrame(frameArgs);
+  if (raw.byteLength > MAX_MAILBOX_FRAME_BYTES) {
+    throw new RangeError(
+      `mailbox frame exceeds ${MAX_MAILBOX_FRAME_BYTES} bytes`,
+    );
+  }
   const refs = boundRefs(args.refs, args.messageKey ?? null);
+
 
   // The management row is created EAGERLY with the message: every mutation and
   // the unread count are then plain operations on `mailbox`, and the unread
