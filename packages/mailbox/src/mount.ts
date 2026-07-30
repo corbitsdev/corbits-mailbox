@@ -80,6 +80,8 @@ export type MountMailboxOpts = {
    * SSE keep-alive period. Defaults to 25s — under the 30s idle timeout most
    * proxies default to. Overridable so a test can observe a heartbeat without
    * waiting 25 seconds for one; there is no other reason to change it.
+   * Non-finite or `<= 0` values throw `RangeError` at mount (same posture as a
+   * bad vocabulary), not on the first request.
    */
   heartbeatIntervalMs?: number;
 };
@@ -251,6 +253,14 @@ export function mountMailbox<E extends Env>(
   const vocabularySchemas = createVocabularySchemas(vocabulary);
   const heartbeatIntervalMs =
     opts.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
+  // Zero/negative spins a tight sleep/write loop per open connection; NaN
+  // and Infinity are the same class of host misconfiguration. Refuse at
+  // mount, not on the first request — same posture as a bad vocabulary.
+  if (!Number.isFinite(heartbeatIntervalMs) || heartbeatIntervalMs <= 0) {
+    throw new RangeError(
+      "mailbox heartbeatIntervalMs must be a finite positive number",
+    );
+  }
 
   function publish(scope: ResolvedPrincipal, id: string): void {
     publishMailboxEvent(bus, scope, id, logger);
@@ -442,6 +452,13 @@ export function mountMailbox<E extends Env>(
         const pending: MailboxEvent[] = [];
         let draining = false;
         let closed = false;
+        const closeStream = () => {
+          closed = true;
+          pending.length = 0;
+          void stream.close().catch(() => {
+            // Already closed or aborted — nothing left to do.
+          });
+        };
         const drain = async () => {
           if (draining) return;
           draining = true;
@@ -452,6 +469,14 @@ export function mountMailbox<E extends Env>(
                 data: JSON.stringify(pending.shift()!),
               });
             }
+          } catch {
+            // Defensive: absorb writeSSE rejection so a void-launched drain
+            // never becomes an unhandled rejection. Hono's StreamingApi.write
+            // currently swallows writer errors (real disconnect is
+            // stream.aborted / onAbort); this catch still matters if writeSSE
+            // rejects for any other reason or Hono starts propagating.
+            // Mark closed so the heartbeat loop exits and no further events queue.
+            closeStream();
           } finally {
             draining = false;
           }
@@ -459,9 +484,7 @@ export function mountMailbox<E extends Env>(
         const unsubscribe = bus.subscribe(resolved, (event) => {
           if (closed) return;
           if (pending.length >= MAX_PENDING_SSE_EVENTS) {
-            closed = true;
-            pending.length = 0;
-            void stream.close();
+            closeStream();
             return;
           }
           pending.push(event);
@@ -472,7 +495,12 @@ export function mountMailbox<E extends Env>(
           while (!stream.aborted && !closed) {
             await stream.sleep(heartbeatIntervalMs);
             if (stream.aborted || closed) break;
-            await stream.write(": heartbeat\n\n");
+            try {
+              await stream.write(": heartbeat\n\n");
+            } catch {
+              closeStream();
+              break;
+            }
           }
         } finally {
           unsubscribe();

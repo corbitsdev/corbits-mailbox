@@ -38,3 +38,33 @@ describe("in-memory bus tenant isolation", () => {
     expect(forB).toEqual(["evt-b"]);
   });
 });
+
+describe("in-memory bus listener isolation", () => {
+  test("a throwing listener does not starve later subscribers of the same event", () => {
+    // Fan-out is best-effort per connection. One bad listener must not turn
+    // publish into "first throw wins" and skip every open tab behind it.
+    const bus = createInMemoryMailboxEventBus();
+    const seen: string[] = [];
+    bus.subscribe(P1, () => {
+      throw new Error("listener boom");
+    });
+    bus.subscribe(P1, (e) => seen.push(e.id));
+    expect(() =>
+      bus.publish(P1, { type: "mailbox", id: "evt-isolated" }),
+    ).not.toThrow();
+    expect(seen).toEqual(["evt-isolated"]);
+  });
+
+  test("a throw mid-set still delivers to every remaining listener", () => {
+    const bus = createInMemoryMailboxEventBus();
+    const order: string[] = [];
+    bus.subscribe(P1, () => order.push("a"));
+    bus.subscribe(P1, () => {
+      order.push("b");
+      throw new Error("mid");
+    });
+    bus.subscribe(P1, () => order.push("c"));
+    bus.publish(P1, { type: "mailbox", id: "x" });
+    expect(order).toEqual(["a", "b", "c"]);
+  });
+});
