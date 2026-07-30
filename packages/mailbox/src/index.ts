@@ -99,7 +99,6 @@ export type {
 } from "./persist.js";
 
 export { parseAddressList, resolveMailboxRecipients } from "./recipients.js";
-
 export type { ResolvedRecipient } from "./recipients.js";
 
 export {

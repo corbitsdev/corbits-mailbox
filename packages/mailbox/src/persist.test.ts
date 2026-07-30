@@ -516,7 +516,3 @@ describe("frame size and recipient hard caps", () => {
     expect(total).toHaveLength(MAX_MAILBOX_RECIPIENTS);
   });
 });
-
-
-
-

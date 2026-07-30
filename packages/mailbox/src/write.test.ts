@@ -730,5 +730,3 @@ describe("frame size hard cap", () => {
   });
 });
 
-
-

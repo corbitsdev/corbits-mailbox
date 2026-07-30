@@ -172,7 +172,6 @@ function assertMailboxStringFieldsFit(args: {
   }
 }
 
-
 /**
  * Insert the mail row and its eager management row on the given handle.
  * Returns the new id, or null when a non-null messageKey already existed
@@ -181,6 +180,7 @@ function assertMailboxStringFieldsFit(args: {
  * `MAX_MAILBOX_FRAME_BYTES` here as defense in depth.
  */
 async function insertMailboxMessage(
+
   tx: MailboxInsertTx,
   args: WriteMailboxMessageArgs,
   raw: Uint8Array,
@@ -276,8 +276,6 @@ export async function writeMailboxMessage(
   }
   return { id: row.id };
 }
-
-
 
 /**
  * Idempotency-key namespaces. Every hub-authored write prefixes its key with
