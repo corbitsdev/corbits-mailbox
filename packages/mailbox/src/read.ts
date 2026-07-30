@@ -484,10 +484,11 @@ const STATE_COLUMNS = {
  * Every `principal_mail` column except `raw`. List never loads the MIME frame;
  * subject/from live in the cached columns, and list does not surface body or
  * snippet. Derived from the table object so a new non-raw column is selected
- * automatically.
+ * automatically. Exported so tests can lock the production select shape.
  */
-const { raw: _rawNotOnList, ...PRINCIPAL_MAIL_LIST_COLUMNS } =
+const { raw: _rawNotOnList, ...principalMailListColumns } =
   getTableColumns(principalMail);
+export const PRINCIPAL_MAIL_LIST_COLUMNS = principalMailListColumns;
 
 export type MailboxScope = {
   tenantId: string;

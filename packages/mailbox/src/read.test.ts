@@ -1,14 +1,16 @@
 import { beforeEach, describe, expect, test } from "bun:test";
-import { sql, getTableColumns } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 import { writeMailboxMessage } from "./write.js";
-import { listUserMailbox, getMailboxMessage } from "./read.js";
-import { trashMailboxMessage } from "./mutations.js";
-import { principalMail } from "./schema.js";
-import { withTestDb, seedScope, TEST_VOCABULARY } from "./test-helpers.js";
 import {
+  listUserMailbox,
+  getMailboxMessage,
+  PRINCIPAL_MAIL_LIST_COLUMNS,
   encodeMailboxListCursor,
   decodeMailboxListCursor,
 } from "./read.js";
+import { trashMailboxMessage } from "./mutations.js";
+import { principalMail } from "./schema.js";
+import { withTestDb, seedScope, TEST_VOCABULARY } from "./test-helpers.js";
 import type { MailboxDb } from "./db.js";
 
 let db: MailboxDb;
@@ -295,13 +297,10 @@ describe("getMailboxMessage", () => {
   });
 
   test("list select shape omits principal_mail.raw", () => {
-    // Mirrors PRINCIPAL_MAIL_LIST_COLUMNS in read.ts: every column except raw.
-    // listUserMailbox spreads that object into .select({...}).
-    const { raw, ...listColumns } = getTableColumns(principalMail);
-    expect(raw).toBeDefined();
-    expect(Object.keys(listColumns)).not.toContain("raw");
-    // Sanity: list still projects the denormalized fields it needs.
-    expect(Object.keys(listColumns)).toEqual(
+    // Locks the production constant listUserMailbox spreads into .select({...}).
+    const keys = Object.keys(PRINCIPAL_MAIL_LIST_COLUMNS);
+    expect(keys).not.toContain("raw");
+    expect(keys).toEqual(
       expect.arrayContaining(["subject", "fromAddress", "id", "createdAt"]),
     );
   });

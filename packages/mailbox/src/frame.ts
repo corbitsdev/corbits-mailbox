@@ -53,10 +53,11 @@ export type MailFrameArgs = {
 };
 
 /**
- * Build a minimal RFC 2822 frame. The mailbox read path treats `raw` as
- * authoritative — headers and snippet are re-derived from it — so any row
- * this package writes directly must carry a real frame, not just cached
- * columns.
+ * Build a minimal RFC 2822 frame. Message detail treats `raw` as
+ * authoritative — headers, body, and snippet are re-derived from it. Inbox list
+ * does not load `raw` and projects subject/from from denormalized caches only.
+ * Any row this package writes directly must still carry a real frame, not just
+ * cached columns.
  */
 export function buildMailFrame(args: MailFrameArgs): Uint8Array {
   const from = headerValue(args.from);
