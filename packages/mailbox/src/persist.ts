@@ -208,8 +208,9 @@ export function createMailboxPersist<R>(
     // Mail rows and their management rows commit together: the management row
     // is created eagerly with the message (see `writeMailboxMessage`), and a
     // message without one is unreachable by every mutation. messageKey makes
-    // the insert idempotent under transport retry — same formula as
-    // `writeMailboxMessage`'s onConflictDoNothing on the partial unique index.
+    // the insert idempotent under transport retry — same onConflictDoNothing
+    // pattern as `writeMailboxMessage` on the partial unique index (keys use
+    // the transport: namespace, not inbox/gate/run).
     const inserted = await db.transaction(async (tx) => {
       const mailRows = await tx
         .insert(principalMail)
