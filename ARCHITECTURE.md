@@ -360,3 +360,10 @@ actual mail transport — this package neither sends nor receives SMTP.
   and silently received 200 would page as though it had 500 rows.
 - **Bulk actions cap at 50 ids** and report per-id results; partial success is
   the normal outcome, not an error.
+- **Frame size is hard-capped at `MAX_MAILBOX_FRAME_BYTES` (1 MiB)** on both
+  direct write (after `buildMailFrame`) and the transport dual-write path
+  (raw bytes). **Transport recipient lists hard-cap at
+  `MAX_MAILBOX_RECIPIENTS` (50)** before resolve / multi-row insert. Both refuse
+  with `RangeError` rather than clamping; the transport path still preserves
+  dual-write independence (mailbox refusal does not reject upstream success).
+

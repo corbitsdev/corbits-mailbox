@@ -143,8 +143,15 @@ Four more behaviors to know before wiring a UI:
 - **`limit` is rejected, never clamped.** Default 50, ceiling `MAX_MAILBOX_PAGE_LIMIT`
   (200). A caller handed 200 after asking for 500 advances its paging by 500 and skips
   the difference.
+- **Frame size and transport recipient count are hard caps.** A built (or raw)
+  frame above `MAX_MAILBOX_FRAME_BYTES` (1 MiB) and a transport recipient list
+  longer than `MAX_MAILBOX_RECIPIENTS` (50) throw `RangeError` before any multi-row
+  insert. Direct write surfaces the error to the caller; on the transport dual-write
+  path the same refusal is swallowed after log (dual-write independence) so upstream
+  success is never rejected for a mailbox guardrail.
 
 ## Writing into a mailbox
+
 
 ```ts
 const delivered = await deliverInboxItems(db, items, { bus });
