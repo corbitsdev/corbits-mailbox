@@ -604,10 +604,12 @@ describe("frame size hard cap", () => {
   }
 
   // Headers add a few hundred bytes; leave headroom under the cap so near-cap
-  // acceptance is not flaky on UUID/Date length. Body alone equal to the cap
-  // forces the built frame over for rejection tests.
+  // acceptance is not flaky on UUID/Date length. Body alone at the cap cannot
+  // produce a legal frame (headers always add more) and is refused by both the
+  // batch body precheck and the built-frame assert.
   const nearCapBody = "x".repeat(MAX_MAILBOX_FRAME_BYTES - 2048);
-  const overCapBody = "x".repeat(MAX_MAILBOX_FRAME_BYTES);
+  const atCapBody = "x".repeat(MAX_MAILBOX_FRAME_BYTES);
+  const overCapBody = "x".repeat(MAX_MAILBOX_FRAME_BYTES + 1);
 
   test("writeMailboxMessage accepts a near-cap frame and refuses an oversize one", async () => {
     const base = {
@@ -643,6 +645,26 @@ describe("frame size hard cap", () => {
     expect(await mailRowCount()).toBe(1);
   });
 
+  test("deliverInboxItems refuses body at the frame-byte cap with no durable write", async () => {
+    // Body alone === MAX cannot produce a legal frame; prevalidation must refuse
+    // before opening a transaction (not only body > MAX).
+    await expect(
+      deliverInboxItems(db, [
+        {
+          tenantId: "t1",
+          principalId: "p1",
+          address: "p1@t1.example",
+          fromAddress: "sender@ext.example",
+          subject: "at cap body",
+          body: atCapBody,
+          source: "gmail",
+          externalId: "frame-at-cap",
+        },
+      ]),
+    ).rejects.toThrow(RangeError);
+    expect(await mailRowCount()).toBe(0);
+  });
+
   test("deliverInboxItems refuses an oversized frame with no durable write", async () => {
     await expect(
       deliverInboxItems(db, [
@@ -661,9 +683,9 @@ describe("frame size hard cap", () => {
     expect(await mailRowCount()).toBe(0);
   });
 
-  test("deliverInboxItems prevalidates frame size for the whole batch", async () => {
+  test("deliverInboxItems prevalidates body size for the whole batch", async () => {
     // Good item first: a mid-loop-only check would insert it before the oversize
-    // item aborted; prevalidation must refuse before any write.
+    // body aborted; body-size prevalidation must refuse before any write.
     await expect(
       deliverInboxItems(db, [
         {
@@ -691,4 +713,5 @@ describe("frame size hard cap", () => {
     expect(await mailRowCount()).toBe(0);
   });
 });
+
 

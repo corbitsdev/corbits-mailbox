@@ -85,8 +85,6 @@ export function assertMailboxFrameBytes(raw: Uint8Array): void {
   }
 }
 
-
-
 // `messageKey` is the caller's own identifier and is absent for externally
 // delivered mail, which is never deduped — the warning below carries whatever
 // the caller actually supplied rather than minting an id nobody can correlate.
@@ -136,15 +134,9 @@ type MailboxInsertTx = {
 };
 
 /**
- * Insert the mail row and its eager management row on the given handle.
- * Returns the new id, or null when a non-null messageKey already existed
- * (`onConflictDoNothing`). Caller owns scope validation and any surrounding
- * transaction.
+ * Encode args into a durable MIME frame. Mint a fresh Message-ID each call.
  */
-async function insertMailboxMessage(
-  tx: MailboxInsertTx,
-  args: WriteMailboxMessageArgs,
-): Promise<{ id: string } | null> {
+function encodeMailboxFrame(args: WriteMailboxMessageArgs): Uint8Array {
   const messageId = generateMailboxMessageId(args.fromAddress);
   const frameArgs: Parameters<typeof buildMailFrame>[0] = {
     from: args.fromAddress,
@@ -154,12 +146,25 @@ async function insertMailboxMessage(
     messageId,
   };
   if (args.inReplyTo !== undefined) frameArgs.inReplyTo = args.inReplyTo;
-  const raw = buildMailFrame(frameArgs);
+  return buildMailFrame(frameArgs);
+}
+
+/**
+ * Insert the mail row and its eager management row on the given handle.
+ * Returns the new id, or null when a non-null messageKey already existed
+ * (`onConflictDoNothing`). Caller owns scope validation, frame encoding, and
+ * any surrounding transaction. `raw` is re-asserted against
+ * `MAX_MAILBOX_FRAME_BYTES` here as defense in depth.
+ */
+async function insertMailboxMessage(
+  tx: MailboxInsertTx,
+  args: WriteMailboxMessageArgs,
+  raw: Uint8Array,
+): Promise<{ id: string } | null> {
   assertMailboxFrameBytes(raw);
   const refs = boundRefs(args.refs, args.messageKey ?? null);
 
   // The management row is created EAGERLY with the message: every mutation and
-
   // the unread count are then plain operations on `mailbox`, and the unread
   // partial index can serve the hottest endpoint. Split across transactions, a
   // crash between the two would commit the mail row alone — and a retry then
@@ -220,14 +225,26 @@ async function insertMailboxMessage(
  * never turns a successful write into a caller-visible error.
  */
 export async function writeMailboxMessage(
-
   db: MailboxDb,
   args: WriteMailboxMessageArgs,
   bus?: MailboxEventBus,
 ): Promise<{ id: string } | null> {
   assertMailboxScope(args);
+  // Body alone at the frame-byte cap cannot produce a legal frame (headers
+  // always add more); refuse before allocating the full encode.
+  if (Buffer.byteLength(args.body) >= MAX_MAILBOX_FRAME_BYTES) {
+    throw new RangeError(
+      `mailbox frame exceeds ${MAX_MAILBOX_FRAME_BYTES} bytes`,
+    );
+  }
+  // Encode and size-check the built frame before opening a transaction so
+  // oversize input never pays for a begin/rollback.
+  const raw = encodeMailboxFrame(args);
+  assertMailboxFrameBytes(raw);
   // One transaction for the mail row and its management row.
-  const row = await db.transaction(async (tx) => insertMailboxMessage(tx, args));
+  const row = await db.transaction(async (tx) =>
+    insertMailboxMessage(tx, args, raw),
+  );
   if (!row) return null;
 
   if (bus) {
@@ -240,6 +257,7 @@ export async function writeMailboxMessage(
   }
   return { id: row.id };
 }
+
 
 /**
  * Idempotency-key namespaces. Every hub-authored write prefixes its key with
@@ -308,15 +326,16 @@ export type DeliveredInboxItem = { messageKey: string; id: string | null };
  * `enqueue`, if given, is invoked after commit for each newly inserted id.
  *
  * Throws `RangeError` on a blank tenantId or principalId anywhere in the batch,
- * and when any item's body alone already exceeds `MAX_MAILBOX_FRAME_BYTES`,
- * checked for EVERY item before the first row is written. Built frames are
- * also checked at insert (headers + body). After that prevalidation, all new
- * mail + management rows for the call commit in ONE `db.transaction` (or none):
- * a mid-batch FK / driver failure rolls back every new row from that call.
- * Deduped keys (`id: null`) are no-ops inside the transaction without breaking
- * atomicity. Bus publish and `enqueue` run only after commit, and only for
- * newly inserted ids; a throwing `enqueue` is logged and swallowed (same
- * posture as `publishMailboxEvent`).
+ * and when any item's body alone is already at or above `MAX_MAILBOX_FRAME_BYTES`
+ * (headers always add more, so that body cannot produce a legal frame), checked
+ * for EVERY item before the first row is written. Built frames are also asserted
+ * at insert for header/CRLF-driven oversize (still inside the batch transaction,
+ * so a mid-batch failure rolls back every new row from that call). After that
+ * prevalidation, all new mail + management rows for the call commit in ONE
+ * `db.transaction` (or none). Deduped keys (`id: null`) are no-ops inside the
+ * transaction without breaking atomicity. Bus publish and `enqueue` run only
+ * after commit, and only for newly inserted ids; a throwing `enqueue` is logged
+ * and swallowed (same posture as `publishMailboxEvent`).
  */
 export async function deliverInboxItems(
   db: MailboxDb,
@@ -325,13 +344,9 @@ export async function deliverInboxItems(
 ): Promise<DeliveredInboxItem[]> {
   for (const item of items) {
     assertMailboxScope(item);
-    // Body alone above the frame cap cannot produce a legal frame; refuse the
-    // whole batch before opening a transaction (same posture as scope).
-    const bodyBytes =
-      typeof item.body === "string"
-        ? Buffer.byteLength(item.body)
-        : item.body.byteLength;
-    if (bodyBytes > MAX_MAILBOX_FRAME_BYTES) {
+    // Body at the frame cap cannot produce a legal frame (headers always add
+    // more); refuse the whole batch before opening a transaction.
+    if (Buffer.byteLength(item.body) >= MAX_MAILBOX_FRAME_BYTES) {
       throw new RangeError(
         `mailbox frame exceeds ${MAX_MAILBOX_FRAME_BYTES} bytes`,
       );
@@ -339,7 +354,6 @@ export async function deliverInboxItems(
   }
 
   type Inserted = { id: string; item: InboxItem };
-
   const { results, inserted } = await db.transaction(async (tx) => {
     const results: DeliveredInboxItem[] = [];
     const inserted: Inserted[] = [];
@@ -360,7 +374,9 @@ export async function deliverInboxItems(
         writeArgs.classification = item.classification;
       }
       if (item.status !== undefined) writeArgs.status = item.status;
-      const written = await insertMailboxMessage(tx, writeArgs);
+      const raw = encodeMailboxFrame(writeArgs);
+      assertMailboxFrameBytes(raw);
+      const written = await insertMailboxMessage(tx, writeArgs, raw);
       if (written === null) {
         results.push({ messageKey, id: null });
         continue;
@@ -370,6 +386,7 @@ export async function deliverInboxItems(
     }
     return { results, inserted };
   });
+
 
   // Post-commit only: live signals and host triage for newly inserted ids.
   for (const { id, item } of inserted) {

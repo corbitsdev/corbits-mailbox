@@ -28,14 +28,11 @@ import {
   assertMailboxFrameBytes,
 } from "./write.js";
 
-
 const logger = getLogger(["corbits-mailbox", "persist"]);
 
 // Cap the sender-controlled recipient list before resolve / inArray / multi-row
 // insert. Matches MAX_BULK_MAILBOX_IDS posture: hard refuse, never clamp.
 export const MAX_MAILBOX_RECIPIENTS = 50;
-
-
 
 /**
  * Package-owned idempotency key for one transport dual-write row.
@@ -49,6 +46,7 @@ export const MAX_MAILBOX_RECIPIENTS = 50;
  *   `transport:raw:<sha256(raw)>:<principalId>`
  */
 function transportMessageKey(
+
   messageId: string | null | undefined,
   raw: Uint8Array,
   principalId: string,
@@ -159,8 +157,6 @@ export function createMailboxPersist<R>(
     }
 
     const auth = await opts.authorizeSender(senderAddress);
-
-
     if (auth === null) {
       logger.error(
         "Skipping mailbox delivery from unauthorized sender {senderAddress}",

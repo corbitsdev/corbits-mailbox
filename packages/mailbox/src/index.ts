@@ -70,14 +70,13 @@ export {
   MAX_MAILBOX_FRAME_BYTES,
   assertMailboxFrameBytes,
 } from "./write.js";
-
-
 export type {
   WriteMailboxMessageArgs,
   InboxItem,
   DeliverInboxItemsOpts,
   DeliveredInboxItem,
 } from "./write.js";
+
 
 export {
   buildMailFrame,
@@ -100,8 +99,8 @@ export type {
   CreateMailboxPersistOpts,
 } from "./persist.js";
 
-
 export { parseAddressList, resolveMailboxRecipients } from "./recipients.js";
+
 export type { ResolvedRecipient } from "./recipients.js";
 
 export {
