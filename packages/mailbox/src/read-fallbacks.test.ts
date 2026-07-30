@@ -113,10 +113,11 @@ describe("from/subject fallback chain", () => {
     expect(detail!.subject).toBe("");
   });
 
-  test("the list path applies the same chain as the detail path", async () => {
+  test("the list path uses cached columns only (never decodes the frame)", async () => {
     const id = await write();
-    await corruptFrame(id);
-    await clearCachedColumns(id);
+    // Stale cache would lose to headers on detail; list never opens the frame,
+    // so the cached values surface even when they disagree with the raw MIME.
+    await setCachedColumns(id, "list-cache@acme.example", "List cache subject");
 
     const page = await listUserMailbox(db, {
       ...SCOPE,
@@ -126,8 +127,9 @@ describe("from/subject fallback chain", () => {
     });
     const item = page.items.find((message) => message.id === id);
     expect(item).toBeDefined();
-    expect(item!.from).toBe("");
-    expect("subject" in item!).toBe(false);
+    expect(item!.from).toBe("list-cache@acme.example");
+    expect(item!.subject).toBe("List cache subject");
+    expect(item!.snippet).toBeUndefined();
   });
 
   test("a fully degraded message still satisfies the published schema", async () => {

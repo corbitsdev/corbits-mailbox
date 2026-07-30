@@ -452,8 +452,8 @@ describe("reference host", () => {
   });
 
   test("a multipart/alternative frame reads back as its text, not MIME soup", async () => {
-    // What externally delivered mail actually looks like. The detail body and
-    // the list snippet must both be the readable text/plain part.
+    // What externally delivered mail actually looks like. Detail body and
+    // snippet must both be the readable text/plain part (list never decodes).
     const written = await writeMailboxMessage(host.db, {
       tenantId: "acme",
       principalId: "user-1",

@@ -1,7 +1,7 @@
 // The live consequence of the multipart body extraction: externally delivered
-// mail arrives as multipart/alternative, so both the list snippet and the
-// detail body are projected from a frame the read path has to walk, not just
-// slice after its headers.
+// mail arrives as multipart/alternative, so the detail body is projected from
+// a frame the read path has to walk. List rows no longer decode the frame —
+// they project subject/from from the cached columns only, with no snippet.
 import { beforeEach, describe, expect, test } from "bun:test";
 import { getMailboxMessage, listUserMailbox } from "./read.js";
 import { principalMail } from "./schema.js";
@@ -38,7 +38,10 @@ const MULTIPART = new TextEncoder().encode(
   ].join("\r\n"),
 );
 
-async function insertRaw(raw: Uint8Array): Promise<string> {
+async function insertRaw(
+  raw: Uint8Array,
+  cached: { subject?: string; fromAddress?: string } = {},
+): Promise<string> {
   const [row] = await db
     .insert(principalMail)
     .values({
@@ -47,23 +50,28 @@ async function insertRaw(raw: Uint8Array): Promise<string> {
       address: "user-1@acme.example",
       direction: "inbound",
       raw,
+      subject: cached.subject,
+      fromAddress: cached.fromAddress,
     })
     .returning({ id: principalMail.id });
   return row!.id;
 }
 
 describe("read path over a multipart frame", () => {
-  test("the list snippet is the readable text, not the MIME envelope", async () => {
-    await insertRaw(MULTIPART);
+  test("list omits snippet and projects subject/from from cached columns", async () => {
+    await insertRaw(MULTIPART, {
+      subject: "Multipart hello",
+      fromAddress: "sender@example.com",
+    });
     const page = await listUserMailbox(db, {
       ...SCOPE,
       limit: 10,
       view: "all",
       priorities: TEST_VOCABULARY.priorities,
     });
-    expect(page.items[0]!.snippet).toBe(
-      "Hello human, this is the readable text.",
-    );
+    expect(page.items[0]!.snippet).toBeUndefined();
+    expect(page.items[0]!.subject).toBe("Multipart hello");
+    expect(page.items[0]!.from).toBe("sender@example.com");
   });
 
   test("the detail body is the text/plain alternative, not the html one", async () => {

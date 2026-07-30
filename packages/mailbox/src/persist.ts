@@ -198,8 +198,8 @@ export function createMailboxPersist<R>(
     if (resolved.length === 0) return;
 
     // Cached columns, parsed once at write. A frame the MIME parser rejects
-    // still persists — `raw` stays authoritative and the read path re-derives
-    // what it can — so a failed parse is the expected case here, not a fault.
+    // still persists — `raw` stays authoritative for detail; list uses these
+    // caches only — so a failed parse is the expected case here, not a fault.
     const decoded = decodeMailFrame(raw);
     const subject = decoded?.headers.get("subject") ?? null;
     const fromAddress = decoded?.headers.get("from") ?? null;

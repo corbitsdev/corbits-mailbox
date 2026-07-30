@@ -1,14 +1,16 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { sql } from "drizzle-orm";
 import { writeMailboxMessage } from "./write.js";
-import { listUserMailbox, getMailboxMessage } from "./read.js";
-import { trashMailboxMessage } from "./mutations.js";
-import { principalMail } from "./schema.js";
-import { withTestDb, seedScope, TEST_VOCABULARY } from "./test-helpers.js";
 import {
+  listUserMailbox,
+  getMailboxMessage,
+  PRINCIPAL_MAIL_LIST_COLUMNS,
   encodeMailboxListCursor,
   decodeMailboxListCursor,
 } from "./read.js";
+import { trashMailboxMessage } from "./mutations.js";
+import { principalMail } from "./schema.js";
+import { withTestDb, seedScope, TEST_VOCABULARY } from "./test-helpers.js";
 import type { MailboxDb } from "./db.js";
 
 let db: MailboxDb;
@@ -224,14 +226,15 @@ describe("getMailboxMessage", () => {
     expect(message?.refs).toBeUndefined();
   });
 
-  test("snippet is truncated to 160 chars", async () => {
+  test("detail still loads the full frame body (list does not)", async () => {
+    const body = "x".repeat(500);
     const written = await writeMailboxMessage(db, {
       tenantId: "t1",
       principalId: "p1",
       address: "p1@t1.example",
       fromAddress: "a@t1.example",
       subject: "Long",
-      body: "x".repeat(500),
+      body,
       messageKey: "long-body",
     });
     const page = await listUserMailbox(db, {
@@ -242,7 +245,64 @@ describe("getMailboxMessage", () => {
       view: "all",
     });
     const item = page.items.find((m) => m.id === written!.id);
-    expect(item?.snippet?.length).toBe(160);
+    // List never decodes the frame, so no snippet and no body.
+    // messageId falls back to the row id (no Message-ID header without raw).
+    expect(item?.snippet).toBeUndefined();
+    expect(item?.subject).toBe("Long");
+    expect(item?.from).toBe("a@t1.example");
+    expect(item?.messageId).toBe(written!.id);
+    expect(item?.to).toEqual(["p1@t1.example"]);
+
+    const detail = await getMailboxMessage(db, {
+      tenantId: "t1",
+      principalId: "p1",
+      id: written!.id,
+    });
+    expect(detail?.body).toBe(body);
+    expect(detail?.snippet?.length).toBe(160);
+  });
+
+  test("list projects from cached columns without needing raw", async () => {
+    // Behaviour under a multi-megabyte unparseable frame: list still returns
+    // subject/from from caches and never surfaces a snippet. (Select-shape
+    // omit of `raw` is asserted separately below — a null decode would make
+    // these same expectations pass even if raw were still selected.)
+    const written = await writeMailboxMessage(db, {
+      tenantId: "t1",
+      principalId: "p1",
+      address: "p1@t1.example",
+      fromAddress: "cached@t1.example",
+      subject: "Cached subject",
+      body: "tiny",
+      messageKey: "large-raw",
+    });
+    const huge = Buffer.alloc(2 * 1024 * 1024, 0xff);
+    await db
+      .update(principalMail)
+      .set({ raw: huge })
+      .where(sql`${principalMail.id} = ${written!.id}`);
+
+    const page = await listUserMailbox(db, {
+      priorities: TEST_VOCABULARY.priorities,
+      tenantId: "t1",
+      principalId: "p1",
+      limit: 50,
+      view: "all",
+    });
+    const item = page.items.find((m) => m.id === written!.id);
+    expect(item).toBeDefined();
+    expect(item?.subject).toBe("Cached subject");
+    expect(item?.from).toBe("cached@t1.example");
+    expect(item?.snippet).toBeUndefined();
+  });
+
+  test("list select shape omits principal_mail.raw", () => {
+    // Locks the production constant listUserMailbox spreads into .select({...}).
+    const keys = Object.keys(PRINCIPAL_MAIL_LIST_COLUMNS);
+    expect(keys).not.toContain("raw");
+    expect(keys).toEqual(
+      expect.arrayContaining(["subject", "fromAddress", "id", "createdAt"]),
+    );
   });
 
   test("returns null for a message outside the caller's scope", async () => {

@@ -17,6 +17,16 @@ always called out under their own heading.
   `@intx/*` deps that still declare `^0.45.1` resolve to `0.45.2` via the
   override.
 
+### Changed
+
+- **Inbox list no longer loads or decodes full MIME frames.** List selects every
+  `principal_mail` column except `raw`, and projects `subject` / `from` from the
+  denormalized caches only — no list `snippet`, and list `date` / `messageId` /
+  `to` come from row fields rather than the frame. Message detail still loads
+  `raw` and remains frame-authoritative for body, snippet, and header-derived
+  fields. Clients that need a stable identity across list and detail should key
+  on message `id`.
+
 ## [0.1.0] — 2026-07-27
 
 Initial public release. Nothing has been published before this, so everything is
