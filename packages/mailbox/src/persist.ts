@@ -15,7 +15,8 @@
 // to authorize gets NO mailbox row, while the frame is still delegated upstream
 // exactly as it would have been.
 
-import { and, eq, inArray } from "drizzle-orm";
+import { createHash } from "node:crypto";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { getLogger } from "@intx/log";
 import { hostPrincipal, mailbox, principalMail } from "./schema.js";
 import type { MailboxDb } from "./db.js";
@@ -25,6 +26,28 @@ import { resolveMailboxRecipients } from "./recipients.js";
 import { assertMailboxScope } from "./write.js";
 
 const logger = getLogger(["corbits-mailbox", "persist"]);
+
+/**
+ * Package-owned idempotency key for one transport dual-write row.
+ *
+ * Stable across retries of the same frame+recipient so `onConflictDoNothing`
+ * collapses a re-delivery into a single durable inbound row (no outbox, no
+ * extra table — reuses the partial unique index on message_key):
+ * - Prefer Message-ID from the decoded frame when present:
+ *   `transport:mid:<Message-ID>:<principalId>`
+ * - Else content-hash the raw bytes:
+ *   `transport:raw:<sha256(raw)>:<principalId>`
+ */
+function transportMessageKey(
+  messageId: string | null | undefined,
+  raw: Uint8Array,
+  principalId: string,
+): string {
+  const mid = messageId?.trim();
+  if (mid) return `transport:mid:${mid}:${principalId}`;
+  const hash = createHash("sha256").update(raw).digest("hex");
+  return `transport:raw:${hash}:${principalId}`;
+}
 
 export type MailboxPersistArgs = {
   senderAddress: string;
@@ -180,10 +203,14 @@ export function createMailboxPersist<R>(
     const decoded = decodeMailFrame(raw);
     const subject = decoded?.headers.get("subject") ?? null;
     const fromAddress = decoded?.headers.get("from") ?? null;
+    const messageId = decoded?.headers.get("message-id") ?? null;
 
     // Mail rows and their management rows commit together: the management row
     // is created eagerly with the message (see `writeMailboxMessage`), and a
-    // message without one is unreachable by every mutation.
+    // message without one is unreachable by every mutation. messageKey makes
+    // the insert idempotent under transport retry — same onConflictDoNothing
+    // pattern as `writeMailboxMessage` on the partial unique index (keys use
+    // the transport: namespace, not inbox/gate/run).
     const inserted = await db.transaction(async (tx) => {
       const mailRows = await tx
         .insert(principalMail)
@@ -196,23 +223,45 @@ export function createMailboxPersist<R>(
             raw: Buffer.from(raw),
             subject,
             fromAddress,
+            messageKey: transportMessageKey(
+              messageId,
+              raw,
+              recipient.principalId,
+            ),
           })),
         )
-        .returning({ id: principalMail.id });
-      await tx.insert(mailbox).values(
-        mailRows.map((row, index) => ({
-          id: row.id,
-          tenantId: auth.tenantId,
-          principalId: resolved[index]!.principalId,
-        })),
-      );
+        .onConflictDoNothing({
+          target: [
+            principalMail.tenantId,
+            principalMail.principalId,
+            principalMail.messageKey,
+          ],
+          where: sql`${principalMail.messageKey} IS NOT NULL`,
+        })
+        .returning({
+          id: principalMail.id,
+          principalId: principalMail.principalId,
+        });
+      // `returning` only includes rows that actually inserted; a retry conflict
+      // yields an empty list and must not invent management rows.
+      if (mailRows.length > 0) {
+        await tx.insert(mailbox).values(
+          mailRows.map((row) => ({
+            id: row.id,
+            tenantId: auth.tenantId,
+            principalId: row.principalId,
+          })),
+        );
+      }
       return mailRows;
     });
 
-    // `returning` preserves VALUES order, so ids line up with recipients.
-    for (const [index, recipient] of resolved.entries()) {
-      const row = inserted[index];
-      if (!row) continue;
+    const byPrincipal = new Map(
+      resolved.map((recipient) => [recipient.principalId, recipient]),
+    );
+    for (const row of inserted) {
+      const recipient = byPrincipal.get(row.principalId);
+      if (!recipient) continue;
       announce({
         id: row.id,
         tenantId: auth.tenantId,

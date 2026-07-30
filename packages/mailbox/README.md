@@ -265,6 +265,13 @@ Dual-write independence holds both ways: `upstream` throwing still attempts the 
 write then re-throws unchanged, and a mailbox-write failure is logged loudly but never
 rejects a persist that already succeeded upstream.
 
+Mailbox inserts are idempotent under transport retry: each row is stamped with a
+package-owned `messageKey` (`transport:mid:<Message-ID>:<principalId>` when the
+frame carries a Message-ID, otherwise `transport:raw:<sha256>:<principalId>`) and
+inserted with `onConflictDoNothing` on the existing partial unique index. Management
+rows and bus announcements only follow rows actually returned by `RETURNING`, so a
+retried frame does not fail on unique-violation and does not re-announce duplicates.
+
 ## Development
 
 ```sh

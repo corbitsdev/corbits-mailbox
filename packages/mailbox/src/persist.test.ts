@@ -354,3 +354,75 @@ describe("cached columns", () => {
     expect(row?.fromAddress).toBeNull();
   });
 });
+
+describe("transport insert idempotency", () => {
+  test("upstream fails then retry of the same frame leaves one row per recipient", async () => {
+    // The dual-write path still lands the durable copy when upstream throws, and
+    // a transport retry of that same frame must not mint a second inbound row.
+    const persist = createMailboxPersist(db, {
+      upstream: async () => {
+        throw new Error("no session for that address");
+      },
+      authorizeSender: () => ACTIVE,
+    });
+    const a = args({
+      recipients: ["usr_user-1@acme.example", "usr_user-2@acme.example"],
+    });
+
+    await expect(persist(a)).rejects.toThrow("no session for that address");
+    await expect(persist(a)).rejects.toThrow("no session for that address");
+
+    expect(await rowsFor("acme", "user-1")).toHaveLength(1);
+    expect(await rowsFor("acme", "user-2")).toHaveLength(1);
+  });
+
+  test("concurrent identical persists leave one row", async () => {
+    const { upstream } = recordingUpstream();
+    const persist = createMailboxPersist(db, {
+      upstream,
+      authorizeSender: () => ACTIVE,
+    });
+    const a = args();
+
+    await Promise.all([persist(a), persist(a), persist(a), persist(a)]);
+
+    expect(await rowsFor("acme", "user-1")).toHaveLength(1);
+  });
+
+  test("distinct frames still create distinct rows", async () => {
+    const { upstream } = recordingUpstream();
+    const persist = createMailboxPersist(db, {
+      upstream,
+      authorizeSender: () => ACTIVE,
+    });
+
+    await persist(
+      args({
+        raw: buildMailFrame({
+          from: SENDER,
+          to: "usr_user-1@acme.example",
+          subject: "First",
+          body: "Body",
+          messageId: "<first@acme.example>",
+        }),
+      }),
+    );
+    await persist(
+      args({
+        raw: buildMailFrame({
+          from: SENDER,
+          to: "usr_user-1@acme.example",
+          subject: "Second",
+          body: "Body",
+          messageId: "<second@acme.example>",
+        }),
+      }),
+    );
+    // Frames with no Message-ID fall back to a content hash; different raw
+    // bytes must still land as separate rows.
+    await persist(args({ raw: new Uint8Array([0x01, 0x02]) }));
+    await persist(args({ raw: new Uint8Array([0x03, 0x04]) }));
+
+    expect(await rowsFor("acme", "user-1")).toHaveLength(4);
+  });
+});
