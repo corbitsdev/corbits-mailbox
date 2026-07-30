@@ -146,9 +146,11 @@ Four more behaviors to know before wiring a UI:
 - **Frame size and transport recipient count are hard caps.** A built (or raw)
   frame above `MAX_MAILBOX_FRAME_BYTES` (1 MiB) and a transport recipient list
   longer than `MAX_MAILBOX_RECIPIENTS` (50) throw `RangeError` before any multi-row
-  insert. Direct write surfaces the error to the caller; on the transport dual-write
-  path the same refusal is swallowed after log (dual-write independence) so upstream
-  success is never rejected for a mailbox guardrail.
+  insert. The recipient cap refuses the **entire** list (never clamps to the first
+  50) — hosts that need larger fan-out must chunk across calls. Direct write
+  surfaces the error to the caller; on the transport dual-write path the same
+  refusal is swallowed after log (dual-write independence) so upstream success is
+  never rejected for a mailbox guardrail.
 
 ## Writing into a mailbox
 

@@ -150,6 +150,30 @@ function encodeMailboxFrame(args: WriteMailboxMessageArgs): Uint8Array {
 }
 
 /**
+ * Cheap pre-encode refusal: body or any header field alone at the frame-byte
+ * cap cannot produce a legal frame (headers always add more). Full built-frame
+ * assert still runs after encode.
+ */
+function assertMailboxStringFieldsFit(args: {
+  body: string;
+  subject: string;
+  fromAddress: string;
+  address: string;
+  inReplyTo?: string;
+}): void {
+  const fields = [args.body, args.subject, args.fromAddress, args.address];
+  if (args.inReplyTo !== undefined) fields.push(args.inReplyTo);
+  for (const field of fields) {
+    if (Buffer.byteLength(field) >= MAX_MAILBOX_FRAME_BYTES) {
+      throw new RangeError(
+        `mailbox frame exceeds ${MAX_MAILBOX_FRAME_BYTES} bytes`,
+      );
+    }
+  }
+}
+
+
+/**
  * Insert the mail row and its eager management row on the given handle.
  * Returns the new id, or null when a non-null messageKey already existed
  * (`onConflictDoNothing`). Caller owns scope validation, frame encoding, and
@@ -230,13 +254,8 @@ export async function writeMailboxMessage(
   bus?: MailboxEventBus,
 ): Promise<{ id: string } | null> {
   assertMailboxScope(args);
-  // Body alone at the frame-byte cap cannot produce a legal frame (headers
-  // always add more); refuse before allocating the full encode.
-  if (Buffer.byteLength(args.body) >= MAX_MAILBOX_FRAME_BYTES) {
-    throw new RangeError(
-      `mailbox frame exceeds ${MAX_MAILBOX_FRAME_BYTES} bytes`,
-    );
-  }
+  // Refuse obviously oversize string fields before allocating the full encode.
+  assertMailboxStringFieldsFit(args);
   // Encode and size-check the built frame before opening a transaction so
   // oversize input never pays for a begin/rollback.
   const raw = encodeMailboxFrame(args);
@@ -257,6 +276,7 @@ export async function writeMailboxMessage(
   }
   return { id: row.id };
 }
+
 
 
 /**
@@ -326,56 +346,56 @@ export type DeliveredInboxItem = { messageKey: string; id: string | null };
  * `enqueue`, if given, is invoked after commit for each newly inserted id.
  *
  * Throws `RangeError` on a blank tenantId or principalId anywhere in the batch,
- * and when any item's body alone is already at or above `MAX_MAILBOX_FRAME_BYTES`
- * (headers always add more, so that body cannot produce a legal frame), checked
- * for EVERY item before the first row is written. Built frames are also asserted
- * at insert for header/CRLF-driven oversize (still inside the batch transaction,
- * so a mid-batch failure rolls back every new row from that call). After that
- * prevalidation, all new mail + management rows for the call commit in ONE
- * `db.transaction` (or none). Deduped keys (`id: null`) are no-ops inside the
- * transaction without breaking atomicity. Bus publish and `enqueue` run only
- * after commit, and only for newly inserted ids; a throwing `enqueue` is logged
- * and swallowed (same posture as `publishMailboxEvent`).
+ * and when any item's string fields or built frame exceed the frame-byte cap —
+ * every item is scope-checked, field-checked, encoded, and frame-asserted
+ * BEFORE the transaction opens so oversize input never begins a multi-row
+ * insert. After that prevalidation, all new mail + management rows for the
+ * call commit in ONE `db.transaction` (or none). Deduped keys (`id: null`) are
+ * no-ops inside the transaction without breaking atomicity. Bus publish and
+ * `enqueue` run only after commit, and only for newly inserted ids; a throwing
+ * `enqueue` is logged and swallowed (same posture as `publishMailboxEvent`).
  */
 export async function deliverInboxItems(
   db: MailboxDb,
   items: InboxItem[],
   opts?: DeliverInboxItemsOpts,
 ): Promise<DeliveredInboxItem[]> {
+  type Prepared = {
+    item: InboxItem;
+    messageKey: string;
+    writeArgs: WriteMailboxMessageArgs;
+    raw: Uint8Array;
+  };
+  const prepared: Prepared[] = [];
   for (const item of items) {
     assertMailboxScope(item);
-    // Body at the frame cap cannot produce a legal frame (headers always add
-    // more); refuse the whole batch before opening a transaction.
-    if (Buffer.byteLength(item.body) >= MAX_MAILBOX_FRAME_BYTES) {
-      throw new RangeError(
-        `mailbox frame exceeds ${MAX_MAILBOX_FRAME_BYTES} bytes`,
-      );
+    assertMailboxStringFieldsFit(item);
+    const messageKey = mailboxKey.inbox(item.source, item.externalId);
+    const writeArgs: WriteMailboxMessageArgs = {
+      tenantId: item.tenantId,
+      principalId: item.principalId,
+      address: item.address,
+      fromAddress: item.fromAddress,
+      subject: item.subject,
+      body: item.body,
+      messageKey,
+    };
+    if (item.refs !== undefined) writeArgs.refs = item.refs;
+    if (item.priority !== undefined) writeArgs.priority = item.priority;
+    if (item.classification !== undefined) {
+      writeArgs.classification = item.classification;
     }
+    if (item.status !== undefined) writeArgs.status = item.status;
+    const raw = encodeMailboxFrame(writeArgs);
+    assertMailboxFrameBytes(raw);
+    prepared.push({ item, messageKey, writeArgs, raw });
   }
 
   type Inserted = { id: string; item: InboxItem };
   const { results, inserted } = await db.transaction(async (tx) => {
     const results: DeliveredInboxItem[] = [];
     const inserted: Inserted[] = [];
-    for (const item of items) {
-      const messageKey = mailboxKey.inbox(item.source, item.externalId);
-      const writeArgs: WriteMailboxMessageArgs = {
-        tenantId: item.tenantId,
-        principalId: item.principalId,
-        address: item.address,
-        fromAddress: item.fromAddress,
-        subject: item.subject,
-        body: item.body,
-        messageKey,
-      };
-      if (item.refs !== undefined) writeArgs.refs = item.refs;
-      if (item.priority !== undefined) writeArgs.priority = item.priority;
-      if (item.classification !== undefined) {
-        writeArgs.classification = item.classification;
-      }
-      if (item.status !== undefined) writeArgs.status = item.status;
-      const raw = encodeMailboxFrame(writeArgs);
-      assertMailboxFrameBytes(raw);
+    for (const { item, messageKey, writeArgs, raw } of prepared) {
       const written = await insertMailboxMessage(tx, writeArgs, raw);
       if (written === null) {
         results.push({ messageKey, id: null });
@@ -387,8 +407,8 @@ export async function deliverInboxItems(
     return { results, inserted };
   });
 
-
   // Post-commit only: live signals and host triage for newly inserted ids.
+
   for (const { id, item } of inserted) {
     if (opts?.bus) {
       publishMailboxEvent(

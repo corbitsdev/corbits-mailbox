@@ -645,7 +645,23 @@ describe("frame size hard cap", () => {
     expect(await mailRowCount()).toBe(1);
   });
 
+  test("writeMailboxMessage refuses an oversize subject without writing", async () => {
+    await expect(
+      writeMailboxMessage(db, {
+        tenantId: "t1",
+        principalId: "p1",
+        address: "p1@t1.example",
+        fromAddress: "agent@t1.example",
+        subject: "s".repeat(MAX_MAILBOX_FRAME_BYTES),
+        body: "small",
+        messageKey: "frame-cap-subject",
+      }),
+    ).rejects.toThrow(RangeError);
+    expect(await mailRowCount()).toBe(0);
+  });
+
   test("deliverInboxItems refuses body at the frame-byte cap with no durable write", async () => {
+
     // Body alone === MAX cannot produce a legal frame; prevalidation must refuse
     // before opening a transaction (not only body > MAX).
     await expect(
@@ -683,9 +699,9 @@ describe("frame size hard cap", () => {
     expect(await mailRowCount()).toBe(0);
   });
 
-  test("deliverInboxItems prevalidates body size for the whole batch", async () => {
-    // Good item first: a mid-loop-only check would insert it before the oversize
-    // body aborted; body-size prevalidation must refuse before any write.
+  test("deliverInboxItems prevalidates frame size for the whole batch", async () => {
+    // Good item first: encode+assert of every item runs before the transaction,
+    // so an oversize later item refuses with zero durable rows.
     await expect(
       deliverInboxItems(db, [
         {
@@ -703,15 +719,16 @@ describe("frame size hard cap", () => {
           principalId: "p2",
           address: "p2@t1.example",
           fromAddress: "sender@ext.example",
-          subject: "too big",
-          body: overCapBody,
+          subject: "s".repeat(MAX_MAILBOX_FRAME_BYTES),
+          body: "small",
           source: "gmail",
-          externalId: "batch-over",
+          externalId: "batch-over-subject",
         },
       ]),
     ).rejects.toThrow(RangeError);
     expect(await mailRowCount()).toBe(0);
   });
 });
+
 
 

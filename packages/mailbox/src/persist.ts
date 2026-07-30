@@ -46,7 +46,6 @@ export const MAX_MAILBOX_RECIPIENTS = 50;
  *   `transport:raw:<sha256(raw)>:<principalId>`
  */
 function transportMessageKey(
-
   messageId: string | null | undefined,
   raw: Uint8Array,
   principalId: string,

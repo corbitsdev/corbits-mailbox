@@ -77,7 +77,6 @@ export type {
   DeliveredInboxItem,
 } from "./write.js";
 
-
 export {
   buildMailFrame,
   generateMailboxMessageId,

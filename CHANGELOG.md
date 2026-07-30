@@ -50,8 +50,6 @@ always called out under their own heading.
 
 ## [0.1.0] — 2026-07-27
 
-
-
 Initial public release. Nothing has been published before this, so everything is
 new; the list below is what the surface consists of rather than what changed.
 
