@@ -26,6 +26,22 @@ always called out under their own heading.
   `raw` and remains frame-authoritative for body, snippet, and header-derived
   fields. Clients that need a stable identity across list and detail should key
   on message `id`.
+- **Bus publish isolates per-listener failures.** One throwing listener no longer
+  prevents other listeners (or SSE clients) from receiving the event. SSE drain
+  serializes writes and closes the stream on overflow or write failure.
+- **Transport dual-write inserts are idempotent under retry.** Package-owned
+  `messageKey` values (`transport:mid:…` / `transport:raw:…`) use
+  `onConflictDoNothing`; management rows and bus announce only for rows returned
+  by `RETURNING`.
+- **Inbox idempotency keys are injective and versioned.**
+  `mailboxKey.inbox(source, externalId)` encodes as
+  `inbox2:<source.length>:<source>:<externalId>`, disjoint from pre-upgrade
+  `inbox:` keys so a historical pure-decimal source cannot false-dedupe. No
+  migration; redelivery after upgrade may insert a second row.
+- **`deliverInboxItems` is one atomic batch transaction.** Mid-batch failure
+  rolls back every new row from that call. Bus publish and optional host
+  `enqueue` run only after commit for newly inserted ids; enqueue throws are
+  logged and swallowed (same posture as bus publish).
 
 ## [0.1.0] — 2026-07-27
 

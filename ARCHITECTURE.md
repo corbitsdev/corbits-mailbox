@@ -71,7 +71,9 @@ mailbox row, and never costs the frame's real recipients their durable copy.
 The wrapper's contract is **dual-write independence in both directions**: an
 `upstream` throw still attempts the mailbox write and then re-throws the
 original error, and a mailbox-write failure is logged and never rejects a
-persist that upstream already completed.
+persist that upstream already completed. Under retry, the mailbox side is
+idempotent: package-owned transport `messageKey`s plus `onConflictDoNothing`
+collapse duplicate frames without failing the call or re-announcing.
 
 `resolvePrincipal`'s signature is identical across the Corbits cores, so a host
 mounting more than one passes the same function to each.
@@ -202,6 +204,31 @@ was thrown away at write time.
 `(tenant_id, principal_id, message_key)` is `WHERE message_key IS NOT NULL`.
 Mail arriving without a stable key — most external mail — is left
 unconstrained rather than collapsed onto a single NULL-keyed row per mailbox.
+Keys are namespaced by path:
+
+- **Inbox ingress** (`mailboxKey.inbox`) uses a versioned length-prefixed
+  encoding `inbox2:<source.length>:<source>:<externalId>` so pairs that contain
+  `:` cannot collide, and so the space is disjoint from pre-upgrade
+  `inbox:<source>:<externalId>` keys (length-prefix under `inbox:` alone would
+  false-collide when a historical source was pure decimal). No migration is
+  performed; redelivery after upgrade may insert a second row.
+- **Transport dual-write** stamps `transport:mid:<Message-ID>:<principalId>` or
+  `transport:raw:<sha256>:<principalId>` and inserts with `onConflictDoNothing`,
+  so a retried frame does not fail on unique-violation. Management rows and bus
+  announce only for rows returned by `RETURNING`.
+- **Gate / run** keys remain under their own namespaces via `mailboxKey`.
+
+**Batch delivery is one transaction.** `deliverInboxItems` prevalidates blank
+scopes, then commits every new row in the call in a single transaction (or
+none). Deduped keys are no-ops inside the transaction. Bus publish and the
+optional host `enqueue` hook run only after commit, and only for newly inserted
+ids. Both side effects are best-effort: a throw is logged with the message id
+and never rejects the delivery.
+
+**Bus publish isolates listeners.** `publishMailboxEvent` invokes each
+subscriber independently; one throwing listener does not stop the others. SSE
+connections serialize writes, bound the pending queue, and close on overflow or
+write failure rather than buffering forever.
 
 **Triage enriches the message, not a task.** `priority`, `classification`,
 `status` and `assignee` are columns on the message's management row, not a
