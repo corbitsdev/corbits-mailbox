@@ -190,9 +190,9 @@ describe("writeMailboxMessage", () => {
 
   test("successful write publishes to the bus", async () => {
     const bus = createInMemoryMailboxEventBus();
-    const received: string[] = [];
+    const received: Array<{ id: string; op?: string }> = [];
     bus.subscribe({ tenantId: "t1", principalId: "p1" }, (event) =>
-      received.push(event.id),
+      received.push(event),
     );
     await writeMailboxMessage(
       db,
@@ -208,6 +208,9 @@ describe("writeMailboxMessage", () => {
       bus,
     );
     expect(received.length).toBe(1);
+    // A new message is a `create` — a listener can tell delivery apart from
+    // a mutation without re-fetching and diffing.
+    expect(received[0]?.op).toBe("create");
   });
 });
 
@@ -493,6 +496,32 @@ describe("deliverInboxItems", () => {
     });
     expect(replay[0]?.id).toBeNull();
     expect(enqueued).toEqual([]);
+  });
+
+  test("a newly delivered item publishes a `create` event", async () => {
+    const bus = createInMemoryMailboxEventBus();
+    const received: Array<{ id: string; op?: string }> = [];
+    bus.subscribe({ tenantId: "t1", principalId: "p1" }, (event) =>
+      received.push(event),
+    );
+    await deliverInboxItems(
+      db,
+      [
+        {
+          tenantId: "t1",
+          principalId: "p1",
+          address: "p1@t1.example",
+          fromAddress: "sender@ext.example",
+          subject: "Delivered",
+          body: "Body",
+          source: "gmail",
+          externalId: "op-create",
+        },
+      ],
+      { bus },
+    );
+    expect(received).toHaveLength(1);
+    expect(received[0]?.op).toBe("create");
   });
 
   test("bus publish and enqueue run only after a successful batch commit", async () => {

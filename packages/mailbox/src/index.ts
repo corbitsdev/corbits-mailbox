@@ -55,11 +55,16 @@ export type { MailboxScopeIds } from "./write.js";
 
 export { purgeTenantMailbox, purgePrincipalMailbox } from "./purge.js";
 
-export { createInMemoryMailboxEventBus, MailboxEventSchema } from "./bus.js";
+export {
+  createInMemoryMailboxEventBus,
+  MailboxEventSchema,
+  MAILBOX_EVENT_OPS,
+} from "./bus.js";
 export type {
   MailboxEventBus,
   MailboxEvent,
   MailboxEventScope,
+  MailboxEventOp,
 } from "./bus.js";
 
 export {
