@@ -3,7 +3,11 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import { mountMailbox } from "./mount.js";
-import { createInMemoryMailboxEventBus, type MailboxEvent } from "./bus.js";
+import {
+  createInMemoryMailboxEventBus,
+  type MailboxEvent,
+  type MailboxEventOp,
+} from "./bus.js";
 import { writeMailboxMessage } from "./write.js";
 import { withTestDb, seedScope, TEST_VOCABULARY } from "./test-helpers.js";
 import type { MailboxDb } from "./db.js";
@@ -40,7 +44,7 @@ async function seedMessage(messageKey: string): Promise<string> {
 }
 
 describe("single-message mutations publish their op", () => {
-  const cases: Array<{ verb: string; op: string; seedKey: string }> = [
+  const cases: Array<{ verb: string; op: MailboxEventOp; seedKey: string }> = [
     { verb: "read", op: "mark_read", seedKey: "op-read" },
     { verb: "unread", op: "mark_unread", seedKey: "op-unread" },
     { verb: "trash", op: "trash", seedKey: "op-trash" },
