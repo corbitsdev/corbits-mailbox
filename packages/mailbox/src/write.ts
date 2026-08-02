@@ -271,6 +271,7 @@ export async function writeMailboxMessage(
       { tenantId: args.tenantId, principalId: args.principalId },
       row.id,
       logger,
+      "create",
     );
   }
   return { id: row.id };
@@ -413,6 +414,7 @@ export async function deliverInboxItems(
         { tenantId: item.tenantId, principalId: item.principalId },
         id,
         logger,
+        "create",
       );
     }
     if (!opts?.enqueue) continue;

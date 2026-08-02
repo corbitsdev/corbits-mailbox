@@ -247,13 +247,15 @@ describe("dual-write independence", () => {
 });
 
 describe("announcements", () => {
-  test("each inserted row is published to its own principalId", async () => {
+  test("each inserted row is published to its own principalId, as a `create`", async () => {
     const bus = createInMemoryMailboxEventBus();
     const forUser1: string[] = [];
     const forUser2: string[] = [];
-    bus.subscribe({ tenantId: "acme", principalId: "user-1" }, (e) =>
-      forUser1.push(e.id),
-    );
+    const opsUser1: Array<string | undefined> = [];
+    bus.subscribe({ tenantId: "acme", principalId: "user-1" }, (e) => {
+      forUser1.push(e.id);
+      opsUser1.push(e.op);
+    });
     bus.subscribe({ tenantId: "acme", principalId: "user-2" }, (e) =>
       forUser2.push(e.id),
     );
@@ -273,6 +275,9 @@ describe("announcements", () => {
     expect(forUser1).toHaveLength(1);
     expect(forUser2).toHaveLength(1);
     expect(forUser1[0]).not.toBe(forUser2[0]);
+    // Dual-write inserts are always new mail, never a mutation of an
+    // existing row, so the op is unconditionally `create`.
+    expect(opsUser1).toEqual(["create"]);
   });
 
   test("onRow reports the row id, principalId and sender", async () => {

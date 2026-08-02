@@ -126,6 +126,7 @@ export function createMailboxPersist<R>(
         { tenantId: row.tenantId, principalId: row.principalId },
         row.id,
         logger,
+        "create",
       );
     }
     if (!opts.onRow) return;

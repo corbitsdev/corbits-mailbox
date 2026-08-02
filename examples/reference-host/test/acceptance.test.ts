@@ -355,8 +355,9 @@ describe("reference host", () => {
     expect(text).toContain("event: mailbox");
     // The id in the frame is the row that was just written, not merely "some"
     // event — a stream echoing the wrong id would pass a substring check.
+    // `op` names the operation that produced it — a new message is a `create`.
     expect(text).toContain(
-      JSON.stringify({ type: "mailbox", id: written!.id }),
+      JSON.stringify({ type: "mailbox", id: written!.id, op: "create" }),
     );
   });
 

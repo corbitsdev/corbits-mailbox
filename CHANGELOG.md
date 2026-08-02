@@ -9,6 +9,23 @@ always called out under their own heading.
 
 ## [Unreleased]
 
+### Added
+
+- **Live events name the operation that fired.** `MailboxEvent` gains an
+  optional `op` (`MailboxEventOp`: `create`, `mark_read`, `mark_unread`,
+  `trash`, `archive`, `restore`, `enrich`, `assign`) alongside the existing
+  `id` — a listener can react to a specific kind of change without
+  re-fetching and diffing the whole message. `op` is additive: it is
+  optional on `MailboxEventSchema` and on `publishMailboxEvent`, so an
+  existing listener reading only `id`, or an existing caller of
+  `publishMailboxEvent` that omits `op`, is unaffected. `MAILBOX_EVENT_OPS`
+  and `MailboxEventOp` are now exported.
+- **Delivery semantics are documented.** Events can be missed (best-effort
+  publish, bounded SSE queue with overflow disconnect), duplicated (an
+  undeduped redelivery, or a broker-backed bus a host supplies redelivering),
+  or arrive out of order (no cross-replica ordering guarantee) — see the
+  README's SSE client contract and `MailboxEventBus`'s doc comment.
+
 ### Security
 
 - Require `drizzle-orm` `>= 0.45.2` (peer and dev pins, plus a root

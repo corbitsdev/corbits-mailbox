@@ -114,10 +114,18 @@ All routes carry `describeRoute`, so they appear in the host's OpenAPI document.
 
 ### The SSE client contract
 
-**Events are non-durable nudges, not data.** Each event carries only an id to
-refetch; Postgres holds the truth. The server queues at most
-`MAX_PENDING_SSE_EVENTS` (100) events per connection — a consumer that stops
-reading is **disconnected**, not buffered for. So the contract for any client:
+**Events are non-durable nudges, not data.** Each event carries an id to
+refetch and, when the publisher knows it, `op` — which operation fired
+(`create`, `mark_read`, `mark_unread`, `trash`, `archive`, `restore`,
+`enrich`, `assign`). `op` is **additive**: it is optional on the wire, so a
+client that only reads `id` (the original shape) keeps working unchanged,
+and a client that wants to react to a specific kind of change (e.g. badge a
+new arrival differently from a read receipt) can switch on it instead of
+re-fetching and diffing every message. Postgres remains the source of truth
+either way — `op` narrows what changed, it does not replace a refetch when
+you need the new state. The server queues at most `MAX_PENDING_SSE_EVENTS`
+(100) events per connection — a consumer that stops reading is
+**disconnected**, not buffered for. So the contract for any client:
 
 - On **any** disconnect — network drop, server restart, or an overflow close —
   reconnect and **refetch from the API**: the list and the unread count. Never
@@ -125,6 +133,18 @@ reading is **disconnected**, not buffered for. So the contract for any client:
 - Do not treat the stream as a change log. It may drop events (publish is
   best-effort after commit) and the server may close a stream whose consumer
   stops draining it.
+- **Events can be missed, duplicated, or arrive out of order** — this is a
+  best-effort nudge channel, not a durable log:
+  - *Missed*: publish failures are logged and swallowed, never retried; an
+    overflowing connection is disconnected, not buffered for.
+  - *Duplicated*: an inbox item redelivered without a stable dedupe key
+    inserts a second row and publishes a second `create`; a broker-backed bus
+    a host supplies for multi-replica fan-out may itself redeliver. Treat a
+    repeat of an already-applied `op` for the same `id` as a no-op.
+  - *Out of order*: the default in-memory bus preserves publish order within
+    one process for one mailbox, but a broker-backed bus, or multiple
+    replicas publishing concurrently, gives no such guarantee. Never infer
+    "later event = later state" from arrival order.
 
 Four more behaviors to know before wiring a UI:
 

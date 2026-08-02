@@ -8,6 +8,7 @@ import {
   publishMailboxEvent,
   type MailboxEvent,
   type MailboxEventBus,
+  type MailboxEventOp,
 } from "./bus.js";
 import {
   countUnreadActiveMailbox,
@@ -210,24 +211,40 @@ const ID_PARAM = {
 };
 
 // The five single-message mutations differ only in verb and handler, so they
-// are registered from one table instead of five near-identical blocks.
+// are registered from one table instead of five near-identical blocks. `op`
+// is the event op published on success — same identifiers `applyMailboxBulkAction`
+// takes as its `action`, so a listener sees the same op for "read one" and
+// "read fifty".
 const SINGLE_MUTATIONS = [
-  { verb: "read", summary: "Mark a message read", run: markMailboxMessageRead },
+  {
+    verb: "read",
+    summary: "Mark a message read",
+    run: markMailboxMessageRead,
+    op: "mark_read",
+  },
   {
     verb: "unread",
     summary: "Mark an active message unread",
     run: markMailboxMessageUnread,
+    op: "mark_unread",
   },
-  { verb: "trash", summary: "Trash a message", run: trashMailboxMessage },
+  {
+    verb: "trash",
+    summary: "Trash a message",
+    run: trashMailboxMessage,
+    op: "trash",
+  },
   {
     verb: "archive",
     summary: "Archive a message (refused once trashed)",
     run: archiveMailboxMessage,
+    op: "archive",
   },
   {
     verb: "restore",
     summary: "Restore a message out of archive or trash",
     run: restoreMailboxMessage,
+    op: "restore",
   },
 ] as const;
 
@@ -262,8 +279,12 @@ export function mountMailbox<E extends Env>(
     );
   }
 
-  function publish(scope: ResolvedPrincipal, id: string): void {
-    publishMailboxEvent(bus, scope, id, logger);
+  function publish(
+    scope: ResolvedPrincipal,
+    id: string,
+    op: MailboxEventOp,
+  ): void {
+    publishMailboxEvent(bus, scope, id, logger, op);
   }
 
   app.get(
@@ -432,7 +453,9 @@ export function mountMailbox<E extends Env>(
       tags: TAGS,
       summary: "Server-sent stream of mailbox events for the caller",
       description:
-        "Emits a `mailbox` event per affected message id, plus a heartbeat comment every 25s.",
+        "Emits a `mailbox` event per affected message id, plus a heartbeat comment every 25s. " +
+        "Each event also carries `op` (create/mark_read/mark_unread/trash/archive/restore/enrich/assign) " +
+        "when the publisher knows it — optional and additive, so a listener reading only `id` still works.",
       responses: {
         200: { description: "text/event-stream" },
         403: { description: "No resolvable principalId" },
@@ -554,6 +577,7 @@ export function mountMailbox<E extends Env>(
       principalId: string;
       id: string;
     }) => Promise<boolean>,
+    op: MailboxEventOp,
   ) {
     if (!isUuid(id)) {
       return c.json({ error: "Message id must be a UUID" }, 400);
@@ -564,11 +588,11 @@ export function mountMailbox<E extends Env>(
     }
     const ok = await run({ ...resolved, id });
     if (!ok) return c.json({ error: "Message not found" }, 404);
-    publish(resolved, id);
+    publish(resolved, id, op);
     return c.json({ id, ok: true as const });
   }
 
-  for (const { verb, summary, run } of SINGLE_MUTATIONS) {
+  for (const { verb, summary, run, op } of SINGLE_MUTATIONS) {
     app.post(
       `/me/inbox/:id/${verb}`,
       describeRoute({
@@ -582,7 +606,8 @@ export function mountMailbox<E extends Env>(
           404: { description: "No message in scope for this action" },
         },
       }),
-      (c) => singleMutation(c, c.req.param("id"), (scope) => run(db, scope)),
+      (c) =>
+        singleMutation(c, c.req.param("id"), (scope) => run(db, scope), op),
     );
   }
 
@@ -638,7 +663,7 @@ export function mountMailbox<E extends Env>(
         throw err;
       }
       if (!ok) return c.json({ error: "Message not found" }, 404);
-      publish(resolved, id);
+      publish(resolved, id, "enrich");
       return c.json({ id, ok: true as const });
     },
   );
@@ -683,7 +708,7 @@ export function mountMailbox<E extends Env>(
         body.assignee,
       );
       if (!ok) return c.json({ error: "Message not found" }, 404);
-      publish(resolved, id);
+      publish(resolved, id, "assign");
       return c.json({ id, ok: true as const });
     },
   );
@@ -734,7 +759,7 @@ export function mountMailbox<E extends Env>(
         throw err;
       }
       for (const r of results) {
-        if (r.ok) publish(resolved, r.id);
+        if (r.ok) publish(resolved, r.id, body.action);
       }
       return c.json({
         updated: results.filter((r) => r.ok).length,
