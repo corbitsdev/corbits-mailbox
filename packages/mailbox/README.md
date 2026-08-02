@@ -137,10 +137,12 @@ you need the new state. The server queues at most `MAX_PENDING_SSE_EVENTS`
   best-effort nudge channel, not a durable log:
   - *Missed*: publish failures are logged and swallowed, never retried; an
     overflowing connection is disconnected, not buffered for.
-  - *Duplicated*: an inbox item redelivered without a stable dedupe key
-    inserts a second row and publishes a second `create`; a broker-backed bus
-    a host supplies for multi-replica fan-out may itself redeliver. Treat a
-    repeat of an already-applied `op` for the same `id` as a no-op.
+  - *Duplicated*: redelivery is deduped by default — an inbox item with a
+    stable external identifier inserts once, on conflict-do-nothing. Only a
+    redelivered item with no such identifier inserts a second row and
+    publishes a second `create`; a broker-backed bus a host supplies for
+    multi-replica fan-out may also redeliver on its own. Treat a repeat of
+    an already-applied `op` for the same `id` as a no-op.
   - *Out of order*: the default in-memory bus preserves publish order within
     one process for one mailbox, but a broker-backed bus, or multiple
     replicas publishing concurrently, gives no such guarantee. Never infer

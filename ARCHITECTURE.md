@@ -230,17 +230,29 @@ subscriber independently; one throwing listener does not stop the others. SSE
 connections serialize writes, bound the pending queue, and close on overflow or
 write failure rather than buffering forever.
 
-**The event names the operation that fired.** `publishMailboxEvent` takes an
-optional `op` (`MailboxEventOp`: `create`, `mark_read`, `mark_unread`, `trash`,
-`archive`, `restore`, `enrich`, `assign`) and, when given one, includes it on
-the published event. Every call site in this package passes one — the two
-delivery paths (`writeMailboxMessage`, `deliverInboxItems`) and the transport
-dual-write (`createMailboxPersist`) publish `create`; `mountMailbox`'s route
-table passes the mutation's own identifier, reusing `MailboxBulkAction`'s
-vocabulary for the single-message verbs so "read one" and "read fifty" report
-the same op. `op` is optional on `MailboxEventSchema` — additive, not a
-reshape: a listener built against the original `{ type, id }` shape still
-validates and still works.
+**The event names the operation that fired.** `publishMailboxEvent` takes a
+required `op` (`MailboxEventOp`: `create`, `mark_read`, `mark_unread`, `trash`,
+`archive`, `restore`, `enrich`, `assign`) and includes it on the published
+event. Every call site in this package passes one — the two delivery paths
+(`writeMailboxMessage`, `deliverInboxItems`) and the transport dual-write
+(`createMailboxPersist`) publish `create`; `mountMailbox`'s route table passes
+the mutation's own identifier, reusing `MailboxBulkAction`'s vocabulary for
+the single-message verbs so "read one" and "read fifty" report the same op.
+`op` stays *optional on `MailboxEventSchema`* even though it is required to
+publish — additive, not a reshape: a listener built against the original
+`{ type, id }` shape still validates, and a historical event replayed from
+before this field existed still passes. Requiring it on `publishMailboxEvent`
+is what keeps every call site *in this package* honest going forward; it
+cannot reach a caller outside the package, which is the other reason the
+schema field has to stay optional.
+
+`MailboxEventOp` deliberately keeps its own name and vocabulary rather than
+reusing `MailboxBulkAction`. It is a superset — `create`, `enrich`, and
+`assign` are not bulk actions, and never will be — so aliasing the two would
+claim an equivalence that does not hold. `mount.ts`'s route table is the one
+place that has to know both: it maps HTTP verbs to `MailboxBulkAction` values
+that also happen to be valid `MailboxEventOp` values, and a test in
+`bus.test.ts` keeps that overlap from drifting silently.
 
 **Triage enriches the message, not a task.** `priority`, `classification`,
 `status` and `assignee` are columns on the message's management row, not a
@@ -355,11 +367,13 @@ actual mail transport — this package neither sends nor receives SMTP.
 - **SSE events are non-durable nudges.** Publication is best-effort after
   commit, each connection's queue is bounded at `MAX_PENDING_SSE_EVENTS` (100),
   and a consumer that stops reading is disconnected rather than buffered for.
-  Events can be missed (dropped publish, overflow disconnect), duplicated (an
-  undeduped redelivery, or a broker-backed bus redelivering), or arrive out of
-  order (no cross-replica ordering guarantee). The client contract — reconnect
-  and refetch the list and unread count on any disconnect, and never trust
-  event arrival order over a refetch — is documented in the package README.
+  Events can be missed (dropped publish, overflow disconnect); duplicated,
+  but only when there is no stable dedupe key to prevent it — an inbox item
+  redelivered without one, or a broker-backed bus itself redelivering; or
+  arrive out of order (no cross-replica ordering guarantee). The client
+  contract — reconnect and refetch the list and unread count on any
+  disconnect, and never trust event arrival order over a refetch — is
+  documented in the package README.
 - **`sort=priority` pays a cross-table join** on top of a rank that was never
   index-servable; see the measurements above.
 - **List routes read inbound rows.** The `direction` column admits outbound

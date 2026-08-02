@@ -1,10 +1,12 @@
 import { describe, test, expect } from "bun:test";
 import { type } from "arktype";
 import {
+  MAILBOX_EVENT_OPS,
   MailboxEventSchema,
   publishMailboxEvent,
   type MailboxEvent,
 } from "./bus.js";
+import { MAILBOX_BULK_ACTIONS } from "./mutations.js";
 
 const SCOPE = { tenantId: "t1", principalId: "p1" };
 const noopLogger = { error: () => {} };
@@ -36,21 +38,21 @@ describe("MailboxEventSchema", () => {
   });
 });
 
-describe("publishMailboxEvent", () => {
-  test("omitting op publishes the original two-field shape", () => {
-    const seen: MailboxEvent[] = [];
-    const bus = {
-      publish: (_scope: typeof SCOPE, event: MailboxEvent) => {
-        seen.push(event);
-      },
-      subscribe: () => () => {},
-    };
-    publishMailboxEvent(bus, SCOPE, "row-1", noopLogger);
-    expect(seen).toEqual([{ type: "mailbox", id: "row-1" }]);
-    expect("op" in seen[0]!).toBe(false);
+describe("MAILBOX_EVENT_OPS vs MAILBOX_BULK_ACTIONS", () => {
+  // MAILBOX_EVENT_OPS is duplicated from MAILBOX_BULK_ACTIONS rather than
+  // importing it (to avoid a bus.ts -> mutations.ts -> write.ts -> bus.ts
+  // cycle), and nothing at runtime enforces that the copy stays in sync.
+  // This is that enforcement: a bulk action added to mutations.ts without a
+  // matching entry here fails this test instead of silently losing its op.
+  test("every bulk action has a matching event op", () => {
+    for (const action of MAILBOX_BULK_ACTIONS) {
+      expect(MAILBOX_EVENT_OPS).toContain(action);
+    }
   });
+});
 
-  test("passing op includes it on the published event", () => {
+describe("publishMailboxEvent", () => {
+  test("publishes op on the event", () => {
     const seen: MailboxEvent[] = [];
     const bus = {
       publish: (_scope: typeof SCOPE, event: MailboxEvent) => {
