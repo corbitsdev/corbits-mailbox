@@ -4,11 +4,14 @@ import {
   deliverInboxItems,
   mailboxKey,
   MAX_MAILBOX_REFS,
+  MAX_MAILBOX_FRAME_BYTES,
 } from "./write.js";
 import { getMailboxMessage } from "./read.js";
 import { createInMemoryMailboxEventBus } from "./bus.js";
 import { withTestDb, seedScope } from "./test-helpers.js";
 import type { MailboxDb } from "./db.js";
+import { sql } from "drizzle-orm";
+
 
 let db: MailboxDb;
 
@@ -591,3 +594,171 @@ describe("mailboxKey namespaces", () => {
     expect(mailboxKey.run("wf-1")).toBe("run:wf-1");
   });
 });
+
+describe("frame size hard cap", () => {
+  async function mailRowCount(): Promise<number> {
+    const rows = await db.execute<{ n: number }>(
+      sql`SELECT count(*)::int AS n FROM "mailbox"."principal_mail"`,
+    );
+    return rows[0]!.n;
+  }
+
+  // Headers add a few hundred bytes; leave headroom under the cap so near-cap
+  // acceptance is not flaky on UUID/Date length. Body alone at the cap cannot
+  // produce a legal frame (headers always add more) and is refused by both the
+  // batch body precheck and the built-frame assert.
+  const nearCapBody = "x".repeat(MAX_MAILBOX_FRAME_BYTES - 2048);
+  const atCapBody = "x".repeat(MAX_MAILBOX_FRAME_BYTES);
+  const overCapBody = "x".repeat(MAX_MAILBOX_FRAME_BYTES + 1);
+
+  test("writeMailboxMessage accepts a near-cap frame and refuses an oversize one", async () => {
+    const base = {
+      tenantId: "t1",
+      principalId: "p1",
+      address: "p1@t1.example",
+      fromAddress: "agent@t1.example",
+      subject: "cap",
+    };
+    const ok = await writeMailboxMessage(db, {
+      ...base,
+      body: nearCapBody,
+      messageKey: "frame-cap-ok",
+    });
+    expect(ok).not.toBeNull();
+
+    await expect(
+      writeMailboxMessage(db, {
+        ...base,
+        body: overCapBody,
+        messageKey: "frame-cap-over",
+      }),
+    ).rejects.toThrow(RangeError);
+    await expect(
+      writeMailboxMessage(db, {
+        ...base,
+        body: overCapBody,
+        messageKey: "frame-cap-over",
+      }),
+    ).rejects.toThrow(/mailbox frame exceeds/);
+
+    // Only the near-cap row exists.
+    expect(await mailRowCount()).toBe(1);
+  });
+
+  test("writeMailboxMessage refuses an oversize subject without writing", async () => {
+    await expect(
+      writeMailboxMessage(db, {
+        tenantId: "t1",
+        principalId: "p1",
+        address: "p1@t1.example",
+        fromAddress: "agent@t1.example",
+        subject: "s".repeat(MAX_MAILBOX_FRAME_BYTES),
+        body: "small",
+        messageKey: "frame-cap-subject",
+      }),
+    ).rejects.toThrow(RangeError);
+    expect(await mailRowCount()).toBe(0);
+  });
+
+  test("writeMailboxMessage refuses when headers plus body exceed the frame cap", async () => {
+    // Each field alone is under the cap; the built MIME frame is not.
+    const half = Math.floor(MAX_MAILBOX_FRAME_BYTES / 2);
+    await expect(
+      writeMailboxMessage(db, {
+        tenantId: "t1",
+        principalId: "p1",
+        address: "p1@t1.example",
+        fromAddress: "agent@t1.example",
+        subject: "s".repeat(half),
+        body: "b".repeat(half),
+        messageKey: "frame-cap-sum",
+      }),
+    ).rejects.toThrow(RangeError);
+    expect(await mailRowCount()).toBe(0);
+  });
+
+  test("deliverInboxItems accepts a near-cap frame and refuses body at the cap", async () => {
+    const ok = await deliverInboxItems(db, [
+      {
+        tenantId: "t1",
+        principalId: "p1",
+        address: "p1@t1.example",
+        fromAddress: "sender@ext.example",
+        subject: "near",
+        body: nearCapBody,
+        source: "gmail",
+        externalId: "near-cap",
+      },
+    ]);
+    expect(ok).toHaveLength(1);
+    expect(ok[0]!.id).not.toBeNull();
+    expect(ok[0]!.messageKey).toBe(mailboxKey.inbox("gmail", "near-cap"));
+
+    // Body alone === MAX cannot produce a legal frame; prevalidation must refuse
+    // before opening a transaction (not only body > MAX).
+    await expect(
+      deliverInboxItems(db, [
+        {
+          tenantId: "t1",
+          principalId: "p1",
+          address: "p1@t1.example",
+          fromAddress: "sender@ext.example",
+          subject: "at cap body",
+          body: atCapBody,
+          source: "gmail",
+          externalId: "frame-at-cap",
+        },
+      ]),
+    ).rejects.toThrow(RangeError);
+    expect(await mailRowCount()).toBe(1);
+  });
+
+  test("deliverInboxItems refuses an oversized frame with no durable write", async () => {
+    await expect(
+      deliverInboxItems(db, [
+        {
+          tenantId: "t1",
+          principalId: "p1",
+          address: "p1@t1.example",
+          fromAddress: "sender@ext.example",
+          subject: "too big",
+          body: overCapBody,
+          source: "gmail",
+          externalId: "frame-over",
+        },
+      ]),
+    ).rejects.toThrow(RangeError);
+    expect(await mailRowCount()).toBe(0);
+  });
+
+  test("deliverInboxItems prevalidates frame size for the whole batch", async () => {
+    // Good item first: encode+assert of every item runs before the transaction,
+    // so an oversize later item refuses with zero durable rows.
+    await expect(
+      deliverInboxItems(db, [
+        {
+          tenantId: "t1",
+          principalId: "p1",
+          address: "p1@t1.example",
+          fromAddress: "sender@ext.example",
+          subject: "ok",
+          body: "small",
+          source: "gmail",
+          externalId: "batch-ok",
+        },
+        {
+          tenantId: "t1",
+          principalId: "p2",
+          address: "p2@t1.example",
+          fromAddress: "sender@ext.example",
+          subject: "s".repeat(MAX_MAILBOX_FRAME_BYTES),
+          body: "small",
+          source: "gmail",
+          externalId: "batch-over-subject",
+        },
+      ]),
+    ).rejects.toThrow(RangeError);
+    expect(await mailRowCount()).toBe(0);
+  });
+});
+

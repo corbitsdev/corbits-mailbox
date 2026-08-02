@@ -67,6 +67,8 @@ export {
   deliverInboxItems,
   mailboxKey,
   MAX_MAILBOX_REFS,
+  MAX_MAILBOX_FRAME_BYTES,
+  assertMailboxFrameBytes,
 } from "./write.js";
 export type {
   WriteMailboxMessageArgs,
@@ -87,7 +89,7 @@ export {
 } from "./read.js";
 export type { SenderDisplayResolver } from "./read.js";
 
-export { createMailboxPersist } from "./persist.js";
+export { createMailboxPersist, MAX_MAILBOX_RECIPIENTS } from "./persist.js";
 export type {
   MailboxPersistArgs,
   SenderAuthorization,

@@ -23,9 +23,16 @@ import type { MailboxDb } from "./db.js";
 import { publishMailboxEvent, type MailboxEventBus } from "./bus.js";
 import { decodeMailFrame } from "./frame.js";
 import { resolveMailboxRecipients } from "./recipients.js";
-import { assertMailboxScope } from "./write.js";
+import {
+  assertMailboxScope,
+  assertMailboxFrameBytes,
+} from "./write.js";
 
 const logger = getLogger(["corbits-mailbox", "persist"]);
+
+// Cap the sender-controlled recipient list before resolve / inArray / multi-row
+// insert. Matches MAX_BULK_MAILBOX_IDS posture: hard refuse, never clamp.
+export const MAX_MAILBOX_RECIPIENTS = 50;
 
 /**
  * Package-owned idempotency key for one transport dual-write row.
@@ -137,6 +144,17 @@ export function createMailboxPersist<R>(
     recipients,
     raw,
   }: MailboxPersistArgs): Promise<void> {
+    // Guardrails before authorize/resolve/SQL: a multi-megabyte frame or a
+    // thousands-long recipient list would amplify memory, parameter lists, and
+    // per-principal bytea copies. RangeError is caught by attemptMailboxWrite
+    // (dual-write independence) but still prevents any partial insert.
+    assertMailboxFrameBytes(raw);
+    if (recipients.length > MAX_MAILBOX_RECIPIENTS) {
+      throw new RangeError(
+        `mailbox recipients exceed ${MAX_MAILBOX_RECIPIENTS}`,
+      );
+    }
+
     const auth = await opts.authorizeSender(senderAddress);
     if (auth === null) {
       logger.error(
