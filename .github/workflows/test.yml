@@ -34,16 +34,22 @@ jobs:
 
       - run: bun install --frozen-lockfile
 
+      # Emits dist/, which is what the reference host and the typecheck
+      # resolve @corbits/mailbox through — so everything downstream proves
+      # the published artifact, not just the sources.
+      - name: build
+        run: bun run build
+
+      # bun copies `file:` dependencies at install time, before dist/ exists;
+      # a forced reinstall refreshes the copy with the built output.
+      - name: refresh reference-host dependency copy
+        run: bun install --force
+
       - name: typecheck
         run: bun run typecheck
 
       - name: unit + integration tests
-        run: bun run --cwd packages/mailbox test:coverage
-
-      # Emits dist/, which is also what the reference host resolves through —
-      # so this proves the published artifact, not just the sources.
-      - name: build
-        run: bun run build
+        run: bun run test:coverage
 
       - name: reference-host acceptance
         run: bun test --cwd examples/reference-host
@@ -54,8 +60,7 @@ jobs:
       - name: node consumer smoke test
         run: |
           set -euo pipefail
-          TARBALL="$(cd packages/mailbox && npm pack --silent)"
-          TARBALL="$PWD/packages/mailbox/$TARBALL"
+          TARBALL="$PWD/$(npm pack --silent)"
           mkdir -p "$RUNNER_TEMP/consumer" && cd "$RUNNER_TEMP/consumer"
           npm init -y >/dev/null && npm pkg set type=module >/dev/null
           npm install "$TARBALL"
