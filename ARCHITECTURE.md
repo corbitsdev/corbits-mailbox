@@ -2,7 +2,7 @@
 
 How `@corbits/mailbox` is put together, and what it does and does not ask of
 the host that mounts it. For install, the mount snippet, the route table and the
-response contracts, see the [package README](./packages/mailbox/README.md) —
+response contracts, see the [README](./README.md) —
 this document is about structure and reasoning, and does not repeat them.
 
 ## The shape of the thing

@@ -1,19 +1,30 @@
 # corbits-mailbox
 
-Home of **[`@corbits/mailbox`](./packages/mailbox)** — a universal,
-principal-keyed inbox, mountable onto a Hono host backed by an Interchange-shaped
-Postgres. Its tables live in a dedicated `mailbox` schema in the host's database,
-foreign-keyed to the host's `tenant` and `principal` tables. Backend only; this
-package ships no UI.
+**[`@corbits/mailbox`](./package.json)** — a universal, principal-keyed inbox,
+mountable onto a Hono host backed by an Interchange-shaped Postgres. Its tables
+live in a dedicated `mailbox` schema in the host's database, foreign-keyed to
+the host's `tenant` and `principal` tables. Backend only; this package ships no
+UI.
 
-See the [package README](./packages/mailbox/README.md) for install, the mount
-snippet and the seams, and [ARCHITECTURE.md](./ARCHITECTURE.md) for the data model.
+Requires `@intx` 0.2.2 or newer.
+
+See [ARCHITECTURE.md](./ARCHITECTURE.md) for the data model.
+
+## Install
+
+```sh
+# from npm (ships prebuilt dist/)
+bun add @corbits/mailbox
+
+# from git (prepare hook builds dist/ on the way in)
+bun add github:corbitsdev/corbits-mailbox
+```
 
 ## Layout
 
 | | |
 | --- | --- |
-| `packages/mailbox` | The published package. Owns `principal_mail` (the message, immutable) and `mailbox` (the management layer, created eagerly with each message). |
+| `src/` | The published package. Owns `principal_mail` (the message, immutable) and `mailbox` (the management layer, created eagerly with each message). |
 | `examples/reference-host` | Mounts it on a real `@intx/hub-api` app against a live Postgres and asserts the acceptance scenarios end to end. |
 
 ## Working on it
@@ -23,8 +34,8 @@ bun install
 docker run -d --name mailbox-pg -p 5433:5432 \
   -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=mailbox_core postgres:16
 
-bun run --cwd packages/mailbox test    # unit + integration
-bun run --cwd packages/mailbox build   # dist/ (JS + .d.ts)
+bun run test    # unit + integration
+bun run build   # dist/ (JS + .d.ts)
 bun test --cwd examples/reference-host      # acceptance scenarios
 ```
 

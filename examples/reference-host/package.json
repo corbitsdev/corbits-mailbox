@@ -6,7 +6,7 @@
     "test": "bun test"
   },
   "dependencies": {
-    "@corbits/mailbox": "workspace:*",
+    "@corbits/mailbox": "file:../..",
     "@intx/db": "0.2.2",
     "@intx/hub-api": "0.2.2",
     "@intx/hub-sessions": "0.2.2",
