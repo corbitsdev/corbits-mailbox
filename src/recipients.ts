@@ -2,7 +2,7 @@
 // deciding which of those addresses are principal mailboxes this tenant owns.
 
 import { extractAddrSpec } from "@intx/mime";
-import { isAgentAddress } from "@intx/types";
+import { isRunAddress } from "./intx-types-compat.js";
 
 /**
  * Split an address-list header (`To:`, `Cc:`) into its individual addresses.
@@ -76,7 +76,7 @@ export function resolveMailboxRecipients(
     // Instance addresses (`ins_<id>@…`) belong to a running workflow instance,
     // not to a person, and have their own delivery path — they are never
     // principal mailboxes. `@intx/types` owns that format; do not re-derive it.
-    if (isAgentAddress(address)) continue;
+    if (isRunAddress(address)) continue;
     const local = address.slice(0, at);
     const principalId = local.startsWith(USER_PREFIX)
       ? local.slice(USER_PREFIX.length)
