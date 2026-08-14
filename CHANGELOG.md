@@ -62,6 +62,11 @@ always called out under their own heading.
   rolls back every new row from that call. Bus publish and optional host
   `enqueue` run only after commit for newly inserted ids; enqueue throws are
   logged and swallowed (same posture as bus publish).
+- **Instance-address detection tolerates the upstream `isAgentAddress` ->
+  `isRunAddress` rename in `@intx/types` (INTR-358).** `recipients.ts` now
+  imports through `intx-types-compat.ts`, which prefers `isRunAddress` and
+  falls back to `isAgentAddress`, so this package works against both the
+  pre-rename and post-rename `@intx/types` without a peer version bump.
 
 ### Breaking
 
