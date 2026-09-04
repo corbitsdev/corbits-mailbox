@@ -37,10 +37,25 @@ export function generateMailboxMessageId(fromAddress: string): string {
 
 /**
  * A msg-id as every threading header carries it: exactly one pair of angle
- * brackets, an `@`, and no whitespace. The same shape `@intx/mime`'s
- * `generateMessageId` and `generateMailboxMessageId` return.
+ * brackets, an `@`, and no whitespace outside a quoted local part. The same
+ * shape `@intx/mime`'s `generateMessageId` and `generateMailboxMessageId`
+ * return.
+ *
+ * The local part (`id-left`) accepts either a dot-atom token (no `<`, `>`,
+ * whitespace, or `"`) or an RFC 5322 quoted-string (`"..."`, backslash-escaped
+ * quotes and backslashes allowed inside) — `<"john doe"@example.com>` is a
+ * legal msg-id under `obs-id-left` and every mainstream MTA emits and accepts
+ * it. The domain part (`id-right`) stays a plain dot-atom token: this package
+ * mints only dot-atom domains, and widening it further is not needed to
+ * accept ids this package did not author.
+ *
+ * This validates the header SHAPE only, never who may claim it: a frame
+ * arriving on the persist path (`persist.ts`) is never re-validated against
+ * this regex — its `In-Reply-To`/`References` are cached (or dropped) exactly
+ * as decoded, because an external MTA's headers are not this package's frame
+ * to reject.
  */
-const MSG_ID = /^<[^<>\s]+@[^<>\s]+>$/;
+const MSG_ID = /^<(?:[^<>\s"]+|"(?:[^"\\]|\\.)*")@[^<>\s]+>$/;
 
 /**
  * Refuse a threading header value that is not a bracketed msg-id.
