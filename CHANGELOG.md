@@ -28,7 +28,19 @@ always called out under their own heading.
   and `InboxItem` accept `inReplyTo` and `references`. Migration
   `0002_mail_threading_headers` adds both columns and backfills them from
   each existing row's `raw`, so threading does not silently begin at the
-  upgrade.
+  upgrade. The backfill slices the header section out of `raw` at the
+  `bytea` level and strips any NUL byte from that slice before decoding
+  it, so a legacy frame with a NUL anywhere in its bytes (a binary
+  attachment, most commonly) cannot abort the migration. `assertMsgId`
+  accepts a quoted-string local part (`<"john doe"@example.com>`,
+  RFC 5322 `obs-id-left`) in addition to a dot-atom one. The cached
+  `in_reply_to` is normalized once on the way in — trimmed and
+  newline-flattened the same way `buildMailFrame` normalizes the header —
+  so the list and detail projections of the same message agree; on the
+  transport dual-write path (`createMailboxPersist`), `in_reply_to` caches
+  the first bracketed msg-id found in a decoded `In-Reply-To:` header, or
+  `null`, matching what the 0002 backfill derives from the same header
+  text rather than caching an unbracketed or multi-id header verbatim.
 
 - **Live events name the operation that fired.** `MailboxEvent` gains an
   optional `op` (`MailboxEventOp`: `create`, `mark_read`, `mark_unread`,
