@@ -4,7 +4,11 @@ import { getLogger } from "@intx/log";
 import { mailbox, principalMail } from "./schema.js";
 import type { MailboxDb } from "./db.js";
 import { publishMailboxEvent, type MailboxEventBus } from "./bus.js";
-import { buildMailFrame, generateMailboxMessageId } from "./frame.js";
+import {
+  buildMailFrame,
+  generateMailboxMessageId,
+  headerValue,
+} from "./frame.js";
 import type { MailboxRef } from "./read.js";
 
 const logger = getLogger(["corbits-mailbox", "write"]);
@@ -140,6 +144,33 @@ type MailboxInsertTx = {
 };
 
 /**
+ * Normalize the threading fields once, on the way in, so the value cached in
+ * `principal_mail.in_reply_to` and the value that ends up in the frame's
+ * `In-Reply-To:` header are the SAME string.
+ *
+ * `buildMailFrame` already runs every threading value through `headerValue`
+ * before writing it into `raw` — trimmed and newline-flattened. Without this,
+ * `insertMailboxMessage` cached `args.inReplyTo` untrimmed, so a caller
+ * passing `"  <parent@x> "` produced a row whose list projection (served from
+ * the cached column) differed from its detail projection (served from the
+ * frame) for the exact same message. Applying the same normalization here,
+ * once, before either the cache write or the frame encode, is what keeps them
+ * in agreement — not two independent trims that could drift apart.
+ */
+function normalizeThreadingArgs<
+  T extends { inReplyTo?: string; references?: string[] },
+>(args: T): T {
+  const normalized: T = { ...args };
+  if (args.inReplyTo !== undefined) {
+    normalized.inReplyTo = headerValue(args.inReplyTo);
+  }
+  if (args.references !== undefined) {
+    normalized.references = args.references.map(headerValue);
+  }
+  return normalized;
+}
+
+/**
  * Encode args into a durable MIME frame. Mint a fresh Message-ID each call.
  *
  * The minted id is returned alongside the bytes rather than re-parsed out of
@@ -269,10 +300,11 @@ async function insertMailboxMessage(
  */
 export async function writeMailboxMessage(
   db: MailboxDb,
-  args: WriteMailboxMessageArgs,
+  rawArgs: WriteMailboxMessageArgs,
   bus?: MailboxEventBus,
 ): Promise<{ id: string } | null> {
-  assertMailboxScope(args);
+  assertMailboxScope(rawArgs);
+  const args = normalizeThreadingArgs(rawArgs);
   // Refuse obviously oversize string fields before allocating the full encode.
   assertMailboxStringFieldsFit(args);
   // Encode and size-check the built frame before opening a transaction so
@@ -411,9 +443,16 @@ export async function deliverInboxItems(
       writeArgs.classification = item.classification;
     }
     if (item.status !== undefined) writeArgs.status = item.status;
-    const { raw, messageId } = encodeMailboxFrame(writeArgs);
+    const normalizedWriteArgs = normalizeThreadingArgs(writeArgs);
+    const { raw, messageId } = encodeMailboxFrame(normalizedWriteArgs);
     assertMailboxFrameBytes(raw);
-    prepared.push({ item, messageKey, writeArgs, raw, messageId });
+    prepared.push({
+      item,
+      messageKey,
+      writeArgs: normalizedWriteArgs,
+      raw,
+      messageId,
+    });
   }
 
   type Inserted = { id: string; item: InboxItem };
