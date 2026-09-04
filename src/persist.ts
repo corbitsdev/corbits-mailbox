@@ -21,7 +21,7 @@ import { getLogger } from "@intx/log";
 import { hostPrincipal, mailbox, principalMail } from "./schema.js";
 import type { MailboxDb } from "./db.js";
 import { publishMailboxEvent, type MailboxEventBus } from "./bus.js";
-import { decodeMailFrame } from "./frame.js";
+import { decodeMailFrame, parseMsgIdList } from "./frame.js";
 import { resolveMailboxRecipients } from "./recipients.js";
 import {
   assertMailboxScope,
@@ -223,7 +223,14 @@ export function createMailboxPersist<R>(
     const subject = decoded?.headers.get("subject") ?? null;
     const fromAddress = decoded?.headers.get("from") ?? null;
     const messageId = decoded?.messageId ?? null;
-    const inReplyTo = decoded?.inReplyTo ?? null;
+    // Cache the same shape migration `0002_mail_threading_headers` backfills
+    // from legacy frames: the first BRACKETED msg-id in `In-Reply-To`, or
+    // `null` — never the raw header value. An externally delivered frame's
+    // `In-Reply-To` is not validated on this path (see `assertMsgId`'s
+    // JSDoc), so it can be a bare id, several ids, or otherwise malformed;
+    // caching that raw junk would make the cached column disagree with what
+    // an upgrade's backfill would have produced for the same frame.
+    const inReplyTo = parseMsgIdList(decoded?.headers.get("in-reply-to"))[0] ?? null;
 
     // Mail rows and their management rows commit together: the management row
     // is created eagerly with the message (see `writeMailboxMessage`), and a
