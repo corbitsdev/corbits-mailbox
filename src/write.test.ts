@@ -6,9 +6,9 @@ import {
   MAX_MAILBOX_REFS,
   MAX_MAILBOX_FRAME_BYTES,
 } from "./write.js";
-import { getMailboxMessage } from "./read.js";
+import { getMailboxMessage, listUserMailbox } from "./read.js";
 import { createInMemoryMailboxEventBus } from "./bus.js";
-import { withTestDb, seedScope } from "./test-helpers.js";
+import { withTestDb, seedScope, TEST_VOCABULARY } from "./test-helpers.js";
 import type { MailboxDb } from "./db.js";
 import { sql } from "drizzle-orm";
 
@@ -48,6 +48,42 @@ describe("writeMailboxMessage", () => {
     const second = await writeMailboxMessage(db, args);
     expect(first).not.toBeNull();
     expect(second).toBeNull();
+  });
+
+  test("cached inReplyTo agrees between the list and detail projections", async () => {
+    // The list projection serves `principal_mail.in_reply_to` (the cached
+    // column); detail serves the header out of `raw`. Before normalizing
+    // `inReplyTo` once on the way in, an untrimmed caller value was cached
+    // verbatim while `buildMailFrame` trimmed the same value into the header
+    // — so the same message projected two different inReplyTo strings
+    // depending only on which route read it.
+    const written = await writeMailboxMessage(db, {
+      tenantId: "t1",
+      principalId: "p1",
+      address: "p1@t1.example",
+      fromAddress: "agent@t1.example",
+      subject: "ws",
+      body: "b",
+      inReplyTo: "  <parent@t1.example>  ",
+    });
+    expect(written).not.toBeNull();
+
+    const page = await listUserMailbox(db, {
+      tenantId: "t1",
+      principalId: "p1",
+      limit: 50,
+      view: "all",
+      priorities: TEST_VOCABULARY.priorities,
+    });
+    const listed = page.items.find((m) => m.id === written!.id);
+    const detail = await getMailboxMessage(db, {
+      tenantId: "t1",
+      principalId: "p1",
+      id: written!.id,
+    });
+
+    expect(detail?.inReplyTo).toBe("<parent@t1.example>");
+    expect(listed?.inReplyTo).toBe("<parent@t1.example>");
   });
 
   test("a write to a scope the control plane does not know is an FK rejection", async () => {
