@@ -16,6 +16,7 @@ import {
   MigrationChecksumError,
   runMailboxMigrations,
 } from "./migrations.js";
+import { buildMailFrame } from "./frame.js";
 import {
   createHostControlPlane,
   seedScope,
@@ -78,6 +79,8 @@ describe("runMailboxMigrations", () => {
         "direction",
         "from_address",
         "id",
+        "in_reply_to",
+        "message_id",
         "message_key",
         "principal_id",
         "raw",
@@ -263,6 +266,74 @@ describe("runMailboxMigrations", () => {
     });
   });
 
+  test("0002 backfills the threading headers from legacy rows' raw", async () => {
+    // The state every already-deployed host is in at upgrade: rows written
+    // before the cached columns existed, so `raw` carries the headers and the
+    // columns are NULL. Without the backfill, threading would silently begin at
+    // the upgrade and every older message would project no parent.
+    await fromEmpty(async ({ db }) => {
+      // Build the pre-0002 schema, then seed through it.
+      await runMailboxMigrations(db);
+      await db.execute(
+        sql`ALTER TABLE "mailbox"."principal_mail"
+            DROP COLUMN "message_id", DROP COLUMN "in_reply_to"`,
+      );
+      await db.execute(
+        sql`DELETE FROM "mailbox"."corbits_mailbox_migrations"
+            WHERE "id" = '0002_mail_threading_headers'`,
+      );
+      await seedScope(db, "acme", "user-1");
+
+      const threaded = buildMailFrame({
+        from: "bot@acme.example",
+        to: "user-1@acme.example",
+        subject: "Re: legacy",
+        body: "Body",
+        messageId: "<child@acme.example>",
+        inReplyTo: "<parent@acme.example>",
+        references: ["<root@acme.example>", "<parent@acme.example>"],
+      });
+      // A frame with neither header, and one whose bytes are not valid UTF-8:
+      // both must survive the backfill statement rather than abort it.
+      const headerless = new TextEncoder().encode(
+        "From: bot@acme.example\r\nSubject: no ids\r\n\r\nBody\r\n",
+      );
+      const invalidUtf8 = Uint8Array.from([
+        ...new TextEncoder().encode("From: bot@acme.example\r\nMessage-ID: <bytes@acme.example>\r\n\r\n"),
+        0xff,
+        0xfe,
+      ]);
+      for (const [key, raw] of [
+        ["legacy-threaded", threaded],
+        ["legacy-headerless", headerless],
+        ["legacy-invalid-utf8", invalidUtf8],
+      ] as const) {
+        await db.execute(sql`
+          INSERT INTO "mailbox"."principal_mail"
+            ("tenant_id","principal_id","address","direction","raw","message_key")
+          VALUES ('acme','user-1','user-1@acme.example','inbound',
+                  ${Buffer.from(raw)}, ${key})
+        `);
+      }
+
+      await runMailboxMigrations(db);
+
+      const rows = await db.execute<{
+        message_key: string;
+        message_id: string | null;
+        in_reply_to: string | null;
+      }>(sql`SELECT "message_key", "message_id", "in_reply_to"
+             FROM "mailbox"."principal_mail" ORDER BY "message_key"`);
+      expect(
+        rows.map((r) => [r.message_key, r.message_id, r.in_reply_to]),
+      ).toEqual([
+        ["legacy-headerless", null, null],
+        ["legacy-invalid-utf8", "<bytes@acme.example>", null],
+        ["legacy-threaded", "<child@acme.example>", "<parent@acme.example>"],
+      ]);
+    });
+  });
+
   test("is idempotent: running twice does not error and applies once", async () => {
     await fromEmpty(async ({ db }) => {
       await runMailboxMigrations(db);
@@ -274,6 +345,7 @@ describe("runMailboxMigrations", () => {
       );
       expect(rows.map((r) => [r.id, r.count])).toEqual([
         ["0001_principal_mailbox", "1"],
+        ["0002_mail_threading_headers", "1"],
       ]);
     });
   });
@@ -477,7 +549,10 @@ describe("runMailboxMigrations under concurrent cold start", () => {
     const ledger = await admin.unsafe(
       `SELECT id FROM mailbox.corbits_mailbox_migrations ORDER BY id`,
     );
-    expect(ledger.map((r) => r.id)).toEqual(["0001_principal_mailbox"]);
+    expect(ledger.map((r) => r.id)).toEqual([
+      "0001_principal_mailbox",
+      "0002_mail_threading_headers",
+    ]);
   });
 
   test("a second wave against an already-migrated schema is a no-op for all", async () => {

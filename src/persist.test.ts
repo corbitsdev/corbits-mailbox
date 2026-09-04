@@ -96,6 +96,48 @@ describe("sender auth", () => {
     expect(await rowsFor("acme", "user-2")).toHaveLength(1);
   });
 
+  test("the inbound frame's threading headers are cached on the row", async () => {
+    // The persist path receives a frame it did not build, so the caches come
+    // off the decode — the list projection reads them without loading `raw`.
+    const { upstream } = recordingUpstream();
+    const persist = createMailboxPersist(db, {
+      upstream,
+      authorizeSender: () => ACTIVE,
+    });
+
+    await persist(
+      args({
+        raw: buildMailFrame({
+          from: SENDER,
+          to: "usr_user-1@acme.example",
+          subject: "Re: run",
+          body: "Body",
+          messageId: "<child@acme.example>",
+          inReplyTo: "<parent@acme.example>",
+          references: ["<root@acme.example>", "<parent@acme.example>"],
+        }),
+      }),
+    );
+
+    const [row] = await rowsFor("acme", "user-1");
+    expect(row?.messageId).toBe("<child@acme.example>");
+    expect(row?.inReplyTo).toBe("<parent@acme.example>");
+  });
+
+  test("a frame with no threading headers leaves both caches NULL", async () => {
+    const { upstream } = recordingUpstream();
+    const persist = createMailboxPersist(db, {
+      upstream,
+      authorizeSender: () => ACTIVE,
+    });
+
+    await persist(args());
+
+    const [row] = await rowsFor("acme", "user-1");
+    expect(row?.messageId).toBe("<fixed@acme.example>");
+    expect(row?.inReplyTo).toBeNull();
+  });
+
   test("an unauthorized sender writes NO mailbox row but is still delegated upstream", async () => {
     // The reference predicate is "active instance only": a sender the host
     // cannot resolve to a live instance is refused here.

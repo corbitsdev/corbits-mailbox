@@ -12,7 +12,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { sql } from "drizzle-orm";
-import { runMailboxMigrations } from "./migrations.js";
+import { MIGRATIONS, runMailboxMigrations } from "./migrations.js";
 import {
   expectedColumnTypes,
   SchemaTypeMismatchError,
@@ -120,7 +120,7 @@ describe("boot against a host table this package did not create", () => {
   test("a fresh, correct database boots and records the migration", async () => {
     await inFreshSchema("mbx_check_ok", async ({ db }) => {
       await runMailboxMigrations(db);
-      expect(await ledgerRows("mailbox")).toBe(1);
+      expect(await ledgerRows("mailbox")).toBe(MIGRATIONS.length);
     });
   });
 
