@@ -106,7 +106,8 @@ never in a database of their own. Every row in either belongs to exactly one
 ```
 principal_mail   the message as delivered. IMMUTABLE.
                  id, tenant_id, principal_id, address, direction, raw,
-                 subject, from_address, message_key, refs, created_at
+                 subject, from_address, message_id, in_reply_to,
+                 message_key, refs, created_at
 
 mailbox          the management layer, keyed by mail id. Mutable.
                  read_at, archived_at, trashed_at           (universal)

@@ -11,6 +11,25 @@ always called out under their own heading.
 
 ### Added
 
+- **Threading headers on the frame and in the list projection.**
+  `buildMailFrame` accepts `references` — the thread's ancestry, oldest
+  first — and emits it as a folded `References:` header; `In-Reply-To`
+  stays the single immediate parent. Every threading value must be a
+  bracketed msg-id (`<local@domain>`); anything else is a `RangeError` at
+  the builder, because a frame is frozen at rest and an unthreadable
+  header written today is unthreadable forever. `decodeMailFrame` now
+  returns `messageId`, `inReplyTo` (both `string | null`) and
+  `references` (`string[]`, oldest first) parsed alongside the header map.
+  `principal_mail` gains `message_id` and `in_reply_to` as cached
+  columns, populated on the `writeMailboxMessage`, `deliverInboxItems`
+  and `createMailboxPersist` paths, and `MailboxMessage` gains an
+  optional `inReplyTo` — so a client threads an inbox page from the list
+  projection alone, which never loads `raw`. `WriteMailboxMessageArgs`
+  and `InboxItem` accept `inReplyTo` and `references`. Migration
+  `0002_mail_threading_headers` adds both columns and backfills them from
+  each existing row's `raw`, so threading does not silently begin at the
+  upgrade.
+
 - **Live events name the operation that fired.** `MailboxEvent` gains an
   optional `op` (`MailboxEventOp`: `create`, `mark_read`, `mark_unread`,
   `trash`, `archive`, `restore`, `enrich`, `assign`) alongside the existing
