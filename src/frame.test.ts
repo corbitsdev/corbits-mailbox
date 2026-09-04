@@ -66,6 +66,82 @@ describe("buildMailFrame headers", () => {
     expect(h.has("bcc")).toBe(false);
   });
 
+  test("References is emitted oldest first, folded, and round-trips", () => {
+    // A three-deep chain is the shortest one where order and folding both
+    // matter: a client walks References oldest-first to place a reply under its
+    // root, and RFC 2822 caps a header line at 78 characters — which a chain
+    // passes within a few ids.
+    const chain = [
+      "<root-message-of-the-thread@example.com>",
+      "<second-message-of-the-thread@example.com>",
+      "<third-message-of-the-thread@example.com>",
+    ];
+    const raw = frame({ references: chain, inReplyTo: chain[2] });
+    const text = new TextDecoder().decode(raw);
+    // Folded: continuation lines begin with the single space RFC 2822 requires.
+    expect(text).toContain("\r\n <");
+    for (const line of text.split("\r\n")) {
+      expect(line.length).toBeLessThanOrEqual(78);
+    }
+    const decoded = decodeMailFrame(raw);
+    expect(decoded?.references).toEqual(chain);
+    // In-Reply-To stays a SINGLE msg-id — the immediate parent, not the chain.
+    expect(decoded?.inReplyTo).toBe(chain[2]!);
+    expect(decoded?.messageId).toBe("<fixed-id@example.com>");
+  });
+
+  test("no References header when the chain is absent or empty", () => {
+    expect(headers(frame()).has("references")).toBe(false);
+    expect(headers(frame({ references: [] })).has("references")).toBe(false);
+    expect(decodeMailFrame(frame())?.references).toEqual([]);
+    expect(decodeMailFrame(frame())?.inReplyTo).toBeNull();
+  });
+
+  test("a frame with no Message-ID decodes to a null messageId", () => {
+    const raw = new TextEncoder().encode(
+      "From: a@b.c\r\nTo: d@e.f\r\nSubject: s\r\n\r\nbody\r\n",
+    );
+    const decoded = decodeMailFrame(raw);
+    expect(decoded?.messageId).toBeNull();
+    expect(decoded?.inReplyTo).toBeNull();
+    expect(decoded?.references).toEqual([]);
+  });
+
+  test("a threading value that is not a bracketed msg-id is refused", () => {
+    // A frame is frozen at rest: an unthreadable header written today is
+    // unthreadable forever, so this is refused at the builder rather than
+    // stored and discovered by an MTA.
+    expect(() => frame({ messageId: "fixed-id@example.com" })).toThrow(
+      RangeError,
+    );
+    expect(() => frame({ messageId: "<<double@example.com>>" })).toThrow(
+      RangeError,
+    );
+    expect(() => frame({ inReplyTo: "parent@example.com" })).toThrow(RangeError);
+    expect(() =>
+      frame({ references: ["<ok@example.com>", "not-an-id"] }),
+    ).toThrow(RangeError);
+    expect(() => frame({ references: ["<no-domain>"] })).toThrow(RangeError);
+  });
+
+  test("a quoted local part (RFC 5322 obs-id-left) is accepted", () => {
+    // `"john doe"@example.com` is a legal (if obsolete-syntax) local part;
+    // widened rather than documented as a limitation because a quoted local
+    // part is real, if rare, on host-supplied threading headers.
+    const h = headers(
+      frame({ messageId: '<"john doe"@example.com>' }),
+    );
+    expect(h.get("message-id")).toBe('<"john doe"@example.com>');
+    expect(
+      () => frame({ inReplyTo: '<"a b"@example.com>' }),
+    ).not.toThrow();
+    // A quoted part still cannot contain a bare `<` or `>`, and an unescaped
+    // trailing quote must close the string before the `@`.
+    expect(() => frame({ messageId: '<"open@example.com>' })).toThrow(
+      RangeError,
+    );
+  });
+
   test("the body round-trips through decodeMailFrame", () => {
     const decoded = decodeMailFrame(frame({ body: "line one\nline two" }));
     expect(decoded?.body).toBe("line one\nline two");

@@ -91,6 +91,14 @@ export const principalMail = mailboxPgSchema.table(
     subject: text("subject"),
     fromAddress: text("from_address"),
     messageKey: text("message_key"),
+    // The threading headers, cached off `raw` at write for the SAME reason
+    // `subject` and `from_address` are: list never loads the MIME frame, so a
+    // client renders a thread from the projection alone instead of fetching
+    // every message's `raw` to read two headers. `raw` stays authoritative —
+    // detail re-derives both from the frame. Nullable because a frame the MIME
+    // parser rejects, or one carrying no such header, still persists.
+    messageId: text("message_id"),
+    inReplyTo: text("in_reply_to"),
     // Plain `jsonb` with NO `$type<MailboxRef[]>()`. A `$type` here is a claim
     // the column cannot keep: nothing in Postgres constrains this blob's shape,
     // and a row written by an older version (or by the host directly) will

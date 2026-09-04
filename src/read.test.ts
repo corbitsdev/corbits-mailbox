@@ -51,6 +51,63 @@ describe("listUserMailbox", () => {
     expect(page.items[0]?.subject).toBe("For p1");
   });
 
+  test("carries the threading headers from the cached columns", async () => {
+    // The list path never selects `raw`, so a client can only thread a page if
+    // these come off the cached columns — which is why they are cached at all.
+    const written = await writeMailboxMessage(db, {
+      tenantId: "t1",
+      principalId: "p1",
+      address: "p1@t1.example",
+      fromAddress: "a@t1.example",
+      subject: "Re: thread",
+      body: "Body",
+      messageKey: "threaded",
+      inReplyTo: "<parent@t1.example>",
+      references: ["<root@t1.example>", "<parent@t1.example>"],
+    });
+    const page = await listUserMailbox(db, {
+      priorities: TEST_VOCABULARY.priorities,
+      tenantId: "t1",
+      principalId: "p1",
+      limit: 50,
+      view: "all",
+    });
+    const item = page.items[0];
+    expect(item?.inReplyTo).toBe("<parent@t1.example>");
+    // A real minted Message-ID, not the row id fallback.
+    expect(item?.messageId).toMatch(/^<[^<>]+@t1\.example>$/);
+    expect(item?.messageId).not.toBe(written!.id);
+
+    // Detail re-derives both from the frame and agrees with the list.
+    const detail = await getMailboxMessage(db, {
+      tenantId: "t1",
+      principalId: "p1",
+      id: written!.id,
+    });
+    expect(detail?.inReplyTo).toBe("<parent@t1.example>");
+    expect(detail?.messageId).toBe(item?.messageId ?? "");
+  });
+
+  test("omits inReplyTo for a message that is not a reply", async () => {
+    await writeMailboxMessage(db, {
+      tenantId: "t1",
+      principalId: "p1",
+      address: "p1@t1.example",
+      fromAddress: "a@t1.example",
+      subject: "Root",
+      body: "Body",
+      messageKey: "root",
+    });
+    const page = await listUserMailbox(db, {
+      priorities: TEST_VOCABULARY.priorities,
+      tenantId: "t1",
+      principalId: "p1",
+      limit: 50,
+      view: "all",
+    });
+    expect(page.items[0]?.inReplyTo).toBeUndefined();
+  });
+
   test("keyset pagination: limit+1 detects hasMore and mints nextCursor", async () => {
     for (let i = 0; i < 3; i++) {
       await writeMailboxMessage(db, {
@@ -245,12 +302,12 @@ describe("getMailboxMessage", () => {
       view: "all",
     });
     const item = page.items.find((m) => m.id === written!.id);
-    // List never decodes the frame, so no snippet and no body.
-    // messageId falls back to the row id (no Message-ID header without raw).
+    // List never decodes the frame, so no snippet and no body. messageId comes
+    // off the cached column — the minted id, not the row id fallback.
     expect(item?.snippet).toBeUndefined();
     expect(item?.subject).toBe("Long");
     expect(item?.from).toBe("a@t1.example");
-    expect(item?.messageId).toBe(written!.id);
+    expect(item?.messageId).toMatch(/^<[^<>]+@t1\.example>$/);
     expect(item?.to).toEqual(["p1@t1.example"]);
 
     const detail = await getMailboxMessage(db, {

@@ -135,6 +135,89 @@ export const MIGRATIONS: Migration[] = [
          WHERE "trashed_at" IS NOT NULL`,
     ],
   },
+  {
+    // The threading headers, cached alongside `subject` and `from_address` so
+    // the list projection can render a thread without loading `raw`. Additive
+    // and nullable: nothing about an existing row becomes invalid, and a frame
+    // carrying neither header keeps both columns NULL.
+    id: "0002_mail_threading_headers",
+    statements: [
+      sql`ALTER TABLE "mailbox"."principal_mail"
+         ADD COLUMN IF NOT EXISTS "message_id" text`,
+      sql`ALTER TABLE "mailbox"."principal_mail"
+         ADD COLUMN IF NOT EXISTS "in_reply_to" text`,
+      // Backfill from the frozen frame, so rows written before these columns
+      // existed project the same headers a row written after them does —
+      // otherwise threading would silently start at the upgrade.
+      //
+      // The header section is sliced out of `raw` at the BYTEA level, before
+      // any text conversion runs, by searching for the first blank-line
+      // separator (`\r\n\r\n`, falling back to a bare `\n\n` for frames that
+      // never had their line endings normalized) — a body line that happens
+      // to begin `Message-ID:` still cannot be mistaken for a header, exactly
+      // as the original text-level split guaranteed. No separator at all
+      // means no reliable header/body boundary, so the whole frame is
+      // searched, matching the pre-existing degrade for a headerless frame.
+      //
+      // Postgres `text` cannot hold a NUL byte (0x00) in ANY encoding — that is
+      // a server-side invariant, not an encoding limitation, so choosing UTF8
+      // over LATIN1 would not have helped, and Postgres's own `bytea` has no
+      // `replace`/`regexp_replace` overload to lean on either (PG16). A single
+      // legacy frame with a NUL anywhere in `raw` (a binary attachment is the
+      // common case) used to abort the entire UPDATE — and with it, every
+      // boot, forever, because the migration ledger row for 0002 would never
+      // commit.
+      //
+      // `clean_bytes` rebuilds the (already header-only) bytea slice one byte
+      // at a time via `get_byte`/`set_byte`, keeping every byte except 0x00,
+      // so NUL cannot reach `convert_from` at all — the conversion can no
+      // longer fail on this row. LATIN1 still accepts every remaining byte
+      // value 0-255, so header names and msg-ids (both ASCII) survive
+      // unchanged. A NUL is not expected in a real header, so stripping it
+      // here costs nothing for well-formed mail and only spares the migration
+      // from a legacy body's bytes it should never have been reading. The
+      // per-byte scan runs only over the (small, already-sliced) header
+      // section of rows still missing both cached columns, once, at upgrade.
+      sql`UPDATE "mailbox"."principal_mail" AS pm
+         SET "message_id" = h."message_id", "in_reply_to" = h."in_reply_to"
+         FROM (
+           SELECT "id",
+             substring(head from '(?ni)^Message-ID:[[:space:]]*(<[^<>]+>)') AS "message_id",
+             substring(head from '(?ni)^In-Reply-To:[[:space:]]*(<[^<>]+>)') AS "in_reply_to"
+           FROM (
+             SELECT "id",
+               replace(
+                 convert_from(clean_bytes, 'LATIN1'),
+                 chr(13) || chr(10), chr(10)
+               ) AS head
+             FROM (
+               SELECT sliced."id",
+                 COALESCE(
+                   (SELECT string_agg(set_byte(decode('00', 'hex'), 0, b), ''::bytea ORDER BY i)
+                      FROM generate_series(0, octet_length(sliced.head_bytes) - 1) AS i,
+                           LATERAL (SELECT get_byte(sliced.head_bytes, i) AS b) AS byte
+                     WHERE b <> 0),
+                   ''::bytea
+                 ) AS clean_bytes
+               FROM (
+                 SELECT "id",
+                   CASE
+                     WHEN position(decode('0d0a0d0a', 'hex') IN "raw") > 0
+                       THEN substring("raw" FOR position(decode('0d0a0d0a', 'hex') IN "raw") - 1)
+                     WHEN position(decode('0a0a', 'hex') IN "raw") > 0
+                       THEN substring("raw" FOR position(decode('0a0a', 'hex') IN "raw") - 1)
+                     ELSE "raw"
+                   END AS head_bytes
+                 FROM "mailbox"."principal_mail"
+                 WHERE "message_id" IS NULL AND "in_reply_to" IS NULL
+               ) sliced
+             ) cleaned
+           ) heads
+         ) h
+         WHERE pm."id" = h."id"
+           AND (h."message_id" IS NOT NULL OR h."in_reply_to" IS NOT NULL)`,
+    ],
+  },
 ];
 
 const DIALECT = new PgDialect();

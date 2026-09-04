@@ -16,6 +16,7 @@ import {
   MigrationChecksumError,
   runMailboxMigrations,
 } from "./migrations.js";
+import { buildMailFrame } from "./frame.js";
 import {
   createHostControlPlane,
   seedScope,
@@ -78,6 +79,8 @@ describe("runMailboxMigrations", () => {
         "direction",
         "from_address",
         "id",
+        "in_reply_to",
+        "message_id",
         "message_key",
         "principal_id",
         "raw",
@@ -263,6 +266,204 @@ describe("runMailboxMigrations", () => {
     });
   });
 
+  test("0002 backfills the threading headers from legacy rows' raw", async () => {
+    // The state every already-deployed host is in at upgrade: rows written
+    // before the cached columns existed, so `raw` carries the headers and the
+    // columns are NULL. Without the backfill, threading would silently begin at
+    // the upgrade and every older message would project no parent.
+    await fromEmpty(async ({ db }) => {
+      // Build the pre-0002 schema, then seed through it.
+      await runMailboxMigrations(db);
+      await db.execute(
+        sql`ALTER TABLE "mailbox"."principal_mail"
+            DROP COLUMN "message_id", DROP COLUMN "in_reply_to"`,
+      );
+      await db.execute(
+        sql`DELETE FROM "mailbox"."corbits_mailbox_migrations"
+            WHERE "id" = '0002_mail_threading_headers'`,
+      );
+      await seedScope(db, "acme", "user-1");
+
+      const threaded = buildMailFrame({
+        from: "bot@acme.example",
+        to: "user-1@acme.example",
+        subject: "Re: legacy",
+        body: "Body",
+        messageId: "<child@acme.example>",
+        inReplyTo: "<parent@acme.example>",
+        references: ["<root@acme.example>", "<parent@acme.example>"],
+      });
+      // A frame with neither header, and one whose bytes are not valid UTF-8:
+      // both must survive the backfill statement rather than abort it.
+      const headerless = new TextEncoder().encode(
+        "From: bot@acme.example\r\nSubject: no ids\r\n\r\nBody\r\n",
+      );
+      const invalidUtf8 = Uint8Array.from([
+        ...new TextEncoder().encode("From: bot@acme.example\r\nMessage-ID: <bytes@acme.example>\r\n\r\n"),
+        0xff,
+        0xfe,
+      ]);
+      for (const [key, raw] of [
+        ["legacy-threaded", threaded],
+        ["legacy-headerless", headerless],
+        ["legacy-invalid-utf8", invalidUtf8],
+      ] as const) {
+        await db.execute(sql`
+          INSERT INTO "mailbox"."principal_mail"
+            ("tenant_id","principal_id","address","direction","raw","message_key")
+          VALUES ('acme','user-1','user-1@acme.example','inbound',
+                  ${Buffer.from(raw)}, ${key})
+        `);
+      }
+
+      await runMailboxMigrations(db);
+
+      const rows = await db.execute<{
+        message_key: string;
+        message_id: string | null;
+        in_reply_to: string | null;
+      }>(sql`SELECT "message_key", "message_id", "in_reply_to"
+             FROM "mailbox"."principal_mail" ORDER BY "message_key"`);
+      expect(
+        rows.map((r) => [r.message_key, r.message_id, r.in_reply_to]),
+      ).toEqual([
+        ["legacy-headerless", null, null],
+        ["legacy-invalid-utf8", "<bytes@acme.example>", null],
+        ["legacy-threaded", "<child@acme.example>", "<parent@acme.example>"],
+      ]);
+    });
+  });
+
+  test("0002 survives a legacy frame with a NUL byte in its body", async () => {
+    // Postgres `text` cannot hold 0x00 in any encoding — a single legacy
+    // frame with a NUL anywhere in `raw` used to abort the whole UPDATE (and
+    // with it the ledger insert), which meant every subsequent boot failed
+    // forever. This is RED against the pre-fix backfill (LATIN1-decoding the
+    // entire `raw`, NUL included) and GREEN once only the NUL-stripped header
+    // slice reaches `convert_from`.
+    await fromEmpty(async ({ db }) => {
+      await runMailboxMigrations(db);
+      await db.execute(
+        sql`ALTER TABLE "mailbox"."principal_mail"
+            DROP COLUMN "message_id", DROP COLUMN "in_reply_to"`,
+      );
+      await db.execute(
+        sql`DELETE FROM "mailbox"."corbits_mailbox_migrations"
+            WHERE "id" = '0002_mail_threading_headers'`,
+      );
+      await seedScope(db, "acme", "user-1");
+
+      const enc = new TextEncoder();
+      const ok = enc.encode(
+        "From: a@b.c\r\nMessage-ID: <ok@acme.example>\r\n\r\nBody\r\n",
+      );
+      const nulBody = Uint8Array.from([
+        ...enc.encode(
+          "From: a@b.c\r\nMessage-ID: <nul@acme.example>\r\n" +
+            "Content-Type: application/octet-stream\r\n\r\n",
+        ),
+        0x00,
+        0x41,
+      ]);
+      for (const [key, raw] of [
+        ["nul-ok", ok],
+        ["nul-body", nulBody],
+      ] as const) {
+        await db.execute(sql`
+          INSERT INTO "mailbox"."principal_mail"
+            ("tenant_id","principal_id","address","direction","raw","message_key")
+          VALUES ('acme','user-1','user-1@acme.example','inbound',
+                  ${Buffer.from(raw)}, ${key})
+        `);
+      }
+
+      await runMailboxMigrations(db);
+
+      const ledger = await db.execute<{ id: string }>(
+        sql`SELECT "id" FROM "mailbox"."corbits_mailbox_migrations" ORDER BY "id"`,
+      );
+      expect(ledger.map((r) => r.id)).toEqual([
+        "0001_principal_mailbox",
+        "0002_mail_threading_headers",
+      ]);
+
+      const rows = await db.execute<{
+        message_key: string;
+        message_id: string | null;
+      }>(
+        sql`SELECT "message_key", "message_id" FROM "mailbox"."principal_mail"
+            ORDER BY "message_key"`,
+      );
+      expect(rows.map((r) => [r.message_key, r.message_id])).toEqual([
+        ["nul-body", "<nul@acme.example>"],
+        ["nul-ok", "<ok@acme.example>"],
+      ]);
+    });
+  });
+
+  test("0002 backfill agrees with the runtime decoder on non-bracketed and multi-id In-Reply-To", async () => {
+    // Characterization of the shared rule (see persist.ts): the FIRST
+    // bracketed msg-id if present, else NULL. `parseMsgIdList` is what the
+    // runtime path now uses too, so a frame decoded before or after the
+    // upgrade projects the same cached `in_reply_to`.
+    await fromEmpty(async ({ db }) => {
+      await runMailboxMigrations(db);
+      await db.execute(
+        sql`ALTER TABLE "mailbox"."principal_mail"
+            DROP COLUMN "message_id", DROP COLUMN "in_reply_to"`,
+      );
+      await db.execute(
+        sql`DELETE FROM "mailbox"."corbits_mailbox_migrations"
+            WHERE "id" = '0002_mail_threading_headers'`,
+      );
+      await seedScope(db, "acme", "user-1");
+      const enc = new TextEncoder();
+      const cases = [
+        [
+          "bare",
+          "From: a@b.c\r\nMessage-ID: <x@acme.example>\r\nIn-Reply-To: foo@bar\r\n\r\nBody\r\n",
+        ],
+        [
+          "multi",
+          "From: a@b.c\r\nMessage-ID: <y@acme.example>\r\nIn-Reply-To: <a@x> <b@x>\r\n\r\nBody\r\n",
+        ],
+        [
+          "folded",
+          "From: a@b.c\r\nMessage-ID:\r\n <z@acme.example>\r\nIn-Reply-To:\r\n\t<p@x>\r\n\r\nBody\r\n",
+        ],
+        [
+          "lf",
+          "From: a@b.c\nMessage-ID: <lf@acme.example>\nIn-Reply-To: <p@x>\n\nMessage-ID: <body@x>\nBody\n",
+        ],
+      ] as const;
+      for (const [key, text] of cases) {
+        await db.execute(sql`
+          INSERT INTO "mailbox"."principal_mail"
+            ("tenant_id","principal_id","address","direction","raw","message_key")
+          VALUES ('acme','user-1','user-1@acme.example','inbound',
+                  ${Buffer.from(enc.encode(text))}, ${key})
+        `);
+      }
+      await runMailboxMigrations(db);
+      const rows = await db.execute<{
+        message_key: string;
+        message_id: string | null;
+        in_reply_to: string | null;
+      }>(
+        sql`SELECT "message_key","message_id","in_reply_to"
+            FROM "mailbox"."principal_mail" ORDER BY "message_key"`,
+      );
+      expect(
+        rows.map((r) => [r.message_key, r.message_id, r.in_reply_to]),
+      ).toEqual([
+        ["bare", "<x@acme.example>", null],
+        ["folded", "<z@acme.example>", "<p@x>"],
+        ["lf", "<lf@acme.example>", "<p@x>"],
+        ["multi", "<y@acme.example>", "<a@x>"],
+      ]);
+    });
+  });
+
   test("is idempotent: running twice does not error and applies once", async () => {
     await fromEmpty(async ({ db }) => {
       await runMailboxMigrations(db);
@@ -274,6 +475,7 @@ describe("runMailboxMigrations", () => {
       );
       expect(rows.map((r) => [r.id, r.count])).toEqual([
         ["0001_principal_mailbox", "1"],
+        ["0002_mail_threading_headers", "1"],
       ]);
     });
   });
@@ -477,7 +679,10 @@ describe("runMailboxMigrations under concurrent cold start", () => {
     const ledger = await admin.unsafe(
       `SELECT id FROM mailbox.corbits_mailbox_migrations ORDER BY id`,
     );
-    expect(ledger.map((r) => r.id)).toEqual(["0001_principal_mailbox"]);
+    expect(ledger.map((r) => r.id)).toEqual([
+      "0001_principal_mailbox",
+      "0002_mail_threading_headers",
+    ]);
   });
 
   test("a second wave against an already-migrated schema is a no-op for all", async () => {

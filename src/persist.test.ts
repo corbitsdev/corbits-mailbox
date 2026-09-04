@@ -96,6 +96,89 @@ describe("sender auth", () => {
     expect(await rowsFor("acme", "user-2")).toHaveLength(1);
   });
 
+  test("the inbound frame's threading headers are cached on the row", async () => {
+    // The persist path receives a frame it did not build, so the caches come
+    // off the decode — the list projection reads them without loading `raw`.
+    const { upstream } = recordingUpstream();
+    const persist = createMailboxPersist(db, {
+      upstream,
+      authorizeSender: () => ACTIVE,
+    });
+
+    await persist(
+      args({
+        raw: buildMailFrame({
+          from: SENDER,
+          to: "usr_user-1@acme.example",
+          subject: "Re: run",
+          body: "Body",
+          messageId: "<child@acme.example>",
+          inReplyTo: "<parent@acme.example>",
+          references: ["<root@acme.example>", "<parent@acme.example>"],
+        }),
+      }),
+    );
+
+    const [row] = await rowsFor("acme", "user-1");
+    expect(row?.messageId).toBe("<child@acme.example>");
+    expect(row?.inReplyTo).toBe("<parent@acme.example>");
+  });
+
+  test("a frame with no threading headers leaves both caches NULL", async () => {
+    const { upstream } = recordingUpstream();
+    const persist = createMailboxPersist(db, {
+      upstream,
+      authorizeSender: () => ACTIVE,
+    });
+
+    await persist(args());
+
+    const [row] = await rowsFor("acme", "user-1");
+    expect(row?.messageId).toBe("<fixed@acme.example>");
+    expect(row?.inReplyTo).toBeNull();
+  });
+
+  test("caches only the first bracketed msg-id from a non-bracketed or multi-id In-Reply-To", async () => {
+    // The persist path decodes a frame it never built, so `In-Reply-To` is
+    // NOT re-validated against `assertMsgId` (an external MTA's headers are
+    // not this package's frame to reject) — it can be a bare id, several
+    // ids, or otherwise malformed. The cached column must still agree with
+    // what migration `0002_mail_threading_headers`'s backfill produces for
+    // the same header text: the FIRST bracketed msg-id if present, else
+    // NULL — never the raw header value.
+    const { upstream } = recordingUpstream();
+    const persist = createMailboxPersist(db, {
+      upstream,
+      authorizeSender: () => ACTIVE,
+    });
+    const enc = new TextEncoder();
+
+    await persist(
+      args({
+        raw: enc.encode(
+          `From: ${SENDER}\r\nTo: usr_user-1@acme.example\r\n` +
+            "Message-ID: <bare@acme.example>\r\nIn-Reply-To: foo@bar\r\n\r\nBody\r\n",
+        ),
+      }),
+    );
+    const [bare] = await rowsFor("acme", "user-1");
+    expect(bare?.messageId).toBe("<bare@acme.example>");
+    expect(bare?.inReplyTo).toBeNull();
+
+    await db.execute(sql`DELETE FROM "mailbox"."principal_mail"`);
+    await persist(
+      args({
+        raw: enc.encode(
+          `From: ${SENDER}\r\nTo: usr_user-1@acme.example\r\n` +
+            "Message-ID: <multi@acme.example>\r\nIn-Reply-To: <a@x> <b@x>\r\n\r\nBody\r\n",
+        ),
+      }),
+    );
+    const [multi] = await rowsFor("acme", "user-1");
+    expect(multi?.messageId).toBe("<multi@acme.example>");
+    expect(multi?.inReplyTo).toBe("<a@x>");
+  });
+
   test("an unauthorized sender writes NO mailbox row but is still delegated upstream", async () => {
     // The reference predicate is "active instance only": a sender the host
     // cannot resolve to a live instance is refused here.

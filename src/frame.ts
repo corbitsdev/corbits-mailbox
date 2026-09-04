@@ -35,6 +35,70 @@ export function generateMailboxMessageId(fromAddress: string): string {
   return `<${crypto.randomUUID()}@${domain === "" ? MESSAGE_ID_FALLBACK_DOMAIN : domain}>`;
 }
 
+/**
+ * A msg-id as every threading header carries it: exactly one pair of angle
+ * brackets, an `@`, and no whitespace outside a quoted local part. The same
+ * shape `@intx/mime`'s `generateMessageId` and `generateMailboxMessageId`
+ * return.
+ *
+ * The local part (`id-left`) accepts either a dot-atom token (no `<`, `>`,
+ * whitespace, or `"`) or an RFC 5322 quoted-string (`"..."`, backslash-escaped
+ * quotes and backslashes allowed inside) — `<"john doe"@example.com>` is a
+ * legal msg-id under `obs-id-left` and every mainstream MTA emits and accepts
+ * it. The domain part (`id-right`) stays a plain dot-atom token: this package
+ * mints only dot-atom domains, and widening it further is not needed to
+ * accept ids this package did not author.
+ *
+ * This validates the header SHAPE only, never who may claim it: a frame
+ * arriving on the persist path (`persist.ts`) is never re-validated against
+ * this regex — its `In-Reply-To`/`References` are cached (or dropped) exactly
+ * as decoded, because an external MTA's headers are not this package's frame
+ * to reject.
+ */
+const MSG_ID = /^<(?:[^<>\s"]+|"(?:[^"\\]|\\.)*")@[^<>\s]+>$/;
+
+/**
+ * Refuse a threading header value that is not a bracketed msg-id.
+ *
+ * `RangeError` for the same reason the frame-byte cap throws it: a caller that
+ * hands this builder `uuid@host` (or `<<uuid@host>>`) has a bug, and a frame is
+ * frozen at rest — an unthreadable `References:` written today is unthreadable
+ * forever. Rejecting at the builder is the last point where the caller can
+ * still be blamed precisely.
+ */
+export function assertMsgId(value: string, field: string): void {
+  if (!MSG_ID.test(value)) {
+    throw new RangeError(
+      `mailbox frame ${field} must be a bracketed msg-id (<local@domain>), got ${JSON.stringify(value)}`,
+    );
+  }
+}
+
+// RFC 2822 §2.1.1 caps a line at 78 characters; a References chain on a deep
+// thread passes that within a handful of ids. Folded before each id that would
+// overflow, with the single leading space RFC 2822 §2.2.3 requires — an
+// unfolding parser joins the pieces back into one space-separated value.
+const HEADER_LINE_MAX = 78;
+
+function foldReferences(references: readonly string[]): string {
+  const lines: string[] = ["References:"];
+  for (const reference of references) {
+    const current = lines[lines.length - 1]!;
+    if (current.length + 1 + reference.length > HEADER_LINE_MAX) {
+      lines.push(` ${reference}`);
+      continue;
+    }
+    lines[lines.length - 1] = `${current} ${reference}`;
+  }
+  return lines.join("\r\n");
+}
+
+/** Split an unfolded `References:` value into its msg-ids, oldest first. */
+export function parseMsgIdList(value: string | undefined): string[] {
+  if (value === undefined) return [];
+  return value.match(/<[^<>]+>/g) ?? [];
+}
+
 export type MailFrameArgs = {
   from: string;
   to: string;
@@ -50,6 +114,14 @@ export type MailFrameArgs = {
   messageId: string;
   /** Also a complete msg-id, brackets included. */
   inReplyTo?: string;
+  /**
+   * The thread's ancestry, OLDEST FIRST — the order RFC 2822 §3.6.4 defines
+   * and every threading client walks. Each entry is a complete msg-id,
+   * brackets included. `In-Reply-To` stays a single msg-id (the immediate
+   * parent); this is the whole chain, and the two are independent — a caller
+   * supplying one is not obliged to supply the other.
+   */
+  references?: string[];
 };
 
 /**
@@ -61,15 +133,27 @@ export type MailFrameArgs = {
  */
 export function buildMailFrame(args: MailFrameArgs): Uint8Array {
   const from = headerValue(args.from);
+  const messageId = headerValue(args.messageId);
+  assertMsgId(messageId, "messageId");
   const headers = [
     `From: ${from}`,
     `To: ${headerValue(args.to)}`,
     `Subject: ${headerValue(args.subject)}`,
     `Date: ${formatRFC2822Date(new Date())}`,
-    `Message-ID: ${headerValue(args.messageId)}`,
+    `Message-ID: ${messageId}`,
   ];
   if (args.inReplyTo !== undefined) {
-    headers.push(`In-Reply-To: ${headerValue(args.inReplyTo)}`);
+    const inReplyTo = headerValue(args.inReplyTo);
+    assertMsgId(inReplyTo, "inReplyTo");
+    headers.push(`In-Reply-To: ${inReplyTo}`);
+  }
+  if (args.references !== undefined && args.references.length > 0) {
+    const references = args.references.map((reference) => {
+      const value = headerValue(reference);
+      assertMsgId(value, "references entry");
+      return value;
+    });
+    headers.push(foldReferences(references));
   }
   const body = args.body.replace(/\r?\n/g, "\r\n");
   return new TextEncoder().encode(`${headers.join("\r\n")}\r\n\r\n${body}\r\n`);
@@ -78,6 +162,15 @@ export function buildMailFrame(args: MailFrameArgs): Uint8Array {
 export type DecodedFrame = {
   headers: Map<string, string>;
   body: string;
+  /**
+   * The threading headers, parsed once here rather than re-derived by every
+   * reader. `messageId` and `inReplyTo` are null when the frame carries no such
+   * header; `references` is `[]`, oldest first, for the same case — a chain of
+   * no ancestors is an empty chain, not an absent one.
+   */
+  messageId: string | null;
+  inReplyTo: string | null;
+  references: string[];
 };
 
 function normalizeMailText(bytes: Uint8Array): string {
@@ -144,5 +237,8 @@ export function decodeMailFrame(raw: Uint8Array): DecodedFrame | null {
   return {
     headers: parsed.headers,
     body: extractFrameBody(raw, parsed.headers, parsed.bodyOffset),
+    messageId: parsed.headers.get("message-id") ?? null,
+    inReplyTo: parsed.headers.get("in-reply-to") ?? null,
+    references: parseMsgIdList(parsed.headers.get("references")),
   };
 }
