@@ -222,7 +222,8 @@ export function createMailboxPersist<R>(
     const decoded = decodeMailFrame(raw);
     const subject = decoded?.headers.get("subject") ?? null;
     const fromAddress = decoded?.headers.get("from") ?? null;
-    const messageId = decoded?.headers.get("message-id") ?? null;
+    const messageId = decoded?.messageId ?? null;
+    const inReplyTo = decoded?.inReplyTo ?? null;
 
     // Mail rows and their management rows commit together: the management row
     // is created eagerly with the message (see `writeMailboxMessage`), and a
@@ -242,6 +243,8 @@ export function createMailboxPersist<R>(
             raw: Buffer.from(raw),
             subject,
             fromAddress,
+            messageId,
+            inReplyTo,
             messageKey: transportMessageKey(
               messageId,
               raw,

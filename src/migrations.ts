@@ -135,6 +135,47 @@ export const MIGRATIONS: Migration[] = [
          WHERE "trashed_at" IS NOT NULL`,
     ],
   },
+  {
+    // The threading headers, cached alongside `subject` and `from_address` so
+    // the list projection can render a thread without loading `raw`. Additive
+    // and nullable: nothing about an existing row becomes invalid, and a frame
+    // carrying neither header keeps both columns NULL.
+    id: "0002_mail_threading_headers",
+    statements: [
+      sql`ALTER TABLE "mailbox"."principal_mail"
+         ADD COLUMN IF NOT EXISTS "message_id" text`,
+      sql`ALTER TABLE "mailbox"."principal_mail"
+         ADD COLUMN IF NOT EXISTS "in_reply_to" text`,
+      // Backfill from the frozen frame, so rows written before these columns
+      // existed project the same headers a row written after them does —
+      // otherwise threading would silently start at the upgrade.
+      //
+      // `raw` is decoded as LATIN1 rather than UTF8: LATIN1 accepts every byte
+      // sequence, and a single non-UTF8 byte anywhere in one frame would
+      // otherwise abort the whole statement. Header names and msg-ids are
+      // ASCII, so nothing is lost. Only the header section is searched (the
+      // text before the first blank line), so a body line that happens to
+      // begin `Message-ID:` cannot be mistaken for a header.
+      sql`UPDATE "mailbox"."principal_mail" AS pm
+         SET "message_id" = h."message_id", "in_reply_to" = h."in_reply_to"
+         FROM (
+           SELECT "id",
+             substring(head from '(?ni)^Message-ID:[[:space:]]*(<[^<>]+>)') AS "message_id",
+             substring(head from '(?ni)^In-Reply-To:[[:space:]]*(<[^<>]+>)') AS "in_reply_to"
+           FROM (
+             SELECT "id",
+               split_part(
+                 replace(convert_from("raw", 'LATIN1'), chr(13) || chr(10), chr(10)),
+                 chr(10) || chr(10), 1
+               ) AS head
+             FROM "mailbox"."principal_mail"
+             WHERE "message_id" IS NULL AND "in_reply_to" IS NULL
+           ) heads
+         ) h
+         WHERE pm."id" = h."id"
+           AND (h."message_id" IS NOT NULL OR h."in_reply_to" IS NOT NULL)`,
+    ],
+  },
 ];
 
 const DIALECT = new PgDialect();

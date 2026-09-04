@@ -112,6 +112,12 @@ export type WriteMailboxMessageArgs = {
   /** Idempotency key; a second write with the same key is a no-op (returns null). */
   messageKey?: string;
   inReplyTo?: string;
+  /**
+   * The thread's ancestry, oldest first; each entry a bracketed msg-id. Emitted
+   * as a folded `References:` header on the frame this write builds — see
+   * `buildMailFrame`. `RangeError` on an entry that is not a bracketed msg-id.
+   */
+  references?: string[];
   refs?: MailboxRef[];
   /**
    * Triage known at write time. Values are the HOST's vocabulary — this
@@ -135,8 +141,16 @@ type MailboxInsertTx = {
 
 /**
  * Encode args into a durable MIME frame. Mint a fresh Message-ID each call.
+ *
+ * The minted id is returned alongside the bytes rather than re-parsed out of
+ * them: it is what the row's `message_id` cache stores, and re-decoding a frame
+ * this function just built to recover a value it already had is work with a
+ * failure mode attached.
  */
-function encodeMailboxFrame(args: WriteMailboxMessageArgs): Uint8Array {
+function encodeMailboxFrame(args: WriteMailboxMessageArgs): {
+  raw: Uint8Array;
+  messageId: string;
+} {
   const messageId = generateMailboxMessageId(args.fromAddress);
   const frameArgs: Parameters<typeof buildMailFrame>[0] = {
     from: args.fromAddress,
@@ -146,7 +160,8 @@ function encodeMailboxFrame(args: WriteMailboxMessageArgs): Uint8Array {
     messageId,
   };
   if (args.inReplyTo !== undefined) frameArgs.inReplyTo = args.inReplyTo;
-  return buildMailFrame(frameArgs);
+  if (args.references !== undefined) frameArgs.references = args.references;
+  return { raw: buildMailFrame(frameArgs), messageId };
 }
 
 /**
@@ -160,9 +175,11 @@ function assertMailboxStringFieldsFit(args: {
   fromAddress: string;
   address: string;
   inReplyTo?: string;
+  references?: string[];
 }): void {
   const fields = [args.body, args.subject, args.fromAddress, args.address];
   if (args.inReplyTo !== undefined) fields.push(args.inReplyTo);
+  if (args.references !== undefined) fields.push(...args.references);
   for (const field of fields) {
     if (Buffer.byteLength(field) >= MAX_MAILBOX_FRAME_BYTES) {
       throw new RangeError(
@@ -183,6 +200,7 @@ async function insertMailboxMessage(
   tx: MailboxInsertTx,
   args: WriteMailboxMessageArgs,
   raw: Uint8Array,
+  messageId: string,
 ): Promise<{ id: string } | null> {
   assertMailboxFrameBytes(raw);
   const refs = boundRefs(args.refs, args.messageKey ?? null);
@@ -204,6 +222,8 @@ async function insertMailboxMessage(
       subject: args.subject,
       fromAddress: args.fromAddress,
       messageKey: args.messageKey ?? null,
+      messageId,
+      inReplyTo: args.inReplyTo ?? null,
       refs: refs ?? null,
     })
     .onConflictDoNothing({
@@ -257,11 +277,11 @@ export async function writeMailboxMessage(
   assertMailboxStringFieldsFit(args);
   // Encode and size-check the built frame before opening a transaction so
   // oversize input never pays for a begin/rollback.
-  const raw = encodeMailboxFrame(args);
+  const { raw, messageId } = encodeMailboxFrame(args);
   assertMailboxFrameBytes(raw);
   // One transaction for the mail row and its management row.
   const row = await db.transaction(async (tx) =>
-    insertMailboxMessage(tx, args, raw),
+    insertMailboxMessage(tx, args, raw, messageId),
   );
   if (!row) return null;
 
@@ -311,6 +331,10 @@ export type InboxItem = {
   body: string;
   source: string;
   externalId: string;
+  /** The immediate parent's msg-id, brackets included. */
+  inReplyTo?: string;
+  /** The thread's ancestry, oldest first; see `WriteMailboxMessageArgs`. */
+  references?: string[];
   refs?: MailboxRef[];
   // An adapter that already knows an item's triage verdict stamps it
   // at delivery rather than writing the row and immediately updating it.
@@ -363,6 +387,7 @@ export async function deliverInboxItems(
     messageKey: string;
     writeArgs: WriteMailboxMessageArgs;
     raw: Uint8Array;
+    messageId: string;
   };
   const prepared: Prepared[] = [];
   for (const item of items) {
@@ -378,23 +403,25 @@ export async function deliverInboxItems(
       body: item.body,
       messageKey,
     };
+    if (item.inReplyTo !== undefined) writeArgs.inReplyTo = item.inReplyTo;
+    if (item.references !== undefined) writeArgs.references = item.references;
     if (item.refs !== undefined) writeArgs.refs = item.refs;
     if (item.priority !== undefined) writeArgs.priority = item.priority;
     if (item.classification !== undefined) {
       writeArgs.classification = item.classification;
     }
     if (item.status !== undefined) writeArgs.status = item.status;
-    const raw = encodeMailboxFrame(writeArgs);
+    const { raw, messageId } = encodeMailboxFrame(writeArgs);
     assertMailboxFrameBytes(raw);
-    prepared.push({ item, messageKey, writeArgs, raw });
+    prepared.push({ item, messageKey, writeArgs, raw, messageId });
   }
 
   type Inserted = { id: string; item: InboxItem };
   const { results, inserted } = await db.transaction(async (tx) => {
     const results: DeliveredInboxItem[] = [];
     const inserted: Inserted[] = [];
-    for (const { item, messageKey, writeArgs, raw } of prepared) {
-      const written = await insertMailboxMessage(tx, writeArgs, raw);
+    for (const { item, messageKey, writeArgs, raw, messageId } of prepared) {
+      const written = await insertMailboxMessage(tx, writeArgs, raw, messageId);
       if (written === null) {
         results.push({ messageKey, id: null });
         continue;

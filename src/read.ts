@@ -279,6 +279,12 @@ export const MailboxMessageSchema = type({
   "subject?": "string",
   date: "string",
   messageId: "string",
+  /**
+   * The immediate parent's msg-id, when the message has one. Served from the
+   * cached column on the list path and from the frame on detail, so a client
+   * can thread a page without fetching every message's `raw`.
+   */
+  "inReplyTo?": "string",
   read: "boolean",
   "snippet?": "string",
   "refs?": MailboxRefArraySchema,
@@ -402,11 +408,15 @@ function toMailboxMessage(
     from: headers?.get("from") ?? row.fromAddress ?? "",
     to,
     date: toISODate(headers?.get("date"), row.createdAt),
-    messageId: headers?.get("message-id") ?? row.id,
+    // header -> cached column -> the row id. The row id is the last resort, not
+    // the cache: a frame with no Message-ID still needs a stable handle.
+    messageId: headers?.get("message-id") ?? row.messageId ?? row.id,
     read: row.readAt !== null,
   };
   const subject = headers?.get("subject") ?? row.subject ?? undefined;
   if (subject !== undefined) message.subject = subject;
+  const inReplyTo = headers?.get("in-reply-to") ?? row.inReplyTo ?? undefined;
+  if (inReplyTo !== undefined) message.inReplyTo = inReplyTo;
   if (decoded !== null && decoded.body.length > 0) {
     message.snippet = decoded.body.slice(0, SNIPPET_MAX_CHARS);
   }
