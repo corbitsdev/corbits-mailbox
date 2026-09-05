@@ -11,6 +11,15 @@ always called out under their own heading.
 
 ### Added
 
+- **`createMailboxPersist` accepts `resolveRefs` at insert time.** The new
+  `resolveRefs(args)` option — `args` is the persist args plus the resolved
+  `senderAuthorization` and the `decoded` frame (or `null`) — is called once
+  per frame, before the transaction opens, and its result (validated with
+  `MailboxRefArraySchema`, capped at `MAX_MAILBOX_REFS`) is stored on every
+  recipient row inside that same transaction, so the post-commit bus event
+  already carries refs. A throwing `resolveRefs` follows the existing
+  dual-write contract: logged, upstream unaffected, no mailbox row for that
+  frame.
 - **Threading headers on the frame and in the list projection.**
   `buildMailFrame` accepts `references` — the thread's ancestry, oldest
   first — and emits it as a folded `References:` header; `In-Reply-To`

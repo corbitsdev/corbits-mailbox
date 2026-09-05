@@ -10,6 +10,24 @@ Requires `@intx` 0.2.2 or newer.
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for the data model.
 
+## Dual-write persist
+
+```ts
+import { createMailboxPersist } from "@corbits/mailbox";
+
+const persist = createMailboxPersist(db, {
+  upstream: hostMailTransport.persist,
+  authorizeSender: (address) => resolveActiveInstance(address),
+  // Called once per frame, before the transaction — every recipient row
+  // gets the same refs, so a bus subscriber sees them on the `create` event.
+  resolveRefs: ({ decoded }) =>
+    decoded ? [{ kind: "workbench", id: decoded.messageId ?? "" }] : undefined,
+});
+```
+
+See ARCHITECTURE.md's persist section for the full contract, including
+`resolveRefs`'s dual-write-failure semantics.
+
 ## Install
 
 ```sh

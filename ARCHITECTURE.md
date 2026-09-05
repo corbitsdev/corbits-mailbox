@@ -58,15 +58,16 @@ tables foreign-key to both. Nothing changed in Interchange to make that work —
 the coupling lives entirely on this side.
 
 One further seam lives outside `mountMailbox`, on the write side:
-`createMailboxPersist(db, { upstream, authorizeSender, bus?, onRow? })` wraps a
-host's own mail-persist function so every addressed principal also gets a
-durable row. `authorizeSender(address) => { tenantId, domain } | null` is the
-host's decision — whether a sender address belongs to a *live* agent instance
-is not a schema fact. Returning `null` skips the mailbox write entirely while
-the frame still goes upstream. On the recipient side the package does consult
-the control plane: an address whose local part matches no known principal in
-the authorized tenant is skipped with a warning rather than minting a phantom
-mailbox row, and never costs the frame's real recipients their durable copy.
+`createMailboxPersist(db, { upstream, authorizeSender, bus?, onRow?, resolveRefs? })`
+wraps a host's own mail-persist function so every addressed principal also
+gets a durable row. `authorizeSender(address) => { tenantId, domain } | null`
+is the host's decision — whether a sender address belongs to a *live* agent
+instance is not a schema fact. Returning `null` skips the mailbox write
+entirely while the frame still goes upstream. On the recipient side the
+package does consult the control plane: an address whose local part matches
+no known principal in the authorized tenant is skipped with a warning rather
+than minting a phantom mailbox row, and never costs the frame's real
+recipients their durable copy.
 
 The wrapper's contract is **dual-write independence in both directions**: an
 `upstream` throw still attempts the mailbox write and then re-throws the
@@ -74,6 +75,20 @@ original error, and a mailbox-write failure is logged and never rejects a
 persist that upstream already completed. Under retry, the mailbox side is
 idempotent: package-owned transport `messageKey`s plus `onConflictDoNothing`
 collapse duplicate frames without failing the call or re-announcing.
+
+`resolveRefs(args)` — `args` is `MailboxPersistArgs` plus the resolved
+`senderAuthorization` and the `decoded` frame (or `null` if the parser
+rejected it) — is called ONCE per frame, before the transaction opens, not
+once per recipient: a host pointing every row at the same upstream entity
+does one lookup, not N. Its result is validated with `MailboxRefArraySchema`
+and capped at `MAX_MAILBOX_REFS` the same way `writeMailboxMessage`'s `refs`
+argument is (excess entries truncated, logged, never a throw), then stored on
+every recipient row of that frame INSIDE the same transaction — so the
+post-commit bus `create` event and any SSE subscriber already see refs on the
+row once it's readable. A throwing `resolveRefs` is handled exactly like any
+other pre-transaction failure: it falls under the same dual-write contract as
+the rest of the wrapper — logged, upstream unaffected (already ran, or still
+will, independently of this), and no mailbox row for that frame.
 
 `resolvePrincipal`'s signature is identical across the Corbits cores, so a host
 mounting more than one passes the same function to each.
