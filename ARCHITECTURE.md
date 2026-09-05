@@ -252,6 +252,37 @@ optional host `enqueue` hook run only after commit, and only for newly inserted
 ids. Both side effects are best-effort: a throw is logged with the message id
 and never rejects the delivery.
 
+**Two write paths, two shapes of batch.** `deliverInboxItems` is the
+**notify-item path**: one external item, fanned out to every addressed
+principal, keyed by `mailboxKey.inbox(source, externalId)` — unchanged by the
+addition below. `writeMailboxMessages(db, items, opts?)` is the
+**conversation path**: an arbitrary batch of `{ scope, args }` pairs — a
+sender's own outbound copy alongside every recipient's inbound copy of the
+same turn, mixed tenants and principals allowed — committed in the same
+single-transaction-or-none shape, with per-row `onConflictDoNothing` dedupe on
+the same `messageKey` partial unique index and bus events published only
+after commit, one per row this call actually inserted. A throw from any one
+item (an invalid scope, an oversize frame, a control-plane FK the item's
+scope does not satisfy) rolls back every row the batch would otherwise have
+written, including ones already inserted earlier in the same call — same
+atomicity guarantee as `deliverInboxItems`, over a caller-shaped item instead
+of an ingress-shaped one.
+
+**A write's Message-ID, direction, and dedupe key are now the caller's to
+set.** `WriteMailboxMessageArgs.messageId` lets a caller hand the write path
+the exact msg-id its own frame must carry (validated as a bracketed msg-id;
+`RangeError` otherwise) instead of always minting one — needed when a
+message's id has to be predictable ahead of the write, e.g. so a later
+`inReplyTo` can reference it. `direction` (default `"inbound"`) is a stored
+fact only; it does not change which rows the inbox views serve (still
+inbound-only, see Known limits). And `messageKey`, when the caller omits it,
+now defaults to `mailboxKey.transport(messageId, principalId)` — the same
+`transport:mid:<Message-ID>:<principalId>` shape `persist.ts`'s transport
+dual-write already uses — rather than leaving the row unkeyed: a retry that
+reuses the same caller-supplied `messageId` therefore dedupes for free, while
+two writes that each mint their own `messageId` never collide. A caller-
+supplied `messageKey` still overrides the default, exactly as before.
+
 **Bus publish isolates listeners.** `publishMailboxEvent` invokes each
 subscriber independently; one throwing listener does not stop the others. SSE
 connections serialize writes, bound the pending queue, and close on overflow or

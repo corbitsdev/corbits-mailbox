@@ -20,6 +20,35 @@ always called out under their own heading.
   already carries refs. A throwing `resolveRefs` follows the existing
   dual-write contract: logged, upstream unaffected, no mailbox row for that
   frame.
+- **Caller-supplied Message-ID, direction, and message key on writes; a
+  one-transaction batch write.** `WriteMailboxMessageArgs` gains
+  `messageId?: string` — when supplied it must be a bracketed msg-id
+  (validated with `assertMsgId`) and becomes the built frame's own
+  `Message-ID:` header and the cached `principal_mail.message_id`;
+  omitted, one is still minted exactly as before. It also gains
+  `direction?: "inbound" | "outbound"` (default `"inbound"`). Omitting
+  `messageKey` no longer leaves the row unkeyed: it now defaults to
+  `mailboxKey.transport(messageId, principalId)`, the same
+  `transport:mid:<Message-ID>:<principalId>` shape `persist.ts`'s
+  transport dual-write already uses — so retrying a write with the same
+  caller-supplied `messageId` dedupes without the caller minting its own
+  key, while two independent (differently-minted) writes never collide.
+  A caller-supplied `messageKey` still overrides the default.
+  New `writeMailboxMessages(db, items, opts?)` writes an arbitrary batch
+  of `{ scope, args }` pairs — e.g. a sender's outbound copy alongside
+  every recipient's inbound copy of the same conversation turn — in ONE
+  transaction: every row is scope-checked, field-checked, encoded, and
+  frame-asserted before the transaction opens, all new rows commit
+  together or none do, and a throw from any single item (an invalid
+  scope, an oversize frame, an unknown control-plane principal) rolls
+  back the whole batch. Per-row dedupe still runs through
+  `onConflictDoNothing` on the existing `messageKey` partial unique
+  index, so a retried batch dedupes row-by-row without failing; the
+  function returns only the ids of rows this call actually inserted.
+  Bus events publish only after commit, one per written row. This is the
+  **conversation path**; `deliverInboxItems` remains the **notify-item
+  path** for ingress adapters and is unchanged.
+
 - **Threading headers on the frame and in the list projection.**
   `buildMailFrame` accepts `references` — the thread's ancestry, oldest
   first — and emits it as a folded `References:` header; `In-Reply-To`
