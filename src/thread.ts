@@ -152,14 +152,39 @@ export function decodeMailboxThreadCursor(
 // fails degrades to no ancestry — logged — rather than failing the read.
 const MsgIdListSchema = type("string[]");
 
-function readRowReferences(stored: unknown, rowId: string): string[] {
+// One bad backfill would otherwise emit a warn line per bad row per page per
+// request — the same steady-state log spam `read.ts`'s `DroppedRefs` exists to
+// avoid. Collected per read and reported once, with a bounded sample of ids.
+const DROPPED_REFERENCES_SAMPLE = 5;
+
+type DroppedReferences = { rowIds: string[]; summary: string | null };
+
+function newDroppedReferences(): DroppedReferences {
+  return { rowIds: [], summary: null };
+}
+
+function reportDroppedReferences(dropped: DroppedReferences): void {
+  if (dropped.rowIds.length === 0) return;
+  logger.warn(
+    "mailbox references column failed schema; dropped for {rows} row(s)",
+    {
+      rows: dropped.rowIds.length,
+      sampleRowIds: dropped.rowIds.slice(0, DROPPED_REFERENCES_SAMPLE),
+      summary: dropped.summary,
+    },
+  );
+}
+
+function readRowReferences(
+  stored: unknown,
+  rowId: string,
+  dropped: DroppedReferences,
+): string[] {
   if (stored === null || stored === undefined) return [];
   const parsed = MsgIdListSchema(stored);
   if (parsed instanceof type.errors) {
-    logger.warn("mailbox references column failed schema; dropped for {rowId}", {
-      rowId,
-      summary: parsed.summary,
-    });
+    dropped.rowIds.push(rowId);
+    dropped.summary ??= parsed.summary;
     return [];
   }
   return parsed;
@@ -213,6 +238,29 @@ function resolveThreadCursor(
 }
 
 /**
+ * One node of the ref-scoped ancestry graph — a message and just enough of it
+ * to resolve (and, when necessary, cut) its candidate parent edge. `createdAt`
+ * is the same sortable microsecond text the cursor is minted from, so nodes
+ * from different queries (the page, and any ancestor batches fetched to walk
+ * a chain) compare with a plain string `<`.
+ */
+type ThreadNode = {
+  id: string;
+  messageId: string | null;
+  inReplyTo: string | null;
+  references: string[];
+  createdAt: string;
+};
+
+// Defensive cap on how many nodes a single read will walk while resolving
+// ancestry and breaking cycles. A real conversation's chain is nowhere near
+// this deep; the cap exists so a pathological or adversarial reference graph
+// degrades (bailing out of further expansion, which can only ever turn a
+// resolved parent into `null`, never fabricate one) rather than reading an
+// unbounded number of rows.
+const MAX_THREAD_ANCESTRY_NODES = 2000;
+
+/**
  * Read the conversation under one entity ref, oldest first, keyset-paged on
  * `(created_at, id)` and scoped to `(tenantId, principalId)`.
  *
@@ -225,11 +273,25 @@ function resolveThreadCursor(
  * ref, is a root of what this reader can see, and inventing a node for it would
  * be a lie about the conversation.
  *
+ * **`parentId` chains are acyclic.** Nothing stops a delivered frame's
+ * `In-Reply-To`/`References` from naming a msg-id that (directly, or through
+ * further ancestors) points back at the frame itself — RFC 5256 step 1.B calls
+ * this out explicitly. Left unresolved a cycle would either loop a client's
+ * ancestry walk forever or silently make a message a descendant of one of its
+ * own descendants, so before a page is projected, every resolved parent edge
+ * that would close a loop is cut: the LATER-created message in the cycle (ties
+ * broken by id) becomes a root (`parentId: null`) instead, and every other
+ * message in the cycle keeps its resolved parent. Which edge is cut is
+ * deterministic and depends only on the cycle's members, never on where the
+ * cursor happens to land, so a cycle's shape does not change from one page to
+ * the next.
+ *
  * The ancestor lookup deliberately spans the whole ref-scoped set rather than
  * the current page: a chain crossing a page boundary must not report a parent
  * on one page and `null` on another, which is exactly what a page-local resolve
- * would do. It costs ONE extra query per read — a msg-id map over the ids the
- * page actually references, served by
+ * would do. Ancestors are fetched breadth-first, one batch per hop, so a chain
+ * (or a cycle) reaching beyond the messages the page directly names is still
+ * resolved correctly; each batch is served by
  * `principal_mail_tenant_id_principal_id_message_id_idx`.
  *
  * Throws `RangeError` on a malformed ref, an out-of-range limit, and a cursor
@@ -285,39 +347,102 @@ export async function readMailboxThread(
   const hasMore = rows.length > limit;
   const pageRows = hasMore ? rows.slice(0, limit) : rows;
 
+  const dropped = newDroppedReferences();
   const projected = pageRows.map((row) => ({
     row,
-    references: readRowReferences(row.references, row.id),
+    references: readRowReferences(row.references, row.id, dropped),
   }));
+  reportDroppedReferences(dropped);
 
-  // Every msg-id the page could possibly link to, resolved in one query
-  // against the whole ref-scoped set.
-  const referenced = new Set<string>();
-  for (const { row, references } of projected) {
-    if (row.inReplyTo !== null) referenced.add(row.inReplyTo);
-    for (const reference of references) referenced.add(reference);
+  // The ancestry graph: every node discovered so far, by id, plus the
+  // oldest-carrier msg-id -> id map candidates resolve through. Seeded with
+  // the page itself, then expanded breadth-first to whatever the page's rows
+  // (and, in turn, THEIR ancestors) name — the graph a cycle could hide in.
+  const nodes = new Map<string, ThreadNode>();
+  const byMessageId = new Map<string, string>();
+
+  function addNode(node: ThreadNode): void {
+    if (!nodes.has(node.id)) nodes.set(node.id, node);
+    if (node.messageId === null) return;
+    const existingId = byMessageId.get(node.messageId);
+    if (existingId === undefined) {
+      byMessageId.set(node.messageId, node.id);
+      return;
+    }
+    // Oldest carrier wins — nothing makes a msg-id unique (it is the sender's
+    // identifier), so ties resolve to whichever row sorts first, deterministic
+    // and stable regardless of fetch order.
+    const existing = nodes.get(existingId)!;
+    if (
+      node.createdAt < existing.createdAt ||
+      (node.createdAt === existing.createdAt && node.id < existingId)
+    ) {
+      byMessageId.set(node.messageId, node.id);
+    }
   }
-  const ancestors = await ancestorIdsByMessageId(
-    db,
-    scopeConditions,
-    [...referenced],
-  );
 
-  const items = projected.map(({ row, references }) => {
-    // RFC 5256: the immediate parent first, then the chain newest-to-oldest.
+  for (const { row, references } of projected) {
+    addNode({
+      id: row.id,
+      messageId: row.messageId,
+      inReplyTo: row.inReplyTo,
+      references,
+      createdAt: row.createdAtText,
+    });
+  }
+
+  // Breadth-first expansion: each hop resolves one more round of msg-ids that
+  // the nodes discovered so far point at, until nothing new turns up or the
+  // safety cap is hit. Bounded and cheap in the overwhelmingly common case
+  // (no cycle, a chain a few hops deep) and the only way to prove a cycle
+  // absent rather than merely absent from the current page.
+  let frontier = new Set<string>();
+  for (const node of nodes.values()) {
+    if (node.inReplyTo !== null) frontier.add(node.inReplyTo);
+    for (const reference of node.references) frontier.add(reference);
+  }
+  const queried = new Set<string>();
+  while (frontier.size > 0 && nodes.size < MAX_THREAD_ANCESTRY_NODES) {
+    const toFetch = [...frontier].filter((messageId) => !queried.has(messageId));
+    for (const messageId of toFetch) queried.add(messageId);
+    frontier = new Set();
+    if (toFetch.length === 0) break;
+    const fetched = await fetchThreadNodesByMessageId(db, scopeConditions, toFetch);
+    for (const node of fetched) {
+      addNode(node);
+      if (node.inReplyTo !== null && !queried.has(node.inReplyTo)) {
+        frontier.add(node.inReplyTo);
+      }
+      for (const reference of node.references) {
+        if (!queried.has(reference)) frontier.add(reference);
+      }
+    }
+  }
+
+  // Candidate parent, per node, before cycle-breaking: RFC 5256's
+  // In-Reply-To-first, then References newest-to-oldest, first candidate
+  // present under this scope and ref — excluding the node itself, since a
+  // frame naming its own msg-id is not its own parent.
+  const rawParent = new Map<string, string | null>();
+  for (const node of nodes.values()) {
     const candidates = [
-      ...(row.inReplyTo !== null ? [row.inReplyTo] : []),
-      ...[...references].reverse(),
+      ...(node.inReplyTo !== null ? [node.inReplyTo] : []),
+      ...[...node.references].reverse(),
     ];
-    let parentId: string | null = null;
+    let parent: string | null = null;
     for (const candidate of candidates) {
-      const found = ancestors.get(candidate);
-      // A frame naming its own msg-id is not its own parent.
-      if (found !== undefined && found !== row.id) {
-        parentId = found;
+      const found = byMessageId.get(candidate);
+      if (found !== undefined && found !== node.id) {
+        parent = found;
         break;
       }
     }
+    rawParent.set(node.id, parent);
+  }
+
+  const finalParent = resolveAcyclicParents(nodes, rawParent);
+
+  const items = projected.map(({ row, references }) => {
     const item: MailboxThreadMessage = {
       id: row.id,
       // The row id is the last resort, not the cache: a frame with no
@@ -328,7 +453,7 @@ export async function readMailboxThread(
       createdAt: row.createdAtText,
       read: row.readAt !== null,
       archived: row.archivedAt !== null,
-      parentId,
+      parentId: finalParent.get(row.id) ?? null,
     };
     if (row.inReplyTo !== null) item.inReplyTo = row.inReplyTo;
     if (row.subject !== null) item.subject = row.subject;
@@ -348,30 +473,91 @@ export async function readMailboxThread(
 }
 
 /**
- * Map every supplied msg-id to the id of the message carrying it, within the
- * same scope and ref the thread page was read under. Ties (nothing makes a
- * msg-id unique — it is the sender's identifier) resolve to the OLDEST
- * carrier, so a parent does not change when a duplicate arrives later.
+ * Break every reference cycle in the candidate-parent graph, per RFC 5256
+ * step 1.B: walk each node's raw-parent chain with a per-walk visited set, and
+ * when a walk revisits a node already on its own path, the path from that node
+ * to the end IS the cycle. Cut it by nulling out the parent of the
+ * LATER-created member (ties broken by the larger id) — that member becomes a
+ * root; every other member of the cycle keeps its raw parent. A node's outcome
+ * never depends on which node the walk started from, only on the cycle's own
+ * membership, so the result is the same regardless of `nodes` iteration order.
  */
-async function ancestorIdsByMessageId(
+function resolveAcyclicParents(
+  nodes: Map<string, ThreadNode>,
+  rawParent: Map<string, string | null>,
+): Map<string, string | null> {
+  const finalParent = new Map<string, string | null>();
+  const done = new Set<string>();
+
+  function isLater(a: string, b: string): boolean {
+    const nodeA = nodes.get(a)!;
+    const nodeB = nodes.get(b)!;
+    if (nodeA.createdAt !== nodeB.createdAt) {
+      return nodeA.createdAt > nodeB.createdAt;
+    }
+    return a > b;
+  }
+
+  for (const start of nodes.keys()) {
+    if (done.has(start)) continue;
+    const path: string[] = [];
+    let current: string | null = start;
+    while (current !== null && !done.has(current)) {
+      const cycleStart = path.indexOf(current);
+      if (cycleStart !== -1) {
+        const cycle = path.slice(cycleStart);
+        const cut = cycle.reduce((worst, candidate) =>
+          isLater(candidate, worst) ? candidate : worst,
+        );
+        finalParent.set(cut, null);
+        break;
+      }
+      path.push(current);
+      current = rawParent.get(current) ?? null;
+    }
+    for (const id of path) {
+      if (!finalParent.has(id)) finalParent.set(id, rawParent.get(id) ?? null);
+      done.add(id);
+    }
+  }
+  return finalParent;
+}
+
+/**
+ * Fetch full ancestry nodes (not just ids) for a batch of msg-ids, within the
+ * same scope and ref the thread page was read under — the per-hop query the
+ * breadth-first ancestor walk issues, served by
+ * `principal_mail_tenant_id_principal_id_message_id_idx`.
+ */
+async function fetchThreadNodesByMessageId(
   db: MailboxDb,
   scopeConditions: SQL[],
   messageIds: string[],
-): Promise<Map<string, string>> {
-  if (messageIds.length === 0) return new Map();
+): Promise<ThreadNode[]> {
+  if (messageIds.length === 0) return [];
   const rows = await db
-    .select({ id: principalMail.id, messageId: principalMail.messageId })
+    .select({
+      id: principalMail.id,
+      messageId: principalMail.messageId,
+      inReplyTo: principalMail.inReplyTo,
+      references: principalMail.references,
+      createdAtText: sql<string>`to_char(${principalMail.createdAt}, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
+    })
     .from(principalMail)
     .where(
       and(...scopeConditions, inArray(principalMail.messageId, messageIds)),
     )
     .orderBy(asc(principalMail.createdAt), asc(principalMail.id));
-  const byMessageId = new Map<string, string>();
-  for (const row of rows) {
-    if (row.messageId === null) continue;
-    if (!byMessageId.has(row.messageId)) byMessageId.set(row.messageId, row.id);
-  }
-  return byMessageId;
+  const dropped = newDroppedReferences();
+  const nodes = rows.map((row) => ({
+    id: row.id,
+    messageId: row.messageId,
+    inReplyTo: row.inReplyTo,
+    references: readRowReferences(row.references, row.id, dropped),
+    createdAt: row.createdAtText,
+  }));
+  reportDroppedReferences(dropped);
+  return nodes;
 }
 
 /**
