@@ -20,6 +20,28 @@ always called out under their own heading.
   already carries refs. A throwing `resolveRefs` follows the existing
   dual-write contract: logged, upstream unaffected, no mailbox row for that
   frame.
+- New `writeMailboxMessages(db, items, opts?)` writes an arbitrary batch
+  of `{ scope, args }` pairs — e.g. a sender's outbound copy alongside
+  every recipient's inbound copy of the same conversation turn — in ONE
+  transaction: every row is scope-checked, field-checked, encoded, and
+  frame-asserted before the transaction opens, all new rows commit
+  together or none do, and a throw from any single item (an invalid
+  scope, an oversize frame, an unknown control-plane principal) rolls
+  back the whole batch. Per-row dedupe still runs through
+  `onConflictDoNothing` on the existing `messageKey` partial unique
+  index, so a retried batch dedupes row-by-row without failing. Each
+  item's `args` omits `tenantId`/`principalId` (`Omit<WriteMailboxMessageArgs,
+  "tenantId" | "principalId">`) — `scope` is the sole source of both, so
+  there is no second copy of the scope that could disagree with it. Bus
+  events publish only after commit, one per written row. This is the
+  **conversation path**; `deliverInboxItems` remains the **notify-item
+  path** for ingress adapters and is unchanged.
+- `listUserMailbox` and `getMailboxMessage` accept an optional
+  `direction?: "inbound" | "outbound" | "all"` (default `"inbound"`), so a
+  thread reader can fetch a principal's own sent copies (`"outbound"`) or
+  both directions together (`"all"`) alongside the existing inbox-only
+  default.
+
 - **Threading headers on the frame and in the list projection.**
   `buildMailFrame` accepts `references` — the thread's ancestry, oldest
   first — and emits it as a folded `References:` header; `In-Reply-To`
@@ -79,6 +101,39 @@ always called out under their own heading.
 
 ### Changed
 
+- **Caller-supplied Message-ID, direction, and message key on writes.**
+  `WriteMailboxMessageArgs` gains `messageId?: string` — when supplied it
+  must be a bracketed msg-id (validated with `assertMsgId`) and becomes
+  the built frame's own `Message-ID:` header and the cached
+  `principal_mail.message_id`; omitted, one is still minted exactly as
+  before. It also gains `direction?: "inbound" | "outbound"` (default
+  `"inbound"`). Omitting `messageKey` no longer leaves the row unkeyed: it
+  now defaults to `mailboxKey.transport(messageId, principalId, direction)`.
+  For the default `"inbound"` direction this is
+  `transport:mid:<Message-ID>:<principalId>` — the exact shape
+  `persist.ts`'s transport dual-write already uses, byte for byte — so a
+  frame `persist.ts` already delivered and a direct inbound write for the
+  same Message-ID + principal dedupe onto the same row, as before, and
+  retrying a write with the same caller-supplied `messageId` dedupes
+  without the caller minting its own key. `"outbound"` gets a
+  `:outbound` suffix instead, so a sender's own copy of a turn never
+  collides with an inbound copy that reuses the identical caller-supplied
+  `messageId` for the same principal — two independent (differently
+  keyed) writes still never collide either way. A caller-supplied
+  `messageKey` still overrides the default. A *colliding* caller
+  `messageId` (same effective key) is a no-op: the write returns `null`
+  rather than a second row.
+  An outbound row is also created already-read — its `mailbox.read_at` is
+  pinned to its own `created_at` at insert — so it never counts toward
+  `countUnreadActiveMailbox` or appears in the unread view without either
+  needing a direction predicate of its own; `listUserMailbox` and
+  `getMailboxMessage` still default to `"inbound"` only, unaffected by
+  this.
+  `writeMailboxMessages` returns `Array<{ messageKey: string; id: string |
+  null }>`, one entry per item, in item order — matching
+  `deliverInboxItems`'s `DeliveredInboxItem` shape — rather than a
+  filtered array of inserted ids; `id` is `null` exactly when that item's
+  messageKey deduped against an existing row.
 - **Inbox list no longer loads or decodes full MIME frames.** List selects every
   `principal_mail` column except `raw`, and projects `subject` / `from` from the
   denormalized caches only — no list `snippet`, and list `date` / `messageId` /

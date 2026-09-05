@@ -252,6 +252,55 @@ optional host `enqueue` hook run only after commit, and only for newly inserted
 ids. Both side effects are best-effort: a throw is logged with the message id
 and never rejects the delivery.
 
+**Two write paths, two shapes of batch.** `deliverInboxItems` is the
+**notify-item path**: one external item, fanned out to every addressed
+principal, keyed by `mailboxKey.inbox(source, externalId)` — unchanged by the
+addition below. `writeMailboxMessages(db, items, opts?)` is the
+**conversation path**: an arbitrary batch of `{ scope, args }` pairs — a
+sender's own outbound copy alongside every recipient's inbound copy of the
+same turn, mixed tenants and principals allowed — committed in the same
+single-transaction-or-none shape, with per-row `onConflictDoNothing` dedupe on
+the same `messageKey` partial unique index and bus events published only
+after commit, one per row this call actually inserted. A throw from any one
+item (an invalid scope, an oversize frame, a control-plane FK the item's
+scope does not satisfy) rolls back every row the batch would otherwise have
+written, including ones already inserted earlier in the same call — same
+atomicity guarantee as `deliverInboxItems`, over a caller-shaped item instead
+of an ingress-shaped one. Each item's `args` is
+`Omit<WriteMailboxMessageArgs, "tenantId" | "principalId">` — `scope` is the
+sole source of both, so there is no second copy of the scope an item could
+disagree with. `writeMailboxMessages` returns one `{ messageKey, id }` entry
+per item, in item order — matching `deliverInboxItems`'s `DeliveredInboxItem`
+shape — with `id: null` exactly for an item whose messageKey deduped against
+an existing row, rather than a filtered array of inserted ids.
+
+**A write's Message-ID, direction, and dedupe key are now the caller's to
+set.** `WriteMailboxMessageArgs.messageId` lets a caller hand the write path
+the exact msg-id its own frame must carry (validated as a bracketed msg-id;
+`RangeError` otherwise) instead of always minting one — needed when a
+message's id has to be predictable ahead of the write, e.g. so a later
+`inReplyTo` can reference it. `direction` (default `"inbound"`) is a stored
+fact: an outbound row is the sender's own durable copy, and is created
+already-read — its `mailbox.read_at` is pinned to its own `created_at` at
+insert — so it is excluded from the unread count and the unread view without
+either needing a direction predicate of its own. `listUserMailbox` and
+`getMailboxMessage` accept an optional `direction?: "inbound" | "outbound" |
+"all"` (default `"inbound"`, preserving today's contract) so a thread reader
+can fetch a principal's own sent copies or both directions together — see
+Known limits. And `messageKey`, when the caller omits it, now defaults to
+`mailboxKey.transport(messageId, principalId, direction)`: for the default
+`"inbound"` direction this is `transport:mid:<Message-ID>:<principalId>` —
+the same shape `persist.ts`'s transport dual-write already uses, byte for
+byte, so a frame `persist.ts` already delivered and a direct inbound write
+for the same Message-ID + principal still dedupe onto the same row — while
+`"outbound"` gets a `:outbound` suffix, so a sender's own copy of a turn
+never collapses onto an inbound copy that reuses the identical
+caller-supplied `messageId` for the same principal. A retry that reuses the
+same caller-supplied `messageId` (and direction) therefore dedupes for free
+— the write returns `null` — while two writes that each mint their own
+`messageId`, or that differ in direction, never collide. A caller-supplied
+`messageKey` still overrides the default, exactly as before.
+
 **Bus publish isolates listeners.** `publishMailboxEvent` invokes each
 subscriber independently; one throwing listener does not stop the others. SSE
 connections serialize writes, bound the pending queue, and close on overflow or
@@ -403,9 +452,13 @@ actual mail transport — this package neither sends nor receives SMTP.
   documented in the package README.
 - **`sort=priority` pays a cross-table join** on top of a rank that was never
   index-servable; see the measurements above.
-- **List routes read inbound rows.** The `direction` column admits outbound
-  rows and the write path can create them, but the inbox views are
-  inbound-only; there is no "sent" view and no send route.
+- **List routes default to inbound rows.** The `direction` column admits
+  outbound rows and the write path can create them; `listUserMailbox` and
+  `getMailboxMessage` default to `"inbound"` (preserving the mounted route
+  table's existing behavior) but accept `direction: "outbound" | "all"` for
+  a caller — a thread reader, not yet a mounted route — that needs a
+  principal's own sent copies. There is still no "sent" view or send route
+  on the mounted API itself.
 - **No search.** Filtering is by view, priority, classification, status and
   assignee. There is no full-text index over subjects or bodies.
 - **Reordering the host's `priorities` invalidates in-flight priority

@@ -51,6 +51,25 @@ bun add github:corbitsdev/corbits-mailbox
 | `src/` | The published package. Owns `principal_mail` (the message, immutable) and `mailbox` (the management layer, created eagerly with each message). |
 | `examples/reference-host` | Mounts it on a real `@intx/hub-api` app against a live Postgres and asserts the acceptance scenarios end to end. |
 
+## Write paths
+
+`src/write.ts` exports two batch write functions, each for a different shape
+of caller:
+
+- **`deliverInboxItems`** — the notify-item path. One external item (an
+  ingress adapter: a mail connector, a webhook), fanned out to every
+  addressed principal, deduped on `mailboxKey.inbox(source, externalId)`.
+- **`writeMailboxMessages`** — the conversation path. An arbitrary batch of
+  `{ scope, args }` pairs — for example a sender's own outbound copy
+  alongside every recipient's inbound copy of the same turn — committed in
+  one transaction with per-row dedupe on the `messageKey` unique index.
+
+Both commit every new row in the call as a single transaction (or none), and
+publish bus events only after commit, one per row actually written. See
+[ARCHITECTURE.md](./ARCHITECTURE.md) for the full write-path writeup,
+including `writeMailboxMessage`'s caller-supplied `messageId`, `direction`,
+and default `messageKey`.
+
 ## Working on it
 
 ```sh

@@ -1,12 +1,15 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import {
   writeMailboxMessage,
+  writeMailboxMessages,
   deliverInboxItems,
   mailboxKey,
   MAX_MAILBOX_REFS,
   MAX_MAILBOX_FRAME_BYTES,
 } from "./write.js";
+import { decodeMailFrame } from "./frame.js";
 import { getMailboxMessage, listUserMailbox } from "./read.js";
+import { countUnreadActiveMailbox } from "./mutations.js";
 import { createInMemoryMailboxEventBus } from "./bus.js";
 import { withTestDb, seedScope, TEST_VOCABULARY } from "./test-helpers.js";
 import type { MailboxDb } from "./db.js";
@@ -824,6 +827,535 @@ describe("frame size hard cap", () => {
       ]),
     ).rejects.toThrow(RangeError);
     expect(await mailRowCount()).toBe(0);
+  });
+});
+
+describe("caller-supplied messageId, direction, and messageKey", () => {
+  async function rawFrame(id: string): Promise<Uint8Array> {
+    const rows = await db.execute<{ raw: Uint8Array }>(
+      sql`SELECT raw FROM "mailbox"."principal_mail" WHERE id = ${id}`,
+    );
+    return rows[0]!.raw;
+  }
+
+  async function rowColumns(id: string): Promise<{
+    direction: string;
+    message_id: string | null;
+    message_key: string | null;
+  }> {
+    const rows = await db.execute<{
+      direction: string;
+      message_id: string | null;
+      message_key: string | null;
+    }>(
+      sql`SELECT direction, message_id, message_key FROM "mailbox"."principal_mail" WHERE id = ${id}`,
+    );
+    return rows[0]!;
+  }
+
+  test("a caller-supplied Message-ID round-trips to the stored frame header and the cached column", async () => {
+    const messageId = "<caller-mid-1@example.com>";
+    const written = await writeMailboxMessage(db, {
+      tenantId: "t1",
+      principalId: "p1",
+      address: "p1@t1.example",
+      fromAddress: "agent@t1.example",
+      subject: "Hello",
+      body: "World",
+      messageId,
+    });
+    expect(written).not.toBeNull();
+
+    const raw = await rawFrame(written!.id);
+    const decoded = decodeMailFrame(raw);
+    expect(decoded?.messageId).toBe(messageId);
+
+    const columns = await rowColumns(written!.id);
+    expect(columns.message_id).toBe(messageId);
+  });
+
+  test("an invalid caller-supplied messageId is refused with RangeError", async () => {
+    await expect(
+      writeMailboxMessage(db, {
+        tenantId: "t1",
+        principalId: "p1",
+        address: "p1@t1.example",
+        fromAddress: "agent@t1.example",
+        subject: "Hello",
+        body: "World",
+        messageId: "not-a-msg-id",
+      }),
+    ).rejects.toThrow(RangeError);
+  });
+
+  test("omitting messageId still mints one, as before", async () => {
+    const written = await writeMailboxMessage(db, {
+      tenantId: "t1",
+      principalId: "p1",
+      address: "p1@t1.example",
+      fromAddress: "agent@t1.example",
+      subject: "Hello",
+      body: "World",
+    });
+    const columns = await rowColumns(written!.id);
+    expect(columns.message_id).toMatch(/^<.+@.+>$/);
+  });
+
+  test("direction defaults to inbound and can be set to outbound", async () => {
+    const inbound = await writeMailboxMessage(db, {
+      tenantId: "t1",
+      principalId: "p1",
+      address: "p1@t1.example",
+      fromAddress: "agent@t1.example",
+      subject: "Hello",
+      body: "World",
+    });
+    expect((await rowColumns(inbound!.id)).direction).toBe("inbound");
+
+    const outbound = await writeMailboxMessage(db, {
+      tenantId: "t1",
+      principalId: "p1",
+      address: "p1@t1.example",
+      fromAddress: "agent@t1.example",
+      subject: "Sent",
+      body: "World",
+      direction: "outbound",
+    });
+    expect((await rowColumns(outbound!.id)).direction).toBe("outbound");
+  });
+
+  test("an explicit messageKey is honored over the default transport key", async () => {
+    const written = await writeMailboxMessage(db, {
+      tenantId: "t1",
+      principalId: "p1",
+      address: "p1@t1.example",
+      fromAddress: "agent@t1.example",
+      subject: "Hello",
+      body: "World",
+      messageKey: "custom:my-key",
+    });
+    expect((await rowColumns(written!.id)).message_key).toBe("custom:my-key");
+  });
+
+  test("omitting messageKey defaults to the package's transport key, keyed off messageId", async () => {
+    const messageId = "<default-key-1@example.com>";
+    const written = await writeMailboxMessage(db, {
+      tenantId: "t1",
+      principalId: "p1",
+      address: "p1@t1.example",
+      fromAddress: "agent@t1.example",
+      subject: "Hello",
+      body: "World",
+      messageId,
+    });
+    expect((await rowColumns(written!.id)).message_key).toBe(
+      mailboxKey.transport(messageId, "p1"),
+    );
+
+    // A retry with the SAME caller-supplied messageId therefore dedupes.
+    const retry = await writeMailboxMessage(db, {
+      tenantId: "t1",
+      principalId: "p1",
+      address: "p1@t1.example",
+      fromAddress: "agent@t1.example",
+      subject: "Hello",
+      body: "World",
+      messageId,
+    });
+    expect(retry).toBeNull();
+  });
+});
+
+describe("writeMailboxMessages (one-transaction batch write)", () => {
+  async function mailRows(): Promise<
+    Array<{ id: string; principal_id: string; direction: string }>
+  > {
+    return db.execute<{ id: string; principal_id: string; direction: string }>(
+      sql`SELECT id, principal_id, direction FROM "mailbox"."principal_mail"`,
+    );
+  }
+
+  test("a batch of three — one outbound for the sender, two inbound for recipients — commits atomically", async () => {
+    const bus = createInMemoryMailboxEventBus();
+    const receivedP1: Array<{ id: string; op?: string }> = [];
+    const receivedP2: Array<{ id: string; op?: string }> = [];
+    bus.subscribe({ tenantId: "t1", principalId: "p1" }, (e) =>
+      receivedP1.push(e),
+    );
+    bus.subscribe({ tenantId: "t1", principalId: "p2" }, (e) =>
+      receivedP2.push(e),
+    );
+
+    const ids = await writeMailboxMessages(
+      db,
+      [
+        {
+          scope: { tenantId: "t1", principalId: "p1" },
+          args: {
+            address: "p1@t1.example",
+            fromAddress: "p1@t1.example",
+            subject: "Sent",
+            body: "Hi p2",
+            direction: "outbound",
+          },
+        },
+        {
+          scope: { tenantId: "t1", principalId: "p1" },
+          args: {
+            address: "p1@t1.example",
+            fromAddress: "p1@t1.example",
+            subject: "Recv",
+            body: "Hi p1",
+            direction: "inbound",
+          },
+        },
+        {
+          scope: { tenantId: "t1", principalId: "p2" },
+          args: {
+            address: "p2@t1.example",
+            fromAddress: "p1@t1.example",
+            subject: "Recv",
+            body: "Hi p2",
+            direction: "inbound",
+          },
+        },
+      ],
+      { bus },
+    );
+
+    expect(ids.length).toBe(3);
+    const rows = await mailRows();
+    expect(rows.length).toBe(3);
+    // p1 receives two events (its outbound sent-copy and its inbound copy),
+    // p2 receives one (its inbound copy) — one bus event per written row.
+    expect(receivedP1.length).toBe(2);
+    expect(receivedP2.length).toBe(1);
+    expect(receivedP1.every((e) => e.op === "create")).toBe(true);
+    expect(receivedP2[0]?.op).toBe("create");
+  });
+
+  test("a failing third item rolls back the whole batch, leaving zero rows", async () => {
+    await expect(
+      writeMailboxMessages(db, [
+        {
+          scope: { tenantId: "t1", principalId: "p1" },
+          args: {
+            address: "p1@t1.example",
+            fromAddress: "p1@t1.example",
+            subject: "Sent",
+            body: "Hi p2",
+            direction: "outbound",
+          },
+        },
+        {
+          scope: { tenantId: "t1", principalId: "p2" },
+          args: {
+            address: "p2@t1.example",
+            fromAddress: "p1@t1.example",
+            subject: "Recv",
+            body: "Hi p2",
+            direction: "inbound",
+          },
+        },
+        {
+          scope: { tenantId: "t1", principalId: "nobody-seeded-this" },
+          args: {
+            address: "ghost@t1.example",
+            fromAddress: "p1@t1.example",
+            subject: "Bad",
+            body: "Bad",
+          },
+        },
+      ]),
+    ).rejects.toThrow();
+
+    expect((await mailRows()).length).toBe(0);
+  });
+
+  test("retrying an already-committed batch (same messageIds, no messageKey) writes nothing and returns null ids", async () => {
+    const messageId1 = "<batch-retry-1@example.com>";
+    const messageId2 = "<batch-retry-2@example.com>";
+    const items = [
+      {
+        scope: { tenantId: "t1", principalId: "p1" },
+        args: {
+          address: "p1@t1.example",
+          fromAddress: "p1@t1.example",
+          subject: "Sent",
+          body: "Hi p2",
+          direction: "outbound" as const,
+          messageId: messageId1,
+        },
+      },
+      {
+        scope: { tenantId: "t1", principalId: "p2" },
+        args: {
+          address: "p2@t1.example",
+          fromAddress: "p1@t1.example",
+          subject: "Recv",
+          body: "Hi p2",
+          direction: "inbound" as const,
+          messageId: messageId2,
+        },
+      },
+    ];
+
+    const first = await writeMailboxMessages(db, items);
+    expect(first.length).toBe(2);
+
+    const retry = await writeMailboxMessages(db, items);
+    expect(retry.map((r) => r.id)).toEqual([null, null]);
+    expect((await mailRows()).length).toBe(2);
+  });
+
+  test("events fire only after commit, and only for newly-written rows", async () => {
+    const bus = createInMemoryMailboxEventBus();
+    const received: Array<{ id: string }> = [];
+    bus.subscribe({ tenantId: "t1", principalId: "p1" }, (e) =>
+      received.push(e),
+    );
+
+    const messageId = "<batch-events-1@example.com>";
+    const item = {
+      scope: { tenantId: "t1", principalId: "p1" },
+      args: {
+        address: "p1@t1.example",
+        fromAddress: "p1@t1.example",
+        subject: "Hello",
+        body: "World",
+        messageId,
+      },
+    };
+
+    const first = await writeMailboxMessages(db, [item], { bus });
+    expect(first.length).toBe(1);
+    expect(received.map((e) => e.id)).toEqual(
+      first.map((row) => row.id).filter((id): id is string => id !== null),
+    );
+
+    // Dedupe: the retry writes nothing and must not publish a second event.
+    const retry = await writeMailboxMessages(db, [item], { bus });
+    expect(retry.map((r) => r.id)).toEqual([null]);
+    expect(received.length).toBe(1);
+  });
+
+  test("a messageKey override is honored inside a batch", async () => {
+    const results = await writeMailboxMessages(db, [
+      {
+        scope: { tenantId: "t1", principalId: "p1" },
+        args: {
+          address: "p1@t1.example",
+          fromAddress: "p1@t1.example",
+          subject: "Hello",
+          body: "World",
+          messageKey: "custom:batch-key",
+        },
+      },
+    ]);
+    expect(results[0]?.messageKey).toBe("custom:batch-key");
+    const rows = await db.execute<{ message_key: string }>(
+      sql`SELECT message_key FROM "mailbox"."principal_mail" WHERE id = ${results[0]?.id}`,
+    );
+    expect(rows[0]?.message_key).toBe("custom:batch-key");
+  });
+
+  test("returns { messageKey, id } per item, in item order, including the default-keyed items", async () => {
+    const messageId = "<batch-order-1@example.com>";
+    const results = await writeMailboxMessages(db, [
+      {
+        scope: { tenantId: "t1", principalId: "p1" },
+        args: {
+          address: "p1@t1.example",
+          fromAddress: "p1@t1.example",
+          subject: "Sent",
+          body: "Hi p2",
+          direction: "outbound",
+          messageId,
+        },
+      },
+      {
+        scope: { tenantId: "t1", principalId: "p2" },
+        args: {
+          address: "p2@t1.example",
+          fromAddress: "p1@t1.example",
+          subject: "Recv",
+          body: "Hi p2",
+          direction: "inbound",
+          messageId,
+        },
+      },
+    ]);
+    expect(results).toEqual([
+      { messageKey: `transport:mid:${messageId}:p1:outbound`, id: expect.any(String) },
+      { messageKey: `transport:mid:${messageId}:p2`, id: expect.any(String) },
+    ]);
+  });
+
+  test("invalid scope on a later item is refused before any row is written", async () => {
+    await expect(
+      writeMailboxMessages(db, [
+        {
+          scope: { tenantId: "t1", principalId: "p1" },
+          args: {
+            address: "p1@t1.example",
+            fromAddress: "p1@t1.example",
+            subject: "Hello",
+            body: "World",
+          },
+        },
+        {
+          scope: { tenantId: "t1", principalId: "  " },
+          args: {
+            address: "p1@t1.example",
+            fromAddress: "p1@t1.example",
+            subject: "Hello",
+            body: "World",
+          },
+        },
+      ]),
+    ).rejects.toThrow(RangeError);
+    expect((await mailRows()).length).toBe(0);
+  });
+
+  test("mailbox management row is created for outbound rows written through the batch path too", async () => {
+    const results = await writeMailboxMessages(db, [
+      {
+        scope: { tenantId: "t1", principalId: "p1" },
+        args: {
+          address: "p1@t1.example",
+          fromAddress: "p1@t1.example",
+          subject: "Hello",
+          body: "World",
+          direction: "outbound",
+        },
+      },
+    ]);
+    const rows = await db.execute<{ n: number }>(
+      sql`SELECT count(*)::int AS n FROM "mailbox"."mailbox" WHERE id = ${results[0]?.id}`,
+    );
+    expect(rows[0]!.n).toBe(1);
+  });
+});
+
+describe("outbound rows and the inbox read model", () => {
+  const base = {
+    tenantId: "t1",
+    principalId: "p1",
+    address: "p1@t1.example",
+    fromAddress: "p1@t1.example",
+    subject: "Hello",
+    body: "World",
+  };
+
+  test("an outbound row is created already-read: excluded from the unread view and count without a direction predicate", async () => {
+    const written = await writeMailboxMessage(db, {
+      ...base,
+      direction: "outbound",
+    });
+    expect(written).not.toBeNull();
+
+    const scope = { tenantId: "t1", principalId: "p1" };
+    const page = await listUserMailbox(db, {
+      ...scope,
+      priorities: TEST_VOCABULARY.priorities,
+      view: "unread",
+      limit: 50,
+    });
+    expect(page.items.length).toBe(0);
+    expect(
+      await getMailboxMessage(db, { ...scope, id: written!.id }),
+    ).toBeNull();
+    expect(
+      await getMailboxMessage(db, { ...scope, id: written!.id, direction: "all" }),
+    ).not.toBeNull();
+
+    expect(await countUnreadActiveMailbox(db, scope)).toBe(0);
+  });
+
+  test("listUserMailbox and getMailboxMessage accept an explicit direction filter", async () => {
+    const outbound = await writeMailboxMessage(db, {
+      ...base,
+      direction: "outbound",
+      messageId: "<direction-filter-1@example.com>",
+    });
+    const inbound = await writeMailboxMessage(db, {
+      ...base,
+      direction: "inbound",
+      messageId: "<direction-filter-2@example.com>",
+    });
+    const scope = { tenantId: "t1", principalId: "p1" };
+
+    const outboundPage = await listUserMailbox(db, {
+      ...scope,
+      priorities: TEST_VOCABULARY.priorities,
+      view: "all",
+      limit: 50,
+      direction: "outbound",
+    });
+    expect(outboundPage.items.map((i) => i.id)).toEqual([outbound!.id]);
+
+    const allPage = await listUserMailbox(db, {
+      ...scope,
+      priorities: TEST_VOCABULARY.priorities,
+      view: "all",
+      limit: 50,
+      direction: "all",
+    });
+    expect(new Set(allPage.items.map((i) => i.id))).toEqual(
+      new Set([outbound!.id, inbound!.id]),
+    );
+
+    expect(
+      await getMailboxMessage(db, {
+        ...scope,
+        id: outbound!.id,
+        direction: "outbound",
+      }),
+    ).not.toBeNull();
+  });
+});
+
+describe("default messageKey collisions", () => {
+  const base = {
+    tenantId: "t1",
+    principalId: "p1",
+    address: "p1@t1.example",
+    fromAddress: "p1@t1.example",
+    subject: "Hello",
+    body: "World",
+  };
+
+  test("same caller Message-ID to the same principal in both directions writes two distinct rows", async () => {
+    const messageId = "<turn-1@t1.example>";
+    const results = await writeMailboxMessages(db, [
+      {
+        scope: { tenantId: "t1", principalId: "p1" },
+        args: { ...base, direction: "outbound", messageId, subject: "Sent" },
+      },
+      {
+        scope: { tenantId: "t1", principalId: "p1" },
+        args: { ...base, direction: "inbound", messageId, subject: "Recv" },
+      },
+    ]);
+    expect(results.length).toBe(2);
+    expect(results.every((r) => r.id !== null)).toBe(true);
+  });
+
+  test("two distinct messages that reuse one caller Message-ID for the same principal collide", async () => {
+    const messageId = "<reused@t1.example>";
+    const a = await writeMailboxMessage(db, { ...base, messageId, subject: "A" });
+    const b = await writeMailboxMessage(db, { ...base, messageId, subject: "B" });
+    expect(a).not.toBeNull();
+    expect(b).toBeNull();
+  });
+
+  test("default write key equals persist.ts's transport key shape for the same Message-ID + principal", async () => {
+    const messageId = "<shared@t1.example>";
+    const written = await writeMailboxMessage(db, { ...base, messageId });
+    const rows = await db.execute<{ message_key: string }>(
+      sql`SELECT message_key FROM "mailbox"."principal_mail" WHERE id = ${written!.id}`,
+    );
+    expect(rows[0]!.message_key).toBe(`transport:mid:${messageId}:p1`);
   });
 });
 

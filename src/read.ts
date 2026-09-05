@@ -518,6 +518,14 @@ export type MailboxScope = {
   priorities: readonly string[];
   /** Host seam for turning sender addresses into human labels; see `SenderDisplayResolver`. */
   resolveSenderDisplays?: SenderDisplayResolver;
+  /**
+   * Which direction of mail to serve. Defaults to `"inbound"` — the
+   * long-standing contract, since the inbox has only ever shown delivered
+   * mail. `"outbound"` reads a principal's own sent copies; `"all"` returns
+   * both, e.g. for a thread reader that needs a sender's copy alongside its
+   * recipients' copies.
+   */
+  direction?: "inbound" | "outbound" | "all";
 };
 
 export type MailboxPage = {
@@ -541,10 +549,11 @@ export async function listUserMailbox(
   const sort: MailboxSort = scope.sort ?? "date";
   const filter: MailboxFilter = scope.filter ?? {};
   const PRIORITY_RANK = priorityRank(scope.priorities);
+  const direction = scope.direction ?? "inbound";
   const conditions = [
     eq(principalMail.tenantId, scope.tenantId),
     eq(principalMail.principalId, scope.principalId),
-    eq(principalMail.direction, "inbound"),
+    ...(direction === "all" ? [] : [eq(principalMail.direction, direction)]),
     ...viewConditions(scope.view),
     ...filterConditions(filter),
   ];
@@ -651,8 +660,11 @@ export async function getMailboxMessage(
     principalId: string;
     id: string;
     resolveSenderDisplays?: SenderDisplayResolver;
+    /** Defaults to `"inbound"`; see `MailboxScope.direction`. */
+    direction?: "inbound" | "outbound" | "all";
   },
 ): Promise<MailboxMessageDetail | null> {
+  const direction = args.direction ?? "inbound";
   const [row] = await db
     .select({ ...getTableColumns(principalMail), ...STATE_COLUMNS })
     .from(principalMail)
@@ -662,7 +674,7 @@ export async function getMailboxMessage(
         eq(principalMail.id, args.id),
         eq(principalMail.tenantId, args.tenantId),
         eq(principalMail.principalId, args.principalId),
-        eq(principalMail.direction, "inbound"),
+        ...(direction === "all" ? [] : [eq(principalMail.direction, direction)]),
       ),
     )
     .limit(1);
