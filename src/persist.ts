@@ -33,6 +33,21 @@ import {
 
 const logger = getLogger(["corbits-mailbox", "persist"]);
 
+/**
+ * Tags a thrown error with the persist stage that produced it, so the
+ * dual-write failure log can name `resolveRefs` specifically instead of a
+ * generic "mailbox write failed". The wrapped error is what's logged and
+ * (never here) rethrown — see `attemptMailboxWrite`.
+ */
+class MailboxPersistStageError extends Error {
+  readonly stage: string;
+  constructor(stage: string, cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = "MailboxPersistStageError";
+    this.stage = stage;
+  }
+}
+
 // Cap the sender-controlled recipient list before resolve / inArray / multi-row
 // insert. Matches MAX_BULK_MAILBOX_IDS posture: hard refuse, never clamp.
 export const MAX_MAILBOX_RECIPIENTS = 50;
@@ -271,19 +286,24 @@ export function createMailboxPersist<R>(
     // mailbox row is written for this frame.
     let refs: MailboxRef[] | undefined;
     if (opts.resolveRefs) {
-      const resolved = await opts.resolveRefs({
-        senderAddress,
-        recipients,
-        raw,
-        senderAuthorization: auth,
-        decoded,
-      });
-      if (resolved !== undefined && resolved.length > 0) {
-        const validated = MailboxRefArraySchema(resolved);
+      let resolvedRefs: MailboxRef[] | undefined;
+      try {
+        resolvedRefs = await opts.resolveRefs({
+          senderAddress,
+          recipients,
+          raw,
+          senderAuthorization: auth,
+          decoded,
+        });
+      } catch (err) {
+        throw new MailboxPersistStageError("resolveRefs", err);
+      }
+      if (resolvedRefs !== undefined && resolvedRefs.length > 0) {
+        const validated = MailboxRefArraySchema(resolvedRefs);
         if (validated instanceof type.errors) {
           throw new RangeError(`invalid mailbox refs: ${validated.summary}`);
         }
-        refs = boundRefs(validated, null);
+        refs = boundRefs(validated, messageId, { senderAddress });
       }
     }
 
@@ -361,8 +381,14 @@ export function createMailboxPersist<R>(
     try {
       await writeMailboxRows(args);
     } catch (err) {
+      // Decoded independently of `writeMailboxRows`'s own decode: the throw
+      // may have happened before that decode ran (e.g. authorizeSender), and
+      // this log line must still correlate to a messageId when one exists.
+      const messageId = decodeMailFrame(args.raw)?.messageId ?? null;
       logger.error("mailbox write failed for mail from {senderAddress}", {
         senderAddress: args.senderAddress,
+        messageId,
+        ...(err instanceof MailboxPersistStageError ? { stage: err.stage } : {}),
         error: err instanceof Error ? err : new Error(String(err)),
       });
     }

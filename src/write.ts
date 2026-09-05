@@ -95,6 +95,8 @@ export function assertMailboxFrameBytes(raw: Uint8Array): void {
 export function boundRefs(
   refs: MailboxRef[] | undefined,
   messageKey: string | null,
+  /** Extra correlation fields merged into the truncation log line, e.g. `senderAddress` on the persist path. */
+  extra?: Record<string, unknown>,
 ): MailboxRef[] | undefined {
   if (refs === undefined || refs.length === 0) return undefined;
   if (refs.length <= MAX_MAILBOX_REFS) return refs;
@@ -102,6 +104,7 @@ export function boundRefs(
     messageKey,
     received: refs.length,
     kept: MAX_MAILBOX_REFS,
+    ...extra,
   });
   return refs.slice(0, MAX_MAILBOX_REFS);
 }
