@@ -626,6 +626,118 @@ describe("resolveRefs", () => {
     });
     expect(message?.refs?.length).toBe(MAX_MAILBOX_REFS);
   });
+
+  test("retried frame with a different resolver result keeps the FIRST refs", async () => {
+    let call = 0;
+    const { upstream } = recordingUpstream();
+    const persist = createMailboxPersist(db, {
+      upstream,
+      authorizeSender: () => ACTIVE,
+      resolveRefs: () => [{ kind: "workbench", id: `attempt-${++call}` }],
+    });
+
+    await persist(args());
+    await persist(args());
+
+    const all = await rowsFor("acme", "user-1");
+    expect(all).toHaveLength(1);
+    expect(call).toBe(2);
+    const message = await getMailboxMessage(db, {
+      tenantId: "acme",
+      principalId: "user-1",
+      id: all[0]!.id,
+    });
+    expect(message?.refs).toEqual([{ kind: "workbench", id: "attempt-1" }]);
+  });
+
+  test("resolver returning undefined stores SQL NULL, not []", async () => {
+    const { upstream } = recordingUpstream();
+    const persist = createMailboxPersist(db, {
+      upstream,
+      authorizeSender: () => ACTIVE,
+      resolveRefs: () => undefined,
+    });
+
+    await persist(args());
+
+    const [row] = await rowsFor("acme", "user-1");
+    expect(row!.refs).toBeNull();
+  });
+
+  test("resolver returning [] stores SQL NULL, not []", async () => {
+    const { upstream } = recordingUpstream();
+    const persist = createMailboxPersist(db, {
+      upstream,
+      authorizeSender: () => ACTIVE,
+      resolveRefs: () => [],
+    });
+
+    await persist(args());
+
+    const [row] = await rowsFor("acme", "user-1");
+    expect(row!.refs).toBeNull();
+  });
+
+  test("schema-invalid resolver output writes zero rows; upstream result still returned", async () => {
+    const { upstream, result } = recordingUpstream();
+    const persist = createMailboxPersist(db, {
+      upstream,
+      authorizeSender: () => ACTIVE,
+      resolveRefs: () => [{ kind: 42, id: "x" }] as unknown as MailboxRef[],
+    });
+
+    expect(await persist(args())).toBe(result);
+    expect(await rowsFor("acme", "user-1")).toHaveLength(0);
+  });
+
+  test("resolver runs after upstream resolves (serial), adding its latency to the call", async () => {
+    const order: string[] = [];
+    const persist = createMailboxPersist(db, {
+      upstream: async () => {
+        await Bun.sleep(150);
+        order.push("upstream");
+        return [{ delivered: true }];
+      },
+      authorizeSender: () => ACTIVE,
+      resolveRefs: async () => {
+        order.push("resolver-start");
+        await Bun.sleep(150);
+        order.push("resolver-end");
+        return undefined;
+      },
+    });
+
+    const t0 = performance.now();
+    await persist(args());
+    const elapsed = performance.now() - t0;
+
+    expect(order).toEqual(["upstream", "resolver-start", "resolver-end"]);
+    expect(elapsed).toBeGreaterThanOrEqual(290);
+  });
+
+  test("the 21st ref (a workbench ref appended last) is silently dropped", async () => {
+    const refs: MailboxRef[] = Array.from({ length: MAX_MAILBOX_REFS }, (_, i) => ({
+      kind: "thread",
+      id: `t-${i}`,
+    }));
+    refs.push({ kind: "workbench", id: "must-be-present" });
+    const { upstream } = recordingUpstream();
+    const persist = createMailboxPersist(db, {
+      upstream,
+      authorizeSender: () => ACTIVE,
+      resolveRefs: () => refs,
+    });
+
+    await persist(args());
+
+    const [row] = await rowsFor("acme", "user-1");
+    const message = await getMailboxMessage(db, {
+      tenantId: "acme",
+      principalId: "user-1",
+      id: row!.id,
+    });
+    expect(message?.refs?.some((r) => r.kind === "workbench")).toBe(false);
+  });
 });
 
 describe("frame size and recipient hard caps", () => {
