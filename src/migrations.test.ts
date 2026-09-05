@@ -113,13 +113,15 @@ describe("runMailboxMigrations", () => {
             WHERE schemaname = 'mailbox' AND tablename = 'principal_mail'
             ORDER BY indexname`,
       );
-      // The mail plane keeps exactly four access paths: the dedupe constraint,
-      // the keyset the default page seeks on, and the two the thread read adds
-      // — the msg-id lookup and the GIN index serving the `refs` containment
-      // filter. `schema-ddl-parity.test.ts` holds schema.ts to this same list.
+      // The mail plane keeps exactly five access paths: the dedupe constraint,
+      // the keyset the default page seeks on, and the three the thread read
+      // adds — the msg-id lookup, the GIN index serving the `refs` containment
+      // filter, and the thread's own oldest-first keyset.
+      // `schema-ddl-parity.test.ts` holds schema.ts to this same list.
       expect(mailIndexes.map((i) => i.indexname)).toEqual([
         "principal_mail_pkey",
         "principal_mail_refs_idx",
+        "principal_mail_tenant_id_principal_id_created_at_id_asc_idx",
         "principal_mail_tenant_id_principal_id_created_at_id_idx",
         "principal_mail_tenant_id_principal_id_message_id_idx",
         "principal_mail_tenant_id_principal_id_message_key_idx",

@@ -3,7 +3,7 @@
 // a parent that changes when the reader turns the page is worse than none at
 // all. Every test here pins one of those two properties.
 import { beforeEach, describe, expect, test } from "bun:test";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { writeMailboxMessage } from "./write.js";
 import { principalMail } from "./schema.js";
 import {
@@ -376,6 +376,257 @@ describe("readMailboxMessageByMessageId", () => {
       ),
     ).toBeNull();
   });
+});
+
+describe("thread edge cases: cycles, tie-breaks, scope", () => {
+  /**
+   * These tests write rows directly (bypassing `writeMailboxMessage`, which
+   * mints its own Message-ID) so a scenario can pin exact msg-ids, exact
+   * `createdAt` ordering, and — for the cycle tests — headers a real MIME
+   * frame would never carry on its own but that RFC 5256 step 1.B still
+   * requires a reader to survive.
+   */
+  async function insertRaw(args: {
+    id: string;
+    tenantId?: string;
+    messageId: string | null;
+    inReplyTo?: string | null;
+    references?: string[] | null;
+    createdAt: string;
+    refs?: unknown;
+  }): Promise<void> {
+    await db.execute(sql`
+      INSERT INTO "mailbox"."principal_mail"
+        ("id","tenant_id","principal_id","address","direction","raw","message_id","in_reply_to","references","refs","created_at")
+      VALUES (${args.id}, ${args.tenantId ?? "t1"}, 'p1', 'p1@t1.example', 'inbound', ${Buffer.from("x")},
+              ${args.messageId}, ${args.inReplyTo ?? null},
+              ${
+                args.references === undefined || args.references === null
+                  ? null
+                  : JSON.stringify(args.references)
+              }::jsonb,
+              ${JSON.stringify(args.refs ?? [WORKBENCH])}::jsonb, ${args.createdAt}::timestamp)
+    `);
+  }
+
+  test("a message whose References names its own Message-ID is not its own parent", async () => {
+    await insertRaw({
+      id: "a",
+      messageId: "<a@x>",
+      inReplyTo: "<a@x>",
+      references: ["<a@x>"],
+      createdAt: "2026-01-01T00:00:00.000001Z",
+    });
+    const page = await readMailboxThread(
+      db,
+      { tenantId: "t1", principalId: "p1" },
+      { ref: WORKBENCH },
+    );
+    expect(page.items[0]?.parentId).toBeNull();
+  });
+
+  test("a mutual References cycle is broken: the LATER-created message becomes the root", async () => {
+    await insertRaw({
+      id: "a",
+      messageId: "<a@x>",
+      inReplyTo: "<b@x>",
+      createdAt: "2026-01-01T00:00:00.000001Z",
+    });
+    await insertRaw({
+      id: "b",
+      messageId: "<b@x>",
+      inReplyTo: "<a@x>",
+      createdAt: "2026-01-01T00:00:00.000002Z",
+    });
+    const page = await readMailboxThread(
+      db,
+      { tenantId: "t1", principalId: "p1" },
+      { ref: WORKBENCH },
+    );
+    const byId = new Map(page.items.map((i) => [i.id, i.parentId]));
+    // b is later-created, so cutting b's edge breaks the cycle: a -> b -> null.
+    expect(byId.get("a")).toBe("b");
+    expect(byId.get("b")).toBeNull();
+  });
+
+  test("a child that is OLDER than its parent still resolves (ancestor map is not ordering-bound)", async () => {
+    await insertRaw({
+      id: "child",
+      messageId: "<c@x>",
+      inReplyTo: "<p@x>",
+      createdAt: "2026-01-01T00:00:00.000001Z",
+    });
+    await insertRaw({
+      id: "parent",
+      messageId: "<p@x>",
+      createdAt: "2026-01-02T00:00:00.000001Z",
+    });
+    const page = await readMailboxThread(
+      db,
+      { tenantId: "t1", principalId: "p1" },
+      { ref: WORKBENCH, limit: 1 },
+    );
+    expect(page.items[0]?.id).toBe("child");
+    expect(page.items[0]?.parentId).toBe("parent");
+  });
+
+  test("duplicate Message-ID: oldest carrier wins, and self is skipped even when a duplicate exists", async () => {
+    await insertRaw({
+      id: "dup-old",
+      messageId: "<d@x>",
+      createdAt: "2026-01-01T00:00:00.000001Z",
+    });
+    await insertRaw({
+      id: "dup-new",
+      messageId: "<d@x>",
+      inReplyTo: "<d@x>",
+      createdAt: "2026-01-01T00:00:00.000002Z",
+    });
+    await insertRaw({
+      id: "reply",
+      messageId: "<r@x>",
+      inReplyTo: "<d@x>",
+      createdAt: "2026-01-01T00:00:00.000003Z",
+    });
+    const page = await readMailboxThread(
+      db,
+      { tenantId: "t1", principalId: "p1" },
+      { ref: WORKBENCH },
+    );
+    const byId = new Map(page.items.map((i) => [i.id, i.parentId]));
+    expect(byId.get("reply")).toBe("dup-old");
+    // dup-new names its own msg-id; the oldest carrier is dup-old, which is
+    // NOT itself, so it links there.
+    expect(byId.get("dup-new")).toBe("dup-old");
+    const found = await readMailboxMessageByMessageId(
+      db,
+      { tenantId: "t1", principalId: "p1" },
+      "<d@x>",
+    );
+    expect(found?.id).toBe("dup-old");
+  });
+
+  test("same principalId under another tenant is invisible to lookup and thread", async () => {
+    await seedScope(db, "t2", "p1");
+    await insertRaw({
+      id: "other-tenant",
+      tenantId: "t2",
+      messageId: "<o@x>",
+      createdAt: "2026-01-01T00:00:00.000001Z",
+    });
+    expect(
+      await readMailboxMessageByMessageId(
+        db,
+        { tenantId: "t1", principalId: "p1" },
+        "<o@x>",
+      ),
+    ).toBeNull();
+    const page = await readMailboxThread(
+      db,
+      { tenantId: "t1", principalId: "p1" },
+      { ref: WORKBENCH },
+    );
+    expect(page.items).toEqual([]);
+  });
+
+  test("ref match is exact on kind and id; a ref carrying an extra label still matches", async () => {
+    await insertRaw({
+      id: "labelled",
+      messageId: "<l@x>",
+      createdAt: "2026-01-01T00:00:00.000001Z",
+      refs: [{ kind: "workbench", id: "wb-1", label: "L" }],
+    });
+    await insertRaw({
+      id: "prefix",
+      messageId: "<p@x>",
+      createdAt: "2026-01-01T00:00:00.000002Z",
+      refs: [{ kind: "workbench", id: "wb-10" }],
+    });
+    await insertRaw({
+      id: "kind",
+      messageId: "<k@x>",
+      createdAt: "2026-01-01T00:00:00.000003Z",
+      refs: [{ kind: "thread", id: "wb-1" }],
+    });
+    const page = await readMailboxThread(
+      db,
+      { tenantId: "t1", principalId: "p1" },
+      { ref: WORKBENCH },
+    );
+    expect(page.items.map((i) => i.id)).toEqual(["labelled"]);
+  });
+
+  test("a malformed references blob degrades to [] rather than failing the read", async () => {
+    await insertRaw({
+      id: "bad",
+      messageId: "<b@x>",
+      createdAt: "2026-01-01T00:00:00.000001Z",
+    });
+    await db.execute(
+      sql`UPDATE "mailbox"."principal_mail" SET "references" = '{"not":"a list"}'::jsonb WHERE id = 'bad'`,
+    );
+    const page = await readMailboxThread(
+      db,
+      { tenantId: "t1", principalId: "p1" },
+      { ref: WORKBENCH },
+    );
+    expect(page.items[0]?.references).toEqual([]);
+  });
+
+  test("EXPLAIN: ref-filtered thread page uses the GIN index once the table is large", async () => {
+    await db.execute(sql`
+      INSERT INTO "mailbox"."principal_mail" ("tenant_id","principal_id","address","direction","raw","message_id","refs","created_at")
+      SELECT 't1','p1','p1@t1.example','inbound', ${Buffer.from("x")}, '<m' || g || '@x>',
+             jsonb_build_array(jsonb_build_object('kind','workbench','id','wb-' || (g % 500))),
+             now() - (g || ' seconds')::interval
+      FROM generate_series(1, 50000) g`);
+    await db.execute(sql`ANALYZE "mailbox"."principal_mail"`);
+    const plan = await db.execute<{ "QUERY PLAN": string }>(sql`
+      EXPLAIN SELECT pm.id FROM "mailbox"."principal_mail" pm
+      LEFT JOIN "mailbox"."mailbox" m ON m.id = pm.id
+      WHERE pm.tenant_id = 't1' AND pm.principal_id = 'p1' AND pm.direction = 'inbound'
+        AND pm.refs @> '[{"kind":"workbench","id":"wb-1"}]'::jsonb
+      ORDER BY pm.created_at ASC, pm.id ASC LIMIT 51`);
+    const text = plan.map((r) => r["QUERY PLAN"]).join("\n");
+    expect(text).toContain("principal_mail_refs_idx");
+    const lookup = await db.execute<{ "QUERY PLAN": string }>(sql`
+      EXPLAIN SELECT pm.id FROM "mailbox"."principal_mail" pm
+      WHERE pm.tenant_id = 't1' AND pm.principal_id = 'p1' AND pm.direction = 'inbound'
+        AND pm.refs @> '[{"kind":"workbench","id":"wb-1"}]'::jsonb
+        AND pm.message_id IN ('<m1@x>','<m501@x>')`);
+    const ltext = lookup.map((r) => r["QUERY PLAN"]).join("\n");
+    expect(ltext).toContain("principal_mail_tenant_id_principal_id_message_id_idx");
+    // Bulk inserts of this size (needed for a realistic planner decision) run
+    // past bun's default per-test timeout.
+  }, 30000);
+
+  test("EXPLAIN: a large, time-clustered ref pages via an Index Scan with a Limit, not a full sort", async () => {
+    // 300k rows in the mailbox; the 50k newest of them all carry the SAME
+    // ref, so the ref is both large (in absolute row count) and clustered at
+    // one end of the created_at range — the shape that makes a page have to
+    // choose between scanning the ordered btree with a Filter, or bitmapping
+    // the GIN index and sorting every one of the ref's rows.
+    await db.execute(sql`
+      INSERT INTO "mailbox"."principal_mail" ("tenant_id","principal_id","address","direction","raw","message_id","refs","created_at")
+      SELECT 't1','p1','p1@t1.example','inbound', ${Buffer.from("x")}, '<m' || g || '@x>',
+             jsonb_build_array(jsonb_build_object(
+               'kind','workbench',
+               'id', CASE WHEN g <= 50000 THEN 'wb-1' ELSE 'wb-' || (g % 6000) END
+             )),
+             now() - (g || ' seconds')::interval
+      FROM generate_series(1, 300000) g`);
+    await db.execute(sql`ANALYZE "mailbox"."principal_mail"`);
+    const plan = await db.execute<{ "QUERY PLAN": string }>(sql`
+      EXPLAIN (ANALYZE, BUFFERS) SELECT pm.id FROM "mailbox"."principal_mail" pm
+      LEFT JOIN "mailbox"."mailbox" m ON m.id = pm.id
+      WHERE pm.tenant_id = 't1' AND pm.principal_id = 'p1' AND pm.direction = 'inbound'
+        AND pm.refs @> '[{"kind":"workbench","id":"wb-1"}]'::jsonb
+      ORDER BY pm.created_at ASC, pm.id ASC LIMIT 51`);
+    const text = plan.map((r) => r["QUERY PLAN"]).join("\n");
+    expect(text).toContain("Limit");
+    expect(text).toContain("Index Scan");
+    expect(text).not.toContain("Sort Key");
+  }, 30000);
 });
 
 describe("the cached references column", () => {
