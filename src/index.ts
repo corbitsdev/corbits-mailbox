@@ -69,6 +69,7 @@ export type {
 
 export {
   writeMailboxMessage,
+  writeMailboxMessages,
   deliverInboxItems,
   mailboxKey,
   MAX_MAILBOX_REFS,
@@ -77,6 +78,8 @@ export {
 } from "./write.js";
 export type {
   WriteMailboxMessageArgs,
+  WriteMailboxMessagesItem,
+  WriteMailboxMessagesOpts,
   InboxItem,
   DeliverInboxItemsOpts,
   DeliveredInboxItem,

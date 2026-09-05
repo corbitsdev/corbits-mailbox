@@ -270,9 +270,11 @@ async function insertMailboxMessage(
   args: WriteMailboxMessageArgs,
   raw: Uint8Array,
   messageId: string,
-): Promise<{ id: string } | null> {
+): Promise<{ id: string; messageKey: string } | null> {
   assertMailboxFrameBytes(raw);
-  const messageKey = args.messageKey ?? mailboxKey.transport(messageId, args.principalId);
+  const direction = args.direction ?? "inbound";
+  const messageKey =
+    args.messageKey ?? mailboxKey.transport(messageId, args.principalId, direction);
   const refs = boundRefs(args.refs, messageKey);
 
   // The management row is created EAGERLY with the message: every mutation and
@@ -287,7 +289,7 @@ async function insertMailboxMessage(
       tenantId: args.tenantId,
       principalId: args.principalId,
       address: args.address,
-      direction: args.direction ?? "inbound",
+      direction,
       raw: Buffer.from(raw),
       subject: args.subject,
       fromAddress: args.fromAddress,
@@ -304,20 +306,26 @@ async function insertMailboxMessage(
       ],
       where: sql`${principalMail.messageKey} IS NOT NULL`,
     })
-    .returning({ id: principalMail.id });
+    .returning({ id: principalMail.id, createdAt: principalMail.createdAt });
 
   const inserted = rows[0];
   if (!inserted) return null;
 
+  // An outbound row is the sender's own durable copy of a message they sent,
+  // not something to notify them about — it is created already-read (readAt
+  // pinned to the same createdAt Postgres just minted) so the unread count
+  // and the unread view exclude it without either needing a direction
+  // predicate of their own.
   await tx.insert(mailbox).values({
     id: inserted.id,
     tenantId: args.tenantId,
     principalId: args.principalId,
+    readAt: direction === "outbound" ? inserted.createdAt : null,
     priority: args.priority ?? null,
     classification: args.classification ?? null,
     status: args.status ?? null,
   });
-  return inserted;
+  return { id: inserted.id, messageKey };
 }
 
 /**
@@ -389,18 +397,31 @@ export async function writeMailboxMessage(
 // `transport` is the default `writeMailboxMessage` / `writeMailboxMessages`
 // fall back to when a caller supplies no `messageKey` of its own: keyed on
 // the frame's own `messageId` (caller-supplied or minted) plus the recipient
-// `principalId`, matching `persist.ts`'s transport dual-write key shape
-// (`transport:mid:<Message-ID>:<principalId>`) without importing from it —
-// that file owns a second fallback (content-hash) for frames with no
-// Message-ID at all, which never happens on this package's own write path,
-// where a `messageId` is always present by the time a row is inserted.
+// `principalId`. For the (default) `"inbound"` direction this matches
+// `persist.ts`'s transport dual-write key shape
+// (`transport:mid:<Message-ID>:<principalId>`) BYTE FOR BYTE and without
+// importing from it — a frame persist already delivered and a direct inbound
+// write for the same Message-ID + principal dedupe onto the same row, as
+// they always have. `"outbound"` gets a `:outbound` suffix instead of
+// silently sharing the inbound key: a sender's own copy of a turn and a
+// recipient's (or their own) inbound copy of the identical caller-supplied
+// Message-ID must NOT collapse onto one row. `persist.ts` owns a second
+// fallback (content-hash) for frames with no Message-ID at all, which never
+// happens on this package's own write path, where a `messageId` is always
+// present by the time a row is inserted.
 export const mailboxKey = {
   inbox: (source: string, externalId: string) =>
     `inbox2:${source.length}:${source}:${externalId}`,
   gate: (gateId: string) => `gate:${gateId}`,
   run: (runId: string) => `run:${runId}`,
-  transport: (messageId: string, principalId: string) =>
-    `transport:mid:${messageId}:${principalId}`,
+  transport: (
+    messageId: string,
+    principalId: string,
+    direction: "inbound" | "outbound" = "inbound",
+  ) =>
+    direction === "outbound"
+      ? `transport:mid:${messageId}:${principalId}:outbound`
+      : `transport:mid:${messageId}:${principalId}`,
 } as const;
 
 export type InboxItem = {
@@ -546,10 +567,14 @@ export async function deliverInboxItems(
   return results;
 }
 
-/** One item of a `writeMailboxMessages` batch: an address plus the scope it lands in. */
+/**
+ * One item of a `writeMailboxMessages` batch: an address plus the scope it
+ * lands in. `args` omits `tenantId`/`principalId` — `scope` is the SOLE
+ * source of both, so there is no second copy that could disagree with it.
+ */
 export type WriteMailboxMessagesItem = {
   scope: MailboxScopeIds;
-  args: WriteMailboxMessageArgs;
+  args: Omit<WriteMailboxMessageArgs, "tenantId" | "principalId">;
 };
 
 export type WriteMailboxMessagesOpts = {
@@ -580,21 +605,23 @@ export type WriteMailboxMessagesOpts = {
  * transaction, not a rollback trigger; retrying an entire successful batch
  * therefore commits nothing the second time and returns no ids.
  *
- * Returns the ids of rows this call actually inserted, in item order,
- * skipping any item deduped by its messageKey. Bus events publish only after
- * commit, one per written row — never for a deduped item, and never before
- * the transaction is durable.
+ * Returns one result per item, IN ITEM ORDER — `{ messageKey, id }`, `id`
+ * null exactly when that item's messageKey deduped against an existing row
+ * (matching `deliverInboxItems`'s `DeliveredInboxItem` shape). Bus events
+ * publish only after commit, one per written row — never for a deduped item,
+ * and never before the transaction is durable.
  */
 export async function writeMailboxMessages(
   db: MailboxDb,
   items: WriteMailboxMessagesItem[],
   opts?: WriteMailboxMessagesOpts,
-): Promise<string[]> {
+): Promise<DeliveredInboxItem[]> {
   type Prepared = {
     scope: MailboxScopeIds;
     writeArgs: WriteMailboxMessageArgs;
     raw: Uint8Array;
     messageId: string;
+    messageKey: string;
   };
   const prepared: Prepared[] = [];
   for (const { scope, args } of items) {
@@ -607,18 +634,30 @@ export async function writeMailboxMessages(
     assertMailboxStringFieldsFit(writeArgs);
     const { raw, messageId } = encodeMailboxFrame(writeArgs);
     assertMailboxFrameBytes(raw);
-    prepared.push({ scope, writeArgs, raw, messageId });
+    // Computed here, once, rather than left to `insertMailboxMessage`'s own
+    // fallback — this is the value returned to the caller for EVERY item,
+    // including one that dedupes and never reaches an insert.
+    const messageKey =
+      writeArgs.messageKey ??
+      mailboxKey.transport(messageId, scope.principalId, writeArgs.direction ?? "inbound");
+    writeArgs.messageKey = messageKey;
+    prepared.push({ scope, writeArgs, raw, messageId, messageKey });
   }
 
   type Inserted = { id: string; scope: MailboxScopeIds };
-  const inserted: Inserted[] = await db.transaction(async (tx) => {
+  const { results, inserted } = await db.transaction(async (tx) => {
+    const results: DeliveredInboxItem[] = [];
     const inserted: Inserted[] = [];
-    for (const { scope, writeArgs, raw, messageId } of prepared) {
+    for (const { scope, writeArgs, raw, messageId, messageKey } of prepared) {
       const written = await insertMailboxMessage(tx, writeArgs, raw, messageId);
-      if (written === null) continue;
+      if (written === null) {
+        results.push({ messageKey, id: null });
+        continue;
+      }
+      results.push({ messageKey, id: written.id });
       inserted.push({ id: written.id, scope });
     }
-    return inserted;
+    return { results, inserted };
   });
 
   // Post-commit only: live signals for newly inserted ids, one per row.
@@ -628,5 +667,5 @@ export async function writeMailboxMessages(
     }
   }
 
-  return inserted.map((row) => row.id);
+  return results;
 }

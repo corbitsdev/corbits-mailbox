@@ -9,6 +9,7 @@ import {
 } from "./write.js";
 import { decodeMailFrame } from "./frame.js";
 import { getMailboxMessage, listUserMailbox } from "./read.js";
+import { countUnreadActiveMailbox } from "./mutations.js";
 import { createInMemoryMailboxEventBus } from "./bus.js";
 import { withTestDb, seedScope, TEST_VOCABULARY } from "./test-helpers.js";
 import type { MailboxDb } from "./db.js";
@@ -991,8 +992,6 @@ describe("writeMailboxMessages (one-transaction batch write)", () => {
         {
           scope: { tenantId: "t1", principalId: "p1" },
           args: {
-            tenantId: "t1",
-            principalId: "p1",
             address: "p1@t1.example",
             fromAddress: "p1@t1.example",
             subject: "Sent",
@@ -1003,8 +1002,6 @@ describe("writeMailboxMessages (one-transaction batch write)", () => {
         {
           scope: { tenantId: "t1", principalId: "p1" },
           args: {
-            tenantId: "t1",
-            principalId: "p1",
             address: "p1@t1.example",
             fromAddress: "p1@t1.example",
             subject: "Recv",
@@ -1015,8 +1012,6 @@ describe("writeMailboxMessages (one-transaction batch write)", () => {
         {
           scope: { tenantId: "t1", principalId: "p2" },
           args: {
-            tenantId: "t1",
-            principalId: "p2",
             address: "p2@t1.example",
             fromAddress: "p1@t1.example",
             subject: "Recv",
@@ -1045,8 +1040,6 @@ describe("writeMailboxMessages (one-transaction batch write)", () => {
         {
           scope: { tenantId: "t1", principalId: "p1" },
           args: {
-            tenantId: "t1",
-            principalId: "p1",
             address: "p1@t1.example",
             fromAddress: "p1@t1.example",
             subject: "Sent",
@@ -1057,8 +1050,6 @@ describe("writeMailboxMessages (one-transaction batch write)", () => {
         {
           scope: { tenantId: "t1", principalId: "p2" },
           args: {
-            tenantId: "t1",
-            principalId: "p2",
             address: "p2@t1.example",
             fromAddress: "p1@t1.example",
             subject: "Recv",
@@ -1069,8 +1060,6 @@ describe("writeMailboxMessages (one-transaction batch write)", () => {
         {
           scope: { tenantId: "t1", principalId: "nobody-seeded-this" },
           args: {
-            tenantId: "t1",
-            principalId: "nobody-seeded-this",
             address: "ghost@t1.example",
             fromAddress: "p1@t1.example",
             subject: "Bad",
@@ -1083,15 +1072,13 @@ describe("writeMailboxMessages (one-transaction batch write)", () => {
     expect((await mailRows()).length).toBe(0);
   });
 
-  test("retrying an already-committed batch (same messageIds, no messageKey) writes nothing and returns empty", async () => {
+  test("retrying an already-committed batch (same messageIds, no messageKey) writes nothing and returns null ids", async () => {
     const messageId1 = "<batch-retry-1@example.com>";
     const messageId2 = "<batch-retry-2@example.com>";
     const items = [
       {
         scope: { tenantId: "t1", principalId: "p1" },
         args: {
-          tenantId: "t1",
-          principalId: "p1",
           address: "p1@t1.example",
           fromAddress: "p1@t1.example",
           subject: "Sent",
@@ -1103,8 +1090,6 @@ describe("writeMailboxMessages (one-transaction batch write)", () => {
       {
         scope: { tenantId: "t1", principalId: "p2" },
         args: {
-          tenantId: "t1",
-          principalId: "p2",
           address: "p2@t1.example",
           fromAddress: "p1@t1.example",
           subject: "Recv",
@@ -1119,7 +1104,7 @@ describe("writeMailboxMessages (one-transaction batch write)", () => {
     expect(first.length).toBe(2);
 
     const retry = await writeMailboxMessages(db, items);
-    expect(retry).toEqual([]);
+    expect(retry.map((r) => r.id)).toEqual([null, null]);
     expect((await mailRows()).length).toBe(2);
   });
 
@@ -1134,8 +1119,6 @@ describe("writeMailboxMessages (one-transaction batch write)", () => {
     const item = {
       scope: { tenantId: "t1", principalId: "p1" },
       args: {
-        tenantId: "t1",
-        principalId: "p1",
         address: "p1@t1.example",
         fromAddress: "p1@t1.example",
         subject: "Hello",
@@ -1146,21 +1129,21 @@ describe("writeMailboxMessages (one-transaction batch write)", () => {
 
     const first = await writeMailboxMessages(db, [item], { bus });
     expect(first.length).toBe(1);
-    expect(received.map((e) => e.id)).toEqual(first);
+    expect(received.map((e) => e.id)).toEqual(
+      first.map((row) => row.id).filter((id): id is string => id !== null),
+    );
 
     // Dedupe: the retry writes nothing and must not publish a second event.
     const retry = await writeMailboxMessages(db, [item], { bus });
-    expect(retry).toEqual([]);
+    expect(retry.map((r) => r.id)).toEqual([null]);
     expect(received.length).toBe(1);
   });
 
   test("a messageKey override is honored inside a batch", async () => {
-    const ids = await writeMailboxMessages(db, [
+    const results = await writeMailboxMessages(db, [
       {
         scope: { tenantId: "t1", principalId: "p1" },
         args: {
-          tenantId: "t1",
-          principalId: "p1",
           address: "p1@t1.example",
           fromAddress: "p1@t1.example",
           subject: "Hello",
@@ -1169,10 +1152,210 @@ describe("writeMailboxMessages (one-transaction batch write)", () => {
         },
       },
     ]);
+    expect(results[0]?.messageKey).toBe("custom:batch-key");
     const rows = await db.execute<{ message_key: string }>(
-      sql`SELECT message_key FROM "mailbox"."principal_mail" WHERE id = ${ids[0]}`,
+      sql`SELECT message_key FROM "mailbox"."principal_mail" WHERE id = ${results[0]?.id}`,
     );
     expect(rows[0]?.message_key).toBe("custom:batch-key");
+  });
+
+  test("returns { messageKey, id } per item, in item order, including the default-keyed items", async () => {
+    const messageId = "<batch-order-1@example.com>";
+    const results = await writeMailboxMessages(db, [
+      {
+        scope: { tenantId: "t1", principalId: "p1" },
+        args: {
+          address: "p1@t1.example",
+          fromAddress: "p1@t1.example",
+          subject: "Sent",
+          body: "Hi p2",
+          direction: "outbound",
+          messageId,
+        },
+      },
+      {
+        scope: { tenantId: "t1", principalId: "p2" },
+        args: {
+          address: "p2@t1.example",
+          fromAddress: "p1@t1.example",
+          subject: "Recv",
+          body: "Hi p2",
+          direction: "inbound",
+          messageId,
+        },
+      },
+    ]);
+    expect(results).toEqual([
+      { messageKey: `transport:mid:${messageId}:p1:outbound`, id: expect.any(String) },
+      { messageKey: `transport:mid:${messageId}:p2`, id: expect.any(String) },
+    ]);
+  });
+
+  test("invalid scope on a later item is refused before any row is written", async () => {
+    await expect(
+      writeMailboxMessages(db, [
+        {
+          scope: { tenantId: "t1", principalId: "p1" },
+          args: {
+            address: "p1@t1.example",
+            fromAddress: "p1@t1.example",
+            subject: "Hello",
+            body: "World",
+          },
+        },
+        {
+          scope: { tenantId: "t1", principalId: "  " },
+          args: {
+            address: "p1@t1.example",
+            fromAddress: "p1@t1.example",
+            subject: "Hello",
+            body: "World",
+          },
+        },
+      ]),
+    ).rejects.toThrow(RangeError);
+    expect((await mailRows()).length).toBe(0);
+  });
+
+  test("mailbox management row is created for outbound rows written through the batch path too", async () => {
+    const results = await writeMailboxMessages(db, [
+      {
+        scope: { tenantId: "t1", principalId: "p1" },
+        args: {
+          address: "p1@t1.example",
+          fromAddress: "p1@t1.example",
+          subject: "Hello",
+          body: "World",
+          direction: "outbound",
+        },
+      },
+    ]);
+    const rows = await db.execute<{ n: number }>(
+      sql`SELECT count(*)::int AS n FROM "mailbox"."mailbox" WHERE id = ${results[0]?.id}`,
+    );
+    expect(rows[0]!.n).toBe(1);
+  });
+});
+
+describe("outbound rows and the inbox read model", () => {
+  const base = {
+    tenantId: "t1",
+    principalId: "p1",
+    address: "p1@t1.example",
+    fromAddress: "p1@t1.example",
+    subject: "Hello",
+    body: "World",
+  };
+
+  test("an outbound row is created already-read: excluded from the unread view and count without a direction predicate", async () => {
+    const written = await writeMailboxMessage(db, {
+      ...base,
+      direction: "outbound",
+    });
+    expect(written).not.toBeNull();
+
+    const scope = { tenantId: "t1", principalId: "p1" };
+    const page = await listUserMailbox(db, {
+      ...scope,
+      priorities: TEST_VOCABULARY.priorities,
+      view: "unread",
+      limit: 50,
+    });
+    expect(page.items.length).toBe(0);
+    expect(
+      await getMailboxMessage(db, { ...scope, id: written!.id }),
+    ).toBeNull();
+    expect(
+      await getMailboxMessage(db, { ...scope, id: written!.id, direction: "all" }),
+    ).not.toBeNull();
+
+    expect(await countUnreadActiveMailbox(db, scope)).toBe(0);
+  });
+
+  test("listUserMailbox and getMailboxMessage accept an explicit direction filter", async () => {
+    const outbound = await writeMailboxMessage(db, {
+      ...base,
+      direction: "outbound",
+      messageId: "<direction-filter-1@example.com>",
+    });
+    const inbound = await writeMailboxMessage(db, {
+      ...base,
+      direction: "inbound",
+      messageId: "<direction-filter-2@example.com>",
+    });
+    const scope = { tenantId: "t1", principalId: "p1" };
+
+    const outboundPage = await listUserMailbox(db, {
+      ...scope,
+      priorities: TEST_VOCABULARY.priorities,
+      view: "all",
+      limit: 50,
+      direction: "outbound",
+    });
+    expect(outboundPage.items.map((i) => i.id)).toEqual([outbound!.id]);
+
+    const allPage = await listUserMailbox(db, {
+      ...scope,
+      priorities: TEST_VOCABULARY.priorities,
+      view: "all",
+      limit: 50,
+      direction: "all",
+    });
+    expect(new Set(allPage.items.map((i) => i.id))).toEqual(
+      new Set([outbound!.id, inbound!.id]),
+    );
+
+    expect(
+      await getMailboxMessage(db, {
+        ...scope,
+        id: outbound!.id,
+        direction: "outbound",
+      }),
+    ).not.toBeNull();
+  });
+});
+
+describe("default messageKey collisions", () => {
+  const base = {
+    tenantId: "t1",
+    principalId: "p1",
+    address: "p1@t1.example",
+    fromAddress: "p1@t1.example",
+    subject: "Hello",
+    body: "World",
+  };
+
+  test("same caller Message-ID to the same principal in both directions writes two distinct rows", async () => {
+    const messageId = "<turn-1@t1.example>";
+    const results = await writeMailboxMessages(db, [
+      {
+        scope: { tenantId: "t1", principalId: "p1" },
+        args: { ...base, direction: "outbound", messageId, subject: "Sent" },
+      },
+      {
+        scope: { tenantId: "t1", principalId: "p1" },
+        args: { ...base, direction: "inbound", messageId, subject: "Recv" },
+      },
+    ]);
+    expect(results.length).toBe(2);
+    expect(results.every((r) => r.id !== null)).toBe(true);
+  });
+
+  test("two distinct messages that reuse one caller Message-ID for the same principal collide", async () => {
+    const messageId = "<reused@t1.example>";
+    const a = await writeMailboxMessage(db, { ...base, messageId, subject: "A" });
+    const b = await writeMailboxMessage(db, { ...base, messageId, subject: "B" });
+    expect(a).not.toBeNull();
+    expect(b).toBeNull();
+  });
+
+  test("default write key equals persist.ts's transport key shape for the same Message-ID + principal", async () => {
+    const messageId = "<shared@t1.example>";
+    const written = await writeMailboxMessage(db, { ...base, messageId });
+    const rows = await db.execute<{ message_key: string }>(
+      sql`SELECT message_key FROM "mailbox"."principal_mail" WHERE id = ${written!.id}`,
+    );
+    expect(rows[0]!.message_key).toBe(`transport:mid:${messageId}:p1`);
   });
 });
 
