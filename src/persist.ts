@@ -17,18 +17,36 @@
 
 import { createHash } from "node:crypto";
 import { and, eq, inArray, sql } from "drizzle-orm";
+import { type } from "arktype";
 import { getLogger } from "@intx/log";
 import { hostPrincipal, mailbox, principalMail } from "./schema.js";
 import type { MailboxDb } from "./db.js";
 import { publishMailboxEvent, type MailboxEventBus } from "./bus.js";
-import { decodeMailFrame, parseMsgIdList } from "./frame.js";
+import { decodeMailFrame, parseMsgIdList, type DecodedFrame } from "./frame.js";
 import { resolveMailboxRecipients } from "./recipients.js";
+import { MailboxRefArraySchema, type MailboxRef } from "./read.js";
 import {
   assertMailboxScope,
   assertMailboxFrameBytes,
+  boundRefs,
 } from "./write.js";
 
 const logger = getLogger(["corbits-mailbox", "persist"]);
+
+/**
+ * Tags a thrown error with the persist stage that produced it, so the
+ * dual-write failure log can name `resolveRefs` specifically instead of a
+ * generic "mailbox write failed". The wrapped error is what's logged and
+ * (never here) rethrown — see `attemptMailboxWrite`.
+ */
+class MailboxPersistStageError extends Error {
+  readonly stage: string;
+  constructor(stage: string, cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = "MailboxPersistStageError";
+    this.stage = stage;
+  }
+}
 
 // Cap the sender-controlled recipient list before resolve / inArray / multi-row
 // insert. Matches MAX_BULK_MAILBOX_IDS posture: hard refuse, never clamp.
@@ -91,6 +109,43 @@ export type PersistedMailboxRow = {
   senderAddress: string;
 };
 
+/**
+ * Host seam for stamping every recipient row of one frame with the same
+ * `refs`. Called once per frame, before the transaction opens — NOT once per
+ * recipient — so a host pointing every row at the same upstream entity
+ * (`{ kind: "workbench", id }`) does one lookup, not N.
+ *
+ * Runs AFTER `upstream` resolves, and serially with it — not concurrently —
+ * so its latency adds to the call. This keeps refs available before the
+ * mailbox transaction opens without racing `upstream`'s own effects.
+ *
+ * Refs are frozen at the FIRST successful insert for a frame: a retried
+ * frame (same idempotency key) that reaches `resolveRefs` again still runs
+ * the resolver — it is not skipped — but a different result is discarded,
+ * since `onConflictDoNothing` means no row is written for the retry. Do not
+ * rely on a resolver's return value being applied on any call after the
+ * first that actually inserts.
+ *
+ * The result is validated with `MailboxRefArraySchema` and capped at
+ * `MAX_MAILBOX_REFS` the same way `writeMailboxMessage`'s `refs` argument is;
+ * see `boundRefs`. Returning `undefined` (or an empty array) stores no refs.
+ * Because excess entries are truncated rather than rejected, a resolver
+ * MUST return a small set with the load-bearing ref FIRST — anything past
+ * `MAX_MAILBOX_REFS` is silently dropped from the end of the list.
+ *
+ * A throwing `resolveRefs` is handled exactly like a mailbox-write failure
+ * under the dual-write contract: logged (naming `resolveRefs` as the failing
+ * stage), upstream still runs (it already ran, or still will, independently
+ * of this), and no mailbox row is written for that frame. See
+ * ARCHITECTURE.md's persist section.
+ */
+export type ResolveMailboxRefs = (
+  args: MailboxPersistArgs & {
+    senderAuthorization: SenderAuthorization;
+    decoded: DecodedFrame | null;
+  },
+) => Promise<MailboxRef[] | undefined> | MailboxRef[] | undefined;
+
 export type CreateMailboxPersistOpts<R> = {
   /** The host's own persist path. Always called, for every frame. */
   upstream: (args: MailboxPersistArgs) => Promise<R>;
@@ -99,6 +154,12 @@ export type CreateMailboxPersistOpts<R> = {
   bus?: MailboxEventBus;
   /** Best-effort hook per inserted row; a throw is logged, never propagated. */
   onRow?: (row: PersistedMailboxRow) => void;
+  /**
+   * Resolve the `refs` every recipient row of one frame gets, INSIDE the
+   * existing single transaction — so the post-commit bus event and any SSE
+   * subscriber already see them. See `ResolveMailboxRefs`.
+   */
+  resolveRefs?: ResolveMailboxRefs;
 };
 
 /**
@@ -232,6 +293,35 @@ export function createMailboxPersist<R>(
     // an upgrade's backfill would have produced for the same frame.
     const inReplyTo = parseMsgIdList(decoded?.headers.get("in-reply-to"))[0] ?? null;
 
+    // Resolved ONCE per frame, before the transaction — every recipient row
+    // gets the same refs, and a resolver that hits an upstream entity does one
+    // lookup regardless of recipient count. A throw here propagates out of
+    // `writeMailboxRows` exactly like any other pre-transaction failure:
+    // `attemptMailboxWrite` catches and logs it, upstream still stands, and no
+    // mailbox row is written for this frame.
+    let refs: MailboxRef[] | undefined;
+    if (opts.resolveRefs) {
+      let resolvedRefs: MailboxRef[] | undefined;
+      try {
+        resolvedRefs = await opts.resolveRefs({
+          senderAddress,
+          recipients,
+          raw,
+          senderAuthorization: auth,
+          decoded,
+        });
+      } catch (err) {
+        throw new MailboxPersistStageError("resolveRefs", err);
+      }
+      if (resolvedRefs !== undefined && resolvedRefs.length > 0) {
+        const validated = MailboxRefArraySchema(resolvedRefs);
+        if (validated instanceof type.errors) {
+          throw new RangeError(`invalid mailbox refs: ${validated.summary}`);
+        }
+        refs = boundRefs(validated, messageId, { senderAddress });
+      }
+    }
+
     // Mail rows and their management rows commit together: the management row
     // is created eagerly with the message (see `writeMailboxMessage`), and a
     // message without one is unreachable by every mutation. messageKey makes
@@ -252,6 +342,7 @@ export function createMailboxPersist<R>(
             fromAddress,
             messageId,
             inReplyTo,
+            refs: refs ?? null,
             messageKey: transportMessageKey(
               messageId,
               raw,
@@ -305,8 +396,14 @@ export function createMailboxPersist<R>(
     try {
       await writeMailboxRows(args);
     } catch (err) {
+      // Decoded independently of `writeMailboxRows`'s own decode: the throw
+      // may have happened before that decode ran (e.g. authorizeSender), and
+      // this log line must still correlate to a messageId when one exists.
+      const messageId = decodeMailFrame(args.raw)?.messageId ?? null;
       logger.error("mailbox write failed for mail from {senderAddress}", {
         senderAddress: args.senderAddress,
+        messageId,
+        ...(err instanceof MailboxPersistStageError ? { stage: err.stage } : {}),
         error: err instanceof Error ? err : new Error(String(err)),
       });
     }
