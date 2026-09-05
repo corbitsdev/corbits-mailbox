@@ -25,6 +25,12 @@ const persist = createMailboxPersist(db, {
 });
 ```
 
+`resolveRefs` runs after `upstream` resolves and serially with it, and its
+refs are frozen at the frame's first successful insert — a retry still runs
+the resolver but a different result on that later call is discarded. Return
+a small set with the load-bearing ref first: the list is capped at
+`MAX_MAILBOX_REFS` by truncating from the end.
+
 See ARCHITECTURE.md's persist section for the full contract, including
 `resolveRefs`'s dual-write-failure semantics.
 

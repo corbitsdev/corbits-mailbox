@@ -80,15 +80,26 @@ collapse duplicate frames without failing the call or re-announcing.
 `senderAuthorization` and the `decoded` frame (or `null` if the parser
 rejected it) — is called ONCE per frame, before the transaction opens, not
 once per recipient: a host pointing every row at the same upstream entity
-does one lookup, not N. Its result is validated with `MailboxRefArraySchema`
-and capped at `MAX_MAILBOX_REFS` the same way `writeMailboxMessage`'s `refs`
-argument is (excess entries truncated, logged, never a throw), then stored on
-every recipient row of that frame INSIDE the same transaction — so the
-post-commit bus `create` event and any SSE subscriber already see refs on the
-row once it's readable. A throwing `resolveRefs` is handled exactly like any
-other pre-transaction failure: it falls under the same dual-write contract as
-the rest of the wrapper — logged, upstream unaffected (already ran, or still
-will, independently of this), and no mailbox row for that frame.
+does one lookup, not N. It runs AFTER `upstream` resolves and serially with
+it, so its latency adds to the call rather than overlapping. Its result is
+validated with `MailboxRefArraySchema` and capped at `MAX_MAILBOX_REFS` the
+same way `writeMailboxMessage`'s `refs` argument is (excess entries
+truncated from the end of the list, logged with `messageId` and
+`senderAddress`, never a throw) — so a resolver must return a small set with
+the load-bearing ref FIRST, since anything past the cap is silently dropped.
+Refs are then stored on every recipient row of that frame INSIDE the same
+transaction — so the post-commit bus `create` event and any SSE subscriber
+already see refs on the row once it's readable.
+
+Refs are frozen at the FIRST successful insert for a given frame: a retry
+(same idempotency key) still calls `resolveRefs` — it is not skipped — but
+because `onConflictDoNothing` writes no row on a retry, a different result
+from that second call is simply discarded; only the first call's refs ever
+land. A throwing `resolveRefs` is handled exactly like any other
+pre-transaction failure: it falls under the same dual-write contract as the
+rest of the wrapper — logged (naming `resolveRefs` as the failing stage),
+upstream unaffected (already ran, or still will, independently of this), and
+no mailbox row for that frame.
 
 `resolvePrincipal`'s signature is identical across the Corbits cores, so a host
 mounting more than one passes the same function to each.

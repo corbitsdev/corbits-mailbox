@@ -115,14 +115,29 @@ export type PersistedMailboxRow = {
  * recipient — so a host pointing every row at the same upstream entity
  * (`{ kind: "workbench", id }`) does one lookup, not N.
  *
+ * Runs AFTER `upstream` resolves, and serially with it — not concurrently —
+ * so its latency adds to the call. This keeps refs available before the
+ * mailbox transaction opens without racing `upstream`'s own effects.
+ *
+ * Refs are frozen at the FIRST successful insert for a frame: a retried
+ * frame (same idempotency key) that reaches `resolveRefs` again still runs
+ * the resolver — it is not skipped — but a different result is discarded,
+ * since `onConflictDoNothing` means no row is written for the retry. Do not
+ * rely on a resolver's return value being applied on any call after the
+ * first that actually inserts.
+ *
  * The result is validated with `MailboxRefArraySchema` and capped at
  * `MAX_MAILBOX_REFS` the same way `writeMailboxMessage`'s `refs` argument is;
  * see `boundRefs`. Returning `undefined` (or an empty array) stores no refs.
+ * Because excess entries are truncated rather than rejected, a resolver
+ * MUST return a small set with the load-bearing ref FIRST — anything past
+ * `MAX_MAILBOX_REFS` is silently dropped from the end of the list.
  *
  * A throwing `resolveRefs` is handled exactly like a mailbox-write failure
- * under the dual-write contract: logged, upstream still runs (it already
- * ran, or still will, independently of this), and no mailbox row is written
- * for that frame. See ARCHITECTURE.md's persist section.
+ * under the dual-write contract: logged (naming `resolveRefs` as the failing
+ * stage), upstream still runs (it already ran, or still will, independently
+ * of this), and no mailbox row is written for that frame. See
+ * ARCHITECTURE.md's persist section.
  */
 export type ResolveMailboxRefs = (
   args: MailboxPersistArgs & {
