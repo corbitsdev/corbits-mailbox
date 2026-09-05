@@ -296,6 +296,12 @@ async function insertMailboxMessage(
       messageKey,
       messageId,
       inReplyTo: args.inReplyTo ?? null,
+      // Absent and empty are the same chain, and NULL is the cheaper of the
+      // two — the same rule migration 0003's backfill applies.
+      references:
+        args.references === undefined || args.references.length === 0
+          ? null
+          : args.references,
       refs: refs ?? null,
     })
     .onConflictDoNothing({

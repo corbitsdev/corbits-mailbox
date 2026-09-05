@@ -20,7 +20,21 @@ const LOCK_KEY = 0x0a27_2c01;
 // statement changes its checksum, and the runner then refuses to boot rather
 // than silently leaving old environments on the old schema while fresh ones get
 // the new one.
-export type Migration = { id: string; statements: SQL[] };
+export type Migration = {
+  id: string;
+  statements: SQL[];
+  /**
+   * When set, the runner calls `assertExpectedColumnTypes` immediately before
+   * executing `statements[assertColumnsBeforeStatement]`, inside this
+   * migration's own step transaction. Purely a runner-ordering knob — it does
+   * not change `statements` and so cannot change `migrationChecksum`. See
+   * `0003_mail_references`, where it exists so a host whose "principal_mail"
+   * predates this package (and so is missing "refs") fails here with the named
+   * `SchemaTypeMismatchError` instead of at the CREATE INDEX statement below,
+   * as a raw, unfriendly Postgres "column \"refs\" does not exist".
+   */
+  assertColumnsBeforeStatement?: number;
+};
 
 export const MIGRATIONS: Migration[] = [
   {
@@ -218,6 +232,111 @@ export const MIGRATIONS: Migration[] = [
            AND (h."message_id" IS NOT NULL OR h."in_reply_to" IS NOT NULL)`,
     ],
   },
+  {
+    // The third threading header, plus the three access paths a thread read
+    // needs. `references` completes what 0002 started: RFC 5256 linking walks
+    // `In-Reply-To` first and then the `References` chain newest-first, and
+    // `readMailboxThread` runs on the list path, which never loads `raw`.
+    id: "0003_mail_references",
+    // See `assertColumnsBeforeStatement` on `Migration`: this runs the column
+    // check right before the GIN index below, which is the first statement in
+    // this migration that would otherwise fail with a raw Postgres error
+    // ("column \"refs\" does not exist") on a host whose "principal_mail"
+    // predates this package, rather than the named diagnostic.
+    assertColumnsBeforeStatement: 3,
+    statements: [
+      sql`ALTER TABLE "mailbox"."principal_mail"
+         ADD COLUMN IF NOT EXISTS "references" jsonb`,
+      // Msg-id lookup: `readMailboxMessageByMessageId`, and the one ancestor
+      // map query `readMailboxThread` issues per read.
+      sql`CREATE INDEX IF NOT EXISTS "principal_mail_tenant_id_principal_id_message_id_idx"
+         ON "mailbox"."principal_mail" ("tenant_id", "principal_id", "message_id")`,
+      // The keyset access path `readMailboxThread` actually orders by:
+      // oldest-first, `(created_at, id)`, scoped to `(tenant_id, principal_id)`.
+      // `0001`'s index already covers a query shaped like this via a BACKWARD
+      // scan (it is declared `created_at DESC, id DESC`, for the list path's
+      // newest-first order) — but a plan is easier to reason about, and to
+      // pin in a test, when the thread path has its own index matching its
+      // own `ORDER BY` verbatim rather than depending on Postgres choosing to
+      // scan another index in reverse. Same three leading columns
+      // `principal_mail_tenant_id_principal_id_created_at_id_idx` carries, in
+      // the direction `readMailboxThread` actually asks for.
+      sql`CREATE INDEX IF NOT EXISTS "principal_mail_tenant_id_principal_id_created_at_id_asc_idx"
+         ON "mailbox"."principal_mail" ("tenant_id", "principal_id", "created_at" ASC, "id" ASC)`,
+      // The ref filter is jsonb containment; only GIN serves it. Default
+      // `jsonb_ops`, matching what `schema.ts` declares.
+      sql`CREATE INDEX IF NOT EXISTS "principal_mail_refs_idx"
+         ON "mailbox"."principal_mail" USING gin ("refs")`,
+      // Backfill from the frozen frame, on exactly the terms 0002 backfills
+      // its two columns: the header section is sliced out of `raw` at the
+      // BYTEA level so a body line beginning `References:` cannot be mistaken
+      // for a header, and every NUL byte is stripped from that slice before
+      // `convert_from` runs, because Postgres `text` cannot hold 0x00 in any
+      // encoding and one legacy frame carrying one would otherwise abort the
+      // whole UPDATE — and with it every boot, forever.
+      //
+      // One step 0002 did not need: `References` is the header that FOLDS.
+      // RFC 2822 §2.2.3 caps a line at 78 characters, so a chain of more than
+      // a couple of ids is written across continuation lines, and a regex
+      // anchored to one line would see only the first fragment. The header
+      // section is unfolded first — every newline followed by whitespace
+      // collapses to a single space — after which each header is one line and
+      // the value is everything to the end of it.
+      //
+      // Msg-ids are then extracted with the same `<[^<>]+>` shape
+      // `parseMsgIdList` uses at runtime, in order, so a row backfilled here
+      // and a row written after the upgrade project the same chain. A frame
+      // with no References (or none that parse) keeps the column NULL rather
+      // than storing an empty array: absent and empty are the same thing here,
+      // and NULL is the cheaper of the two.
+      sql`UPDATE "mailbox"."principal_mail" AS pm
+         SET "references" = h."references"
+         FROM (
+           SELECT "id",
+             (
+               SELECT jsonb_agg(m[1] ORDER BY ord)
+                 FROM regexp_matches(
+                        COALESCE(substring(head from '(?ni)^References:[ \t]*(.*)$'), ''),
+                        '<[^<>]+>', 'g'
+                      ) WITH ORDINALITY AS matched(m, ord)
+             ) AS "references"
+           FROM (
+             SELECT "id",
+               regexp_replace(
+                 replace(
+                   convert_from(clean_bytes, 'LATIN1'),
+                   chr(13) || chr(10), chr(10)
+                 ),
+                 chr(10) || '[ \t]+', ' ', 'g'
+               ) AS head
+             FROM (
+               SELECT sliced."id",
+                 COALESCE(
+                   (SELECT string_agg(set_byte(decode('00', 'hex'), 0, b), ''::bytea ORDER BY i)
+                      FROM generate_series(0, octet_length(sliced.head_bytes) - 1) AS i,
+                           LATERAL (SELECT get_byte(sliced.head_bytes, i) AS b) AS byte
+                     WHERE b <> 0),
+                   ''::bytea
+                 ) AS clean_bytes
+               FROM (
+                 SELECT "id",
+                   CASE
+                     WHEN position(decode('0d0a0d0a', 'hex') IN "raw") > 0
+                       THEN substring("raw" FOR position(decode('0d0a0d0a', 'hex') IN "raw") - 1)
+                     WHEN position(decode('0a0a', 'hex') IN "raw") > 0
+                       THEN substring("raw" FOR position(decode('0a0a', 'hex') IN "raw") - 1)
+                     ELSE "raw"
+                   END AS head_bytes
+                 FROM "mailbox"."principal_mail"
+                 WHERE "references" IS NULL
+               ) sliced
+             ) cleaned
+           ) heads
+         ) h
+         WHERE pm."id" = h."id"
+           AND h."references" IS NOT NULL`,
+    ],
+  },
 ];
 
 const DIALECT = new PgDialect();
@@ -324,7 +443,10 @@ export async function runMailboxMigrations(db: MailboxDb): Promise<void> {
         continue;
       }
       await tx.transaction(async (step) => {
-        for (const statement of migration.statements) {
+        for (const [index, statement] of migration.statements.entries()) {
+          if (migration.assertColumnsBeforeStatement === index) {
+            await assertExpectedColumnTypes(step);
+          }
           await step.execute(statement);
         }
         await step.execute(

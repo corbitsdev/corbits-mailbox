@@ -99,6 +99,14 @@ export const principalMail = mailboxPgSchema.table(
     // parser rejects, or one carrying no such header, still persists.
     messageId: text("message_id"),
     inReplyTo: text("in_reply_to"),
+    // The `References:` chain, OLDEST FIRST, as a jsonb array of bracketed
+    // msg-ids — cached for the same reason `in_reply_to` is, and needed by the
+    // same reader: `readMailboxThread` resolves a parent by RFC 5256 linking
+    // (In-Reply-To, then References newest-first), and it runs on the list
+    // path, which never loads `raw`. Plain `jsonb` with no `$type<string[]>()`
+    // for the reason spelled out on `refs`: nothing in Postgres constrains the
+    // blob's shape, so every reader validates it instead.
+    references: jsonb("references"),
     // Plain `jsonb` with NO `$type<MailboxRef[]>()`. A `$type` here is a claim
     // the column cannot keep: nothing in Postgres constrains this blob's shape,
     // and a row written by an older version (or by the host directly) will
@@ -143,6 +151,38 @@ export const principalMail = mailboxPgSchema.table(
     uniqueIndex("principal_mail_tenant_id_principal_id_message_key_idx")
       .on(t.tenantId, t.principalId, t.messageKey)
       .where(sql`${t.messageKey} IS NOT NULL`),
+    // Msg-id lookup, scoped the way every other access path here is. It serves
+    // both `readMailboxMessageByMessageId` and the ancestor map
+    // `readMailboxThread` builds — the latter probes it once per read with an
+    // `IN` list of every msg-id the page references, so this is the difference
+    // between one index scan and a sequential scan of the mailbox's history.
+    // Not unique: a msg-id is the SENDER's identifier, and nothing stops two
+    // externally-delivered frames from carrying the same one.
+    // Created by migration `0003_mail_references`.
+    index("principal_mail_tenant_id_principal_id_message_id_idx").on(
+      t.tenantId,
+      t.principalId,
+      t.messageId,
+    ),
+    // `readMailboxThread`'s own keyset order: oldest first, `(created_at, id)`,
+    // scoped the same way every other access path here is. The list-path index
+    // above covers the same three columns in the opposite direction and a
+    // backward scan of it would serve this query too, but this index lets the
+    // thread path's plan match its `ORDER BY` directly rather than depending
+    // on the planner choosing to scan the other index in reverse.
+    // Created by migration `0003_mail_references`.
+    index("principal_mail_tenant_id_principal_id_created_at_id_asc_idx").on(
+      t.tenantId,
+      t.principalId,
+      t.createdAt.asc(),
+      t.id.asc(),
+    ),
+    // The ref filter is `refs @> [{"kind":…,"id":…}]`, which only a GIN index
+    // can serve. Default `jsonb_ops` rather than `jsonb_path_ops`: the
+    // containment query is what both support, and staying on the default
+    // opclass keeps this index renderable by `drizzle-kit` from the table
+    // object above exactly as the migration creates it.
+    index("principal_mail_refs_idx").using("gin", t.refs),
   ],
 );
 

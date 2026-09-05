@@ -161,14 +161,15 @@ describe("boot against a host table this package did not create", () => {
   test("rejects a pre-existing table with a column MISSING outright", async () => {
     const schema = "mailbox";
     await inFreshSchema(schema, async ({ db }) => {
-      // A host `principal_mail` carrying the scope and the frame but none of
-      // the cached header columns. Nothing errors on such a schema: `subject`
-      // and `refs` are read through the codec, so every message would just
-      // quietly lose its "Related" row and fall back to the frame for its
-      // subject.
+      // A host `principal_mail` carrying the scope and the frame but not
+      // `subject`. Nothing errors on such a schema: `subject` is read through
+      // the codec, so every message would just quietly fall back to the frame
+      // for it.
       //
-      // Both missing columns are ones NO index covers — see the case below for
-      // why that distinction matters.
+      // The missing column is one NO index covers — see the case below for why
+      // that distinction matters. `refs` is present here for exactly that
+      // reason: it is GIN-indexed as of `0003_mail_references`, so its absence
+      // is now rejected by the DDL rather than by this check.
       await admin.unsafe(`
         CREATE TABLE "${schema}"."principal_mail" (
           "id" text PRIMARY KEY,
@@ -179,13 +180,13 @@ describe("boot against a host table this package did not create", () => {
           "raw" bytea NOT NULL,
           "from_address" text,
           "message_key" text,
+          "refs" jsonb,
           "created_at" timestamp NOT NULL DEFAULT now()
         )`);
       const failure = await bootFailure(runMailboxMigrations(db));
       expect(failure).toBeInstanceOf(SchemaTypeMismatchError);
       expect((failure as SchemaTypeMismatchError).mismatches).toEqual([
         "principal_mail.subject is missing (expected text)",
-        "principal_mail.refs is missing (expected jsonb)",
       ]);
     });
     expect(await ledgerRows(schema)).toBe(0);
