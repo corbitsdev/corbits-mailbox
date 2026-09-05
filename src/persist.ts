@@ -292,6 +292,12 @@ export function createMailboxPersist<R>(
     // caching that raw junk would make the cached column disagree with what
     // an upgrade's backfill would have produced for the same frame.
     const inReplyTo = parseMsgIdList(decoded?.headers.get("in-reply-to"))[0] ?? null;
+    // The whole chain, oldest first, on the same terms: bracketed msg-ids
+    // only, and NULL rather than `[]` for a frame that carries none — what
+    // migration 0003's backfill derives from the same header text.
+    const references = decoded === null || decoded.references.length === 0
+      ? null
+      : decoded.references;
 
     // Resolved ONCE per frame, before the transaction — every recipient row
     // gets the same refs, and a resolver that hits an upstream entity does one
@@ -343,6 +349,7 @@ export function createMailboxPersist<R>(
             messageId,
             inReplyTo,
             refs: refs ?? null,
+            references,
             messageKey: transportMessageKey(
               messageId,
               raw,

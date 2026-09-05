@@ -345,14 +345,14 @@ function toISODate(dateHeader: string | undefined, createdAt: Date): string {
 // One bad backfill would otherwise emit a warn line per bad row per page per
 // request — steady-state log spam that buries the signal. Bad rows are
 // collected per read and reported once, with a bounded sample of ids.
-type DroppedRefs = { rowIds: string[]; summary: string | null };
+export type DroppedRefs = { rowIds: string[]; summary: string | null };
 const DROPPED_REFS_SAMPLE = 5;
 
-function newDroppedRefs(): DroppedRefs {
+export function newDroppedRefs(): DroppedRefs {
   return { rowIds: [], summary: null };
 }
 
-function reportDroppedRefs(dropped: DroppedRefs): void {
+export function reportDroppedRefs(dropped: DroppedRefs): void {
   if (dropped.rowIds.length === 0) return;
   logger.warn("mailbox refs column failed schema; dropped for {rows} row(s)", {
     rows: dropped.rowIds.length,
@@ -388,7 +388,7 @@ function readRowRefs(
 // `raw` is intentionally absent from the row type: list selects every
 // principal_mail column except it, and toMailboxMessage never needs it
 // (the caller decodes outside and threads the result through `decoded`).
-function toMailboxMessage(
+export function toMailboxMessage(
   row: Omit<MailboxJoinedRow, "raw">,
   decoded: DecodedFrame | null,
   dropped: DroppedRefs,
@@ -480,7 +480,7 @@ function filterConditions(filter: MailboxFilter): SQL[] {
 }
 
 /** The management columns, projected through the LEFT JOIN. */
-const STATE_COLUMNS = {
+export const STATE_COLUMNS = {
   readAt: mailbox.readAt,
   archivedAt: mailbox.archivedAt,
   trashedAt: mailbox.trashedAt,

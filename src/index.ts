@@ -123,6 +123,27 @@ export type {
   MailboxPage,
 } from "./read.js";
 
+// Thread reads: the conversation under one entity ref, parents resolved by
+// RFC 5256 References linking (never by subject), and the msg-id lookup.
+export {
+  readMailboxThread,
+  readMailboxMessageByMessageId,
+  canonicalMailboxThreadRef,
+  encodeMailboxThreadCursor,
+  decodeMailboxThreadCursor,
+  MailboxThreadMessageSchema,
+  MailboxThreadResponseSchema,
+  DEFAULT_MAILBOX_THREAD_LIMIT,
+  MAX_MAILBOX_THREAD_LIMIT,
+} from "./thread.js";
+export type {
+  MailboxThreadScope,
+  MailboxThreadArgs,
+  MailboxThreadMessage,
+  MailboxThreadPage,
+  MailboxThreadCursor,
+} from "./thread.js";
+
 export {
   markMailboxMessageRead,
   markMailboxMessageUnread,

@@ -218,6 +218,93 @@ export const MIGRATIONS: Migration[] = [
            AND (h."message_id" IS NOT NULL OR h."in_reply_to" IS NOT NULL)`,
     ],
   },
+  {
+    // The third threading header, plus the two access paths a thread read
+    // needs. `references` completes what 0002 started: RFC 5256 linking walks
+    // `In-Reply-To` first and then the `References` chain newest-first, and
+    // `readMailboxThread` runs on the list path, which never loads `raw`.
+    id: "0003_mail_references",
+    statements: [
+      sql`ALTER TABLE "mailbox"."principal_mail"
+         ADD COLUMN IF NOT EXISTS "references" jsonb`,
+      // Msg-id lookup: `readMailboxMessageByMessageId`, and the one ancestor
+      // map query `readMailboxThread` issues per read.
+      sql`CREATE INDEX IF NOT EXISTS "principal_mail_tenant_id_principal_id_message_id_idx"
+         ON "mailbox"."principal_mail" ("tenant_id", "principal_id", "message_id")`,
+      // The ref filter is jsonb containment; only GIN serves it. Default
+      // `jsonb_ops`, matching what `schema.ts` declares.
+      sql`CREATE INDEX IF NOT EXISTS "principal_mail_refs_idx"
+         ON "mailbox"."principal_mail" USING gin ("refs")`,
+      // Backfill from the frozen frame, on exactly the terms 0002 backfills
+      // its two columns: the header section is sliced out of `raw` at the
+      // BYTEA level so a body line beginning `References:` cannot be mistaken
+      // for a header, and every NUL byte is stripped from that slice before
+      // `convert_from` runs, because Postgres `text` cannot hold 0x00 in any
+      // encoding and one legacy frame carrying one would otherwise abort the
+      // whole UPDATE — and with it every boot, forever.
+      //
+      // One step 0002 did not need: `References` is the header that FOLDS.
+      // RFC 2822 §2.2.3 caps a line at 78 characters, so a chain of more than
+      // a couple of ids is written across continuation lines, and a regex
+      // anchored to one line would see only the first fragment. The header
+      // section is unfolded first — every newline followed by whitespace
+      // collapses to a single space — after which each header is one line and
+      // the value is everything to the end of it.
+      //
+      // Msg-ids are then extracted with the same `<[^<>]+>` shape
+      // `parseMsgIdList` uses at runtime, in order, so a row backfilled here
+      // and a row written after the upgrade project the same chain. A frame
+      // with no References (or none that parse) keeps the column NULL rather
+      // than storing an empty array: absent and empty are the same thing here,
+      // and NULL is the cheaper of the two.
+      sql`UPDATE "mailbox"."principal_mail" AS pm
+         SET "references" = h."references"
+         FROM (
+           SELECT "id",
+             (
+               SELECT jsonb_agg(m[1] ORDER BY ord)
+                 FROM regexp_matches(
+                        COALESCE(substring(head from '(?ni)^References:[ \t]*(.*)$'), ''),
+                        '<[^<>]+>', 'g'
+                      ) WITH ORDINALITY AS matched(m, ord)
+             ) AS "references"
+           FROM (
+             SELECT "id",
+               regexp_replace(
+                 replace(
+                   convert_from(clean_bytes, 'LATIN1'),
+                   chr(13) || chr(10), chr(10)
+                 ),
+                 chr(10) || '[ \t]+', ' ', 'g'
+               ) AS head
+             FROM (
+               SELECT sliced."id",
+                 COALESCE(
+                   (SELECT string_agg(set_byte(decode('00', 'hex'), 0, b), ''::bytea ORDER BY i)
+                      FROM generate_series(0, octet_length(sliced.head_bytes) - 1) AS i,
+                           LATERAL (SELECT get_byte(sliced.head_bytes, i) AS b) AS byte
+                     WHERE b <> 0),
+                   ''::bytea
+                 ) AS clean_bytes
+               FROM (
+                 SELECT "id",
+                   CASE
+                     WHEN position(decode('0d0a0d0a', 'hex') IN "raw") > 0
+                       THEN substring("raw" FOR position(decode('0d0a0d0a', 'hex') IN "raw") - 1)
+                     WHEN position(decode('0a0a', 'hex') IN "raw") > 0
+                       THEN substring("raw" FOR position(decode('0a0a', 'hex') IN "raw") - 1)
+                     ELSE "raw"
+                   END AS head_bytes
+                 FROM "mailbox"."principal_mail"
+                 WHERE "references" IS NULL
+               ) sliced
+             ) cleaned
+           ) heads
+         ) h
+         WHERE pm."id" = h."id"
+           AND h."references" IS NOT NULL`,
+    ],
+  },
 ];
 
 const DIALECT = new PgDialect();
