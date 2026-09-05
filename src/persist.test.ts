@@ -9,6 +9,7 @@ import {
   type MailboxPersistArgs,
   type SenderAuthorization,
   type PersistedMailboxRow,
+  type ResolveMailboxRefs,
 } from "./persist.js";
 import { createInMemoryMailboxEventBus } from "./bus.js";
 import { buildMailFrame } from "./frame.js";
@@ -17,8 +18,10 @@ import { withTestDb, seedScope } from "./test-helpers.js";
 import type { MailboxDb } from "./db.js";
 import {
   MAX_MAILBOX_FRAME_BYTES,
+  MAX_MAILBOX_REFS,
   assertMailboxFrameBytes,
 } from "./write.js";
+import { getMailboxMessage, type MailboxRef } from "./read.js";
 
 let db: MailboxDb;
 
@@ -517,6 +520,111 @@ describe("transport insert idempotency", () => {
     await persist(args({ raw: new Uint8Array([0x03, 0x04]) }));
 
     expect(await rowsFor("acme", "user-1")).toHaveLength(4);
+  });
+});
+
+describe("resolveRefs", () => {
+  test("refs are visible to a bus subscriber on the create event", async () => {
+    const bus = createInMemoryMailboxEventBus();
+    const seenIds: string[] = [];
+    bus.subscribe({ tenantId: "acme", principalId: "user-1" }, (e) =>
+      seenIds.push(e.id),
+    );
+    const refs: MailboxRef[] = [{ kind: "workbench", id: "thread-1" }];
+    const { upstream } = recordingUpstream();
+    const persist = createMailboxPersist(db, {
+      upstream,
+      authorizeSender: () => ACTIVE,
+      bus,
+      resolveRefs: () => refs,
+    });
+
+    await persist(args());
+
+    // By the time the bus fires, the insert has already committed — a
+    // subscriber reading the row by the announced id sees refs already
+    // stamped, not a later-arriving update.
+    expect(seenIds).toHaveLength(1);
+    const message = await getMailboxMessage(db, {
+      tenantId: "acme",
+      principalId: "user-1",
+      id: seenIds[0]!,
+    });
+    expect(message?.refs).toEqual(refs);
+  });
+
+  test("resolveRefs is called once for three recipients, and every row gets its refs", async () => {
+    await seedScope(db, "acme", "user-3");
+    const refs: MailboxRef[] = [{ kind: "workbench", id: "thread-1" }];
+    const calls: unknown[] = [];
+    const resolveRefs: ResolveMailboxRefs = (a) => {
+      calls.push(a);
+      return refs;
+    };
+    const { upstream } = recordingUpstream();
+    const persist = createMailboxPersist(db, {
+      upstream,
+      authorizeSender: () => ACTIVE,
+      resolveRefs,
+    });
+
+    await persist(
+      args({
+        recipients: [
+          "usr_user-1@acme.example",
+          "usr_user-2@acme.example",
+          "usr_user-3@acme.example",
+        ],
+      }),
+    );
+
+    expect(calls).toHaveLength(1);
+    for (const principalId of ["user-1", "user-2", "user-3"]) {
+      const [row] = await rowsFor("acme", principalId);
+      const message = await getMailboxMessage(db, {
+        tenantId: "acme",
+        principalId,
+        id: row!.id,
+      });
+      expect(message?.refs).toEqual(refs);
+    }
+  });
+
+  test("a throwing resolveRefs writes zero rows; upstream still completes", async () => {
+    const { upstream, result } = recordingUpstream();
+    const persist = createMailboxPersist(db, {
+      upstream,
+      authorizeSender: () => ACTIVE,
+      resolveRefs: () => {
+        throw new Error("resolver exploded");
+      },
+    });
+
+    expect(await persist(args())).toBe(result);
+    expect(await rowsFor("acme", "user-1")).toHaveLength(0);
+  });
+
+  test("over-cap refs from resolveRefs are truncated to MAX_MAILBOX_REFS", async () => {
+    const refs: MailboxRef[] = Array.from({ length: MAX_MAILBOX_REFS + 5 }, (_, i) => ({
+      kind: "workbench",
+      id: `thread-${i}`,
+    }));
+    const { upstream } = recordingUpstream();
+    const persist = createMailboxPersist(db, {
+      upstream,
+      authorizeSender: () => ACTIVE,
+      resolveRefs: () => refs,
+    });
+
+    await persist(args());
+
+    const [row] = await rowsFor("acme", "user-1");
+    const message = await getMailboxMessage(db, {
+      tenantId: "acme",
+      principalId: "user-1",
+      id: row!.id,
+    });
+    expect(message?.refs?.length).toBe(MAX_MAILBOX_REFS);
   });
 });
 
