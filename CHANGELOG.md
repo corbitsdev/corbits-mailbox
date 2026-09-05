@@ -49,23 +49,39 @@ always called out under their own heading.
   `createdAt`, its read/archived state, and `parentId` — resolved by
   **RFC 5256 References linking** (`In-Reply-To` first, then the
   `References` chain newest-to-oldest) across the whole ref-scoped set,
-  never by subject grouping. A parent that is not in this mailbox under
-  this ref yields `parentId: null` rather than a fabricated node, and the
-  ancestor lookup spans the whole ref-scoped set rather than the current
-  page, so a chain crossing a page boundary keeps a stable `parentId`.
-  Cursors are bound to the ref that minted them; paging one into another
-  ref is a `RangeError`, as is a malformed cursor or a limit outside
-  `1..200`. `readMailboxMessageByMessageId(db, scope, messageId)` looks
-  one message up by its `Message-ID`, scoped to `(tenantId, principalId)`,
-  oldest match winning since nothing makes a msg-id unique.
+  never by subject grouping. **`parentId` chains are acyclic** — RFC 5256
+  step 1.B calls out that a delivered frame's `In-Reply-To`/`References`
+  can name a msg-id that, directly or through further ancestors, points
+  back at the frame itself; a cycle among the resolved candidate parents
+  is detected and cut (the LATER-created message in the cycle, ties broken
+  by id, becomes a root) before a page is projected, so a client's
+  ancestry walk always terminates. A parent that is not in this mailbox
+  under this ref yields `parentId: null` rather than a fabricated node,
+  and the ancestor lookup spans the whole ref-scoped set rather than the
+  current page, so a chain crossing a page boundary keeps a stable
+  `parentId`. Cursors are bound to the ref that minted them; paging one
+  into another ref is a `RangeError`, as is a malformed cursor or a limit
+  outside `1..200`. `readMailboxMessageByMessageId(db, scope, messageId)`
+  looks one message up by its `Message-ID`, scoped to
+  `(tenantId, principalId)`, oldest match winning since nothing makes a
+  msg-id unique.
   `principal_mail` gains a cached `references` column, populated on the
   write and transport-persist paths; migration `0003_mail_references`
   adds it, backfills it from each existing row's `raw` — unfolding the
   `References:` continuation lines RFC 2822 line limits force, with the
   same `bytea`-level header slicing and NUL stripping `0002` uses — and
-  creates the two indexes the reads need:
-  `(tenant_id, principal_id, message_id)` and a GIN index on `refs`.
-  Both surfaces run on the list projection and never load `raw`.
+  creates the three indexes the reads need:
+  `(tenant_id, principal_id, message_id)`, a GIN index on `refs`, and
+  `(tenant_id, principal_id, created_at, id)` matching `readMailboxThread`'s
+  own oldest-first `ORDER BY` (the list path's index over the same three
+  columns, in the opposite direction, already served this query via a
+  backward scan; this one lets the thread path's plan match its `ORDER BY`
+  directly). Both surfaces run on the list projection and never load `raw`.
+  A host whose own `principal_mail` predates this package (and so is
+  missing `refs` — see `ARCHITECTURE.md`'s "Migrations" section) now fails
+  `0003` with the named `SchemaTypeMismatchError` diagnostic rather than a
+  raw Postgres "column \"refs\" does not exist" at the `CREATE INDEX`
+  statement that needs it.
   Exported alongside them: `MailboxThreadMessageSchema`,
   `MailboxThreadResponseSchema`, `canonicalMailboxThreadRef`,
   `encodeMailboxThreadCursor`, `decodeMailboxThreadCursor`,

@@ -355,11 +355,22 @@ stays on `principal_mail`, matching the list's `ORDER BY` and its row-value
 cursor seek exactly, so the default (highest-traffic) page remains a
 single-table index scan that stops at `limit + 1` rows. The triage indexes and
 the three partial view indexes (`unread`, `archived_at`, `trashed_at`) live on
-`mailbox`. The thread read adds two more on `principal_mail`:
+`mailbox`. The thread read adds three more on `principal_mail`:
 `(tenant_id, principal_id, message_id)` — not unique, since a msg-id is the
 *sender's* identifier and nothing stops two delivered frames carrying the same
-one — and a GIN index on `refs`, the only kind that can serve the `refs @> …`
-containment filter the ref scope is expressed as.
+one — a GIN index on `refs`, the only kind that can serve the `refs @> …`
+containment filter the ref scope is expressed as, and
+`(tenant_id, principal_id, created_at, id)` matching `readMailboxThread`'s own
+oldest-first `ORDER BY` verbatim. That last one covers the same three leading
+columns the list path's own keyset index does, in the opposite direction; a
+backward scan of the list's index already serves the thread query, but a
+dedicated index removes the dependence on the planner choosing to scan the
+other one in reverse. Whichever index a page's plan uses, a ref whose messages
+cluster at one end of the principal's own `created_at` history while a page
+seeks from the other end still costs a `Filter` proportional to how much
+*unrelated* history sits between them — no index shape fixes that; only
+clustering by ref would, and this package deliberately holds no opinion on
+physical row order. See "What the split costs, measured" below.
 
 ### Thread reads
 
@@ -376,11 +387,22 @@ each message the candidate ancestors are its `In-Reply-To` followed by its
 or under a different ref, is a root of what this reader can see, and inventing
 a node for it would be a lie about the conversation.
 
+**`parentId` chains are acyclic.** RFC 5256 step 1.B calls out that nothing
+stops a delivered frame's `In-Reply-To`/`References` from naming a msg-id that,
+directly or through further ancestors, points back at the frame itself. Before
+a page is projected, the candidate-parent graph is walked (breadth-first,
+beyond the page itself when a chain reaches further) and every edge that would
+close a loop is cut: the LATER-created message in the cycle (ties broken by
+id) becomes a root instead, deterministically — the cut depends only on the
+cycle's own membership, never on which page or cursor triggered the read.
+
 The ancestor lookup spans the whole ref-scoped set rather than the current
 page, so a chain crossing a page boundary cannot report a parent on one page
-and `null` on another. It costs one extra query per read — a msg-id map over
-the ids the page actually references, served by
-`principal_mail_tenant_id_principal_id_message_id_idx`.
+and `null` on another. It costs one query per hop of the ancestry graph — a
+msg-id map over the ids referenced so far, served by
+`principal_mail_tenant_id_principal_id_message_id_idx` — capped defensively at
+`MAX_THREAD_ANCESTRY_NODES` so a pathological reference graph degrades a
+resolved parent to `null` rather than reading an unbounded number of rows.
 
 The whole module runs on the list path and never selects `raw`. That is what
 the cached `message_id`, `in_reply_to` and `references` columns exist for: a
@@ -445,6 +467,16 @@ every boot of every replica.
   host's columns through our codec. The expectation is derived from the drizzle
   table objects, so it cannot drift; a rejected boot rolls the ledger row back
   with it.
+- **A migration can also run that same check early**, via
+  `Migration.assertColumnsBeforeStatement`. `0003_mail_references` sets it: a
+  host whose `principal_mail` predates this package leaves `refs` missing (it
+  is only ever declared inline in `0001`'s `CREATE TABLE`, which no-ops against
+  a pre-existing table), and without the early check the first statement to
+  notice would be `0003`'s `CREATE INDEX ... USING gin ("refs")` — a raw
+  Postgres "column \"refs\" does not exist" instead of the named
+  `SchemaTypeMismatchError` diagnostic. The knob only changes when the runner
+  calls the check, never `Migration.statements`, so it cannot change
+  `migrationChecksum`.
 
 **Everything lands in the `mailbox` schema, fully qualified.** Nothing resolves
 through `search_path`, so the host's own setting cannot redirect or shadow
