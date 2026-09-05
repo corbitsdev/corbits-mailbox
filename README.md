@@ -70,6 +70,39 @@ publish bus events only after commit, one per row actually written. See
 including `writeMailboxMessage`'s caller-supplied `messageId`, `direction`,
 and default `messageKey`.
 
+## Thread reads
+
+```ts
+import {
+  readMailboxThread,
+  readMailboxMessageByMessageId,
+} from "@corbits/mailbox";
+
+// The conversation under one entity ref, oldest first, keyset-paged.
+const page = await readMailboxThread(
+  db,
+  { tenantId, principalId },
+  { ref: { kind: "workbench", id: "wb-1" }, limit: 50 },
+);
+// page.items: { id, messageId, inReplyTo?, references, fromAddress, subject?,
+//               createdAt, read, archived, parentId }
+// page.nextCursor: pass back as `cursor` for the next page.
+
+// One message by its Message-ID, scoped to this mailbox.
+const message = await readMailboxMessageByMessageId(
+  db,
+  { tenantId, principalId },
+  "<child@acme.example>",
+);
+```
+
+`parentId` is resolved by RFC 5256 References linking — `In-Reply-To` first,
+then the `References` chain newest-to-oldest — across the whole ref-scoped set,
+not just the current page. It is `null`, never fabricated, when the nearest
+ancestor is not in this mailbox under this ref. Subjects are never used to
+group. A cursor is bound to the ref that minted it; paging it into a different
+ref is a `RangeError`, as is a malformed cursor or an out-of-range limit.
+
 ## Working on it
 
 ```sh

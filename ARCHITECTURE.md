@@ -110,6 +110,7 @@ mounting more than one passes the same function to each.
 | --- | --- |
 | `mount.ts` | HTTP surface. Parsing, validation, status codes, SSE. No SQL. |
 | `read.ts` | List (cached columns, no `raw`) and detail (frame-decoded) projection, keyset paging, snippets on detail. |
+| `thread.ts` | The conversation under one entity ref: keyset-paged oldest-first, parents resolved by RFC 5256 References linking, plus the msg-id lookup. |
 | `mutations.ts` | Read/unread, archive, trash, restore, bulk, enrich, assign. |
 | `write.ts` | `writeMailboxMessage` / `deliverInboxItems` — the host-facing write API. |
 | `persist.ts` | The transport dual-write wrapper and the `authorizeSender` seam. |
@@ -354,7 +355,39 @@ stays on `principal_mail`, matching the list's `ORDER BY` and its row-value
 cursor seek exactly, so the default (highest-traffic) page remains a
 single-table index scan that stops at `limit + 1` rows. The triage indexes and
 the three partial view indexes (`unread`, `archived_at`, `trashed_at`) live on
-`mailbox`.
+`mailbox`. The thread read adds two more on `principal_mail`:
+`(tenant_id, principal_id, message_id)` — not unique, since a msg-id is the
+*sender's* identifier and nothing stops two delivered frames carrying the same
+one — and a GIN index on `refs`, the only kind that can serve the `refs @> …`
+containment filter the ref scope is expressed as.
+
+### Thread reads
+
+`readMailboxThread(db, scope, { ref, cursor?, limit? })` answers the
+conversation under one entity ref: oldest first, keyset-paged on
+`(created_at, id)`, scoped to `(tenant_id, principal_id)` and filtered by
+jsonb containment on `refs`.
+
+**Parents are resolved by RFC 5256 References linking, never by subject.** For
+each message the candidate ancestors are its `In-Reply-To` followed by its
+`References` chain walked newest-to-oldest, and the first candidate present in
+*this* mailbox under *this* ref wins. An ancestor that is not present yields
+`parentId: null` — a message whose parent lives in another principal's mailbox,
+or under a different ref, is a root of what this reader can see, and inventing
+a node for it would be a lie about the conversation.
+
+The ancestor lookup spans the whole ref-scoped set rather than the current
+page, so a chain crossing a page boundary cannot report a parent on one page
+and `null` on another. It costs one extra query per read — a msg-id map over
+the ids the page actually references, served by
+`principal_mail_tenant_id_principal_id_message_id_idx`.
+
+The whole module runs on the list path and never selects `raw`. That is what
+the cached `message_id`, `in_reply_to` and `references` columns exist for: a
+thread is read on every conversation open, and decoding one MIME frame per row
+would make the cache pointless. `readMailboxMessageByMessageId(db, scope,
+messageId)` is the same posture — a scoped lookup on the list projection,
+oldest match winning, `null` when this mailbox holds no such message.
 
 ### What the split costs, measured
 

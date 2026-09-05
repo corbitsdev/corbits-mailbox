@@ -41,6 +41,37 @@ always called out under their own heading.
   thread reader can fetch a principal's own sent copies (`"outbound"`) or
   both directions together (`"all"`) alongside the existing inbox-only
   default.
+- **Thread reads over `References`, and lookup by `Message-ID`.**
+  `readMailboxThread(db, scope, { ref, cursor?, limit? })` returns the
+  principal's messages carrying a `refs` entry equal to `ref`, oldest
+  first, keyset-paged on `(created_at, id)`. Each message projects `id`,
+  `messageId`, `inReplyTo`, `references`, `fromAddress`, `subject`,
+  `createdAt`, its read/archived state, and `parentId` — resolved by
+  **RFC 5256 References linking** (`In-Reply-To` first, then the
+  `References` chain newest-to-oldest) across the whole ref-scoped set,
+  never by subject grouping. A parent that is not in this mailbox under
+  this ref yields `parentId: null` rather than a fabricated node, and the
+  ancestor lookup spans the whole ref-scoped set rather than the current
+  page, so a chain crossing a page boundary keeps a stable `parentId`.
+  Cursors are bound to the ref that minted them; paging one into another
+  ref is a `RangeError`, as is a malformed cursor or a limit outside
+  `1..200`. `readMailboxMessageByMessageId(db, scope, messageId)` looks
+  one message up by its `Message-ID`, scoped to `(tenantId, principalId)`,
+  oldest match winning since nothing makes a msg-id unique.
+  `principal_mail` gains a cached `references` column, populated on the
+  write and transport-persist paths; migration `0003_mail_references`
+  adds it, backfills it from each existing row's `raw` — unfolding the
+  `References:` continuation lines RFC 2822 line limits force, with the
+  same `bytea`-level header slicing and NUL stripping `0002` uses — and
+  creates the two indexes the reads need:
+  `(tenant_id, principal_id, message_id)` and a GIN index on `refs`.
+  Both surfaces run on the list projection and never load `raw`.
+  Exported alongside them: `MailboxThreadMessageSchema`,
+  `MailboxThreadResponseSchema`, `canonicalMailboxThreadRef`,
+  `encodeMailboxThreadCursor`, `decodeMailboxThreadCursor`,
+  `DEFAULT_MAILBOX_THREAD_LIMIT`, `MAX_MAILBOX_THREAD_LIMIT`, and the
+  `MailboxThreadScope` / `MailboxThreadArgs` / `MailboxThreadMessage` /
+  `MailboxThreadPage` / `MailboxThreadCursor` types.
 
 - **Threading headers on the frame and in the list projection.**
   `buildMailFrame` accepts `references` — the thread's ancestry, oldest
