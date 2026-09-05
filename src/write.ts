@@ -92,7 +92,7 @@ export function assertMailboxFrameBytes(raw: Uint8Array): void {
 // `messageKey` is the caller's own identifier and is absent for externally
 // delivered mail, which is never deduped — the warning below carries whatever
 // the caller actually supplied rather than minting an id nobody can correlate.
-function boundRefs(
+export function boundRefs(
   refs: MailboxRef[] | undefined,
   messageKey: string | null,
 ): MailboxRef[] | undefined {

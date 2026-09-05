@@ -17,15 +17,18 @@
 
 import { createHash } from "node:crypto";
 import { and, eq, inArray, sql } from "drizzle-orm";
+import { type } from "arktype";
 import { getLogger } from "@intx/log";
 import { hostPrincipal, mailbox, principalMail } from "./schema.js";
 import type { MailboxDb } from "./db.js";
 import { publishMailboxEvent, type MailboxEventBus } from "./bus.js";
-import { decodeMailFrame, parseMsgIdList } from "./frame.js";
+import { decodeMailFrame, parseMsgIdList, type DecodedFrame } from "./frame.js";
 import { resolveMailboxRecipients } from "./recipients.js";
+import { MailboxRefArraySchema, type MailboxRef } from "./read.js";
 import {
   assertMailboxScope,
   assertMailboxFrameBytes,
+  boundRefs,
 } from "./write.js";
 
 const logger = getLogger(["corbits-mailbox", "persist"]);
@@ -91,6 +94,28 @@ export type PersistedMailboxRow = {
   senderAddress: string;
 };
 
+/**
+ * Host seam for stamping every recipient row of one frame with the same
+ * `refs`. Called once per frame, before the transaction opens — NOT once per
+ * recipient — so a host pointing every row at the same upstream entity
+ * (`{ kind: "workbench", id }`) does one lookup, not N.
+ *
+ * The result is validated with `MailboxRefArraySchema` and capped at
+ * `MAX_MAILBOX_REFS` the same way `writeMailboxMessage`'s `refs` argument is;
+ * see `boundRefs`. Returning `undefined` (or an empty array) stores no refs.
+ *
+ * A throwing `resolveRefs` is handled exactly like a mailbox-write failure
+ * under the dual-write contract: logged, upstream still runs (it already
+ * ran, or still will, independently of this), and no mailbox row is written
+ * for that frame. See ARCHITECTURE.md's persist section.
+ */
+export type ResolveMailboxRefs = (
+  args: MailboxPersistArgs & {
+    senderAuthorization: SenderAuthorization;
+    decoded: DecodedFrame | null;
+  },
+) => Promise<MailboxRef[] | undefined> | MailboxRef[] | undefined;
+
 export type CreateMailboxPersistOpts<R> = {
   /** The host's own persist path. Always called, for every frame. */
   upstream: (args: MailboxPersistArgs) => Promise<R>;
@@ -99,6 +124,12 @@ export type CreateMailboxPersistOpts<R> = {
   bus?: MailboxEventBus;
   /** Best-effort hook per inserted row; a throw is logged, never propagated. */
   onRow?: (row: PersistedMailboxRow) => void;
+  /**
+   * Resolve the `refs` every recipient row of one frame gets, INSIDE the
+   * existing single transaction — so the post-commit bus event and any SSE
+   * subscriber already see them. See `ResolveMailboxRefs`.
+   */
+  resolveRefs?: ResolveMailboxRefs;
 };
 
 /**
@@ -232,6 +263,30 @@ export function createMailboxPersist<R>(
     // an upgrade's backfill would have produced for the same frame.
     const inReplyTo = parseMsgIdList(decoded?.headers.get("in-reply-to"))[0] ?? null;
 
+    // Resolved ONCE per frame, before the transaction — every recipient row
+    // gets the same refs, and a resolver that hits an upstream entity does one
+    // lookup regardless of recipient count. A throw here propagates out of
+    // `writeMailboxRows` exactly like any other pre-transaction failure:
+    // `attemptMailboxWrite` catches and logs it, upstream still stands, and no
+    // mailbox row is written for this frame.
+    let refs: MailboxRef[] | undefined;
+    if (opts.resolveRefs) {
+      const resolved = await opts.resolveRefs({
+        senderAddress,
+        recipients,
+        raw,
+        senderAuthorization: auth,
+        decoded,
+      });
+      if (resolved !== undefined && resolved.length > 0) {
+        const validated = MailboxRefArraySchema(resolved);
+        if (validated instanceof type.errors) {
+          throw new RangeError(`invalid mailbox refs: ${validated.summary}`);
+        }
+        refs = boundRefs(validated, null);
+      }
+    }
+
     // Mail rows and their management rows commit together: the management row
     // is created eagerly with the message (see `writeMailboxMessage`), and a
     // message without one is unreachable by every mutation. messageKey makes
@@ -252,6 +307,7 @@ export function createMailboxPersist<R>(
             fromAddress,
             messageId,
             inReplyTo,
+            refs: refs ?? null,
             messageKey: transportMessageKey(
               messageId,
               raw,
