@@ -29,7 +29,7 @@ afterAll(async () => {
   await client.end();
 });
 
-/** `name(col asc, col desc)` plus `unique`/`partial` markers. */
+/** `name USING method(col asc, col desc)` plus `unique`/`partial` markers. */
 type IndexDescriptor = string;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- one canonicalizer
@@ -61,20 +61,25 @@ function declaredIndexes(table: any): IndexDescriptor[] {
         config.where !== undefined ? "partial" : null,
       ].filter((flag) => flag !== null);
       const suffix = flags.length > 0 ? ` [${flags.join(" ")}]` : "";
-      return `${config.name}(${columns})${suffix}`;
+      // The access method is part of the descriptor, not decoration: a GIN
+      // index and a btree index over the same column serve different queries,
+      // and `refs @> …` is only servable by the former.
+      const method = (config as { method?: string }).method ?? "btree";
+      return `${config.name} USING ${method}(${columns})${suffix}`;
     })
     .sort();
 }
 
-// `pg_get_indexdef` renders `CREATE [UNIQUE] INDEX <name> ON <tbl> USING btree
-// (<cols>)[ WHERE (<pred>)]`, with DESC spelled out and ASC left implicit.
+// `pg_get_indexdef` renders `CREATE [UNIQUE] INDEX <name> ON <tbl> USING
+// <method> (<cols>)[ WHERE (<pred>)]`, with DESC spelled out and ASC left
+// implicit.
 function canonicalizeIndexDef(def: string): IndexDescriptor {
   const match =
-    /^CREATE (UNIQUE )?INDEX (\S+) ON \S+ USING btree \((.*?)\)( WHERE .*)?$/.exec(
+    /^CREATE (UNIQUE )?INDEX (\S+) ON \S+ USING (\S+) \((.*?)\)( WHERE .*)?$/.exec(
       def,
     );
   if (match === null) throw new Error(`unparsed index definition: ${def}`);
-  const [, unique, name, columnList, where] = match;
+  const [, unique, name, method, columnList, where] = match;
   const columns = columnList!
     .split(", ")
     .map((column) => {
@@ -88,7 +93,7 @@ function canonicalizeIndexDef(def: string): IndexDescriptor {
     where !== undefined ? "partial" : null,
   ].filter((flag) => flag !== null);
   const suffix = flags.length > 0 ? ` [${flags.join(" ")}]` : "";
-  return `${name}(${columns})${suffix}`;
+  return `${name} USING ${method}(${columns})${suffix}`;
 }
 
 async function liveIndexes(table: string): Promise<IndexDescriptor[]> {
@@ -121,14 +126,14 @@ describe("schema.ts vs. the DDL runMailboxMigrations actually creates", () => {
     const live = await liveIndexes("mailbox");
     for (const column of ["priority", "classification", "status", "assignee"]) {
       expect(live).toContain(
-        `mailbox_tenant_id_principal_id_${column}_idx(tenant_id asc, principal_id asc, ${column} asc)`,
+        `mailbox_tenant_id_principal_id_${column}_idx USING btree(tenant_id asc, principal_id asc, ${column} asc)`,
       );
     }
     // Bare single-column forms must stay absent: an index on a low-cardinality
     // column is not an access path the planner would choose.
     expect(
       live.filter((descriptor) =>
-        /^mailbox_(priority|classification|status|assignee)_idx\(/.test(
+        /^mailbox_(priority|classification|status|assignee)_idx USING /.test(
           descriptor,
         ),
       ),
@@ -137,7 +142,7 @@ describe("schema.ts vs. the DDL runMailboxMigrations actually creates", () => {
 
   it("keeps the keyset access path on the mail plane, where the split left it", async () => {
     expect(await liveIndexes("principal_mail")).toContain(
-      "principal_mail_tenant_id_principal_id_created_at_id_idx(tenant_id asc, principal_id asc, created_at desc, id desc)",
+      "principal_mail_tenant_id_principal_id_created_at_id_idx USING btree(tenant_id asc, principal_id asc, created_at desc, id desc)",
     );
   });
 
@@ -147,7 +152,7 @@ describe("schema.ts vs. the DDL runMailboxMigrations actually creates", () => {
     const live = await liveIndexes("mailbox");
     for (const name of ["archived_at", "trashed_at", "unread"]) {
       expect(live).toContain(
-        `mailbox_tenant_id_principal_id_${name}_idx(tenant_id asc, principal_id asc) [partial]`,
+        `mailbox_tenant_id_principal_id_${name}_idx USING btree(tenant_id asc, principal_id asc) [partial]`,
       );
     }
   });

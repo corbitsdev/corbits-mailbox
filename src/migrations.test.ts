@@ -84,6 +84,7 @@ describe("runMailboxMigrations", () => {
         "message_key",
         "principal_id",
         "raw",
+        "references",
         "refs",
         "subject",
         "tenant_id",
@@ -112,12 +113,15 @@ describe("runMailboxMigrations", () => {
             WHERE schemaname = 'mailbox' AND tablename = 'principal_mail'
             ORDER BY indexname`,
       );
-      // The mail plane keeps exactly two access paths: the dedupe constraint
-      // and the keyset the default page seeks on.
-      // `schema-ddl-parity.test.ts` holds schema.ts to this same list.
+      // The mail plane keeps exactly four access paths: the dedupe constraint,
+      // the keyset the default page seeks on, and the two the thread read adds
+      // — the msg-id lookup and the GIN index serving the `refs` containment
+      // filter. `schema-ddl-parity.test.ts` holds schema.ts to this same list.
       expect(mailIndexes.map((i) => i.indexname)).toEqual([
         "principal_mail_pkey",
+        "principal_mail_refs_idx",
         "principal_mail_tenant_id_principal_id_created_at_id_idx",
+        "principal_mail_tenant_id_principal_id_message_id_idx",
         "principal_mail_tenant_id_principal_id_message_key_idx",
       ]);
 
@@ -385,6 +389,7 @@ describe("runMailboxMigrations", () => {
       expect(ledger.map((r) => r.id)).toEqual([
         "0001_principal_mailbox",
         "0002_mail_threading_headers",
+        "0003_mail_references",
       ]);
 
       const rows = await db.execute<{
@@ -397,6 +402,77 @@ describe("runMailboxMigrations", () => {
       expect(rows.map((r) => [r.message_key, r.message_id])).toEqual([
         ["nul-body", "<nul@acme.example>"],
         ["nul-ok", "<ok@acme.example>"],
+      ]);
+    });
+  });
+
+  test("0003 backfills the References chain, unfolding continuation lines", async () => {
+    // `References` is the header that FOLDS: RFC 2822 caps a line at 78
+    // characters, so a real chain of more than a couple of ids arrives split
+    // across continuation lines. A backfill anchored to one line would cache
+    // only the first fragment, and every older message would then link to the
+    // wrong ancestor — worse than linking to none.
+    await fromEmpty(async ({ db }) => {
+      await runMailboxMigrations(db);
+      await db.execute(
+        sql`ALTER TABLE "mailbox"."principal_mail" DROP COLUMN "references"`,
+      );
+      await db.execute(
+        sql`DELETE FROM "mailbox"."corbits_mailbox_migrations"
+            WHERE "id" = '0003_mail_references'`,
+      );
+      await seedScope(db, "acme", "user-1");
+
+      const enc = new TextEncoder();
+      const folded = enc.encode(
+        "From: bot@acme.example\r\n" +
+          "Message-ID: <child@acme.example>\r\n" +
+          "References: <root@acme.example>\r\n" +
+          "\t<middle@acme.example>\r\n" +
+          " <parent@acme.example>\r\n" +
+          "\r\nBody\r\n",
+      );
+      const none = enc.encode(
+        "From: bot@acme.example\r\nSubject: no chain\r\n\r\nBody\r\n",
+      );
+      // The body says `References:` at the start of a line; the header slice
+      // must not reach it, and a NUL after it must not abort the UPDATE.
+      const decoy = Uint8Array.from([
+        ...enc.encode(
+          "From: bot@acme.example\r\nMessage-ID: <decoy@acme.example>\r\n" +
+            "\r\nReferences: <fake@acme.example>\r\n",
+        ),
+        0x00,
+        0x41,
+      ]);
+      for (const [key, raw] of [
+        ["refs-folded", folded],
+        ["refs-none", none],
+        ["refs-decoy", decoy],
+      ] as const) {
+        await db.execute(sql`
+          INSERT INTO "mailbox"."principal_mail"
+            ("tenant_id","principal_id","address","direction","raw","message_key")
+          VALUES ('acme','user-1','user-1@acme.example','inbound',
+                  ${Buffer.from(raw)}, ${key})
+        `);
+      }
+
+      await runMailboxMigrations(db);
+
+      const rows = await db.execute<{
+        message_key: string;
+        references: string[] | null;
+      }>(sql`SELECT "message_key", "references"
+             FROM "mailbox"."principal_mail" ORDER BY "message_key"`);
+      expect(rows.map((r) => [r.message_key, r.references])).toEqual([
+        ["refs-decoy", null],
+        ["refs-folded", [
+          "<root@acme.example>",
+          "<middle@acme.example>",
+          "<parent@acme.example>",
+        ]],
+        ["refs-none", null],
       ]);
     });
   });
@@ -476,6 +552,7 @@ describe("runMailboxMigrations", () => {
       expect(rows.map((r) => [r.id, r.count])).toEqual([
         ["0001_principal_mailbox", "1"],
         ["0002_mail_threading_headers", "1"],
+        ["0003_mail_references", "1"],
       ]);
     });
   });
@@ -682,6 +759,7 @@ describe("runMailboxMigrations under concurrent cold start", () => {
     expect(ledger.map((r) => r.id)).toEqual([
       "0001_principal_mailbox",
       "0002_mail_threading_headers",
+      "0003_mail_references",
     ]);
   });
 
