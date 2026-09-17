@@ -150,17 +150,10 @@ export async function createReferenceHost(): Promise<ReferenceHost> {
   // nests them in a sub-app and routes that sub-app at `/api`. No `/v1`
   // segment and no vendor prefix — the served paths are `/api/me/inbox*`.
   const api = new Hono<AppEnv>();
-  // The triage vocabulary is the HOST's, not the package's: the core ships the
-  // ranking mechanism and generates its OpenAPI enums from whatever this host
-  // declares here. A different product would list different words.
   mountMailbox(api, {
     db,
     bus,
     resolvePrincipal,
-    vocabulary: {
-      priorities: ["urgent", "high", "normal", "low"],
-      statuses: ["needs-action", "done"],
-    },
   });
   app.route("/api", api);
 
