@@ -429,6 +429,42 @@ export const MIGRATIONS: Migration[] = [
          ON CONFLICT ("tenant_id", "principal_id", "folder") DO NOTHING`,
     ],
   },
+  {
+    // This library exists ONLY to give a human principal a native
+    // `MailboxStore` — every reader and writer now goes through
+    // `NativeMailboxStore`, and the pre-native management layer
+    // (`"mailbox"."mailbox"`: read_at/archived_at/trashed_at,
+    // priority/classification/status/assignee) has no reader left. Dropping
+    // the table drops those columns and their indexes with it, in one
+    // statement, rather than an ALTER per column.
+    //
+    // uid/modseq become NOT NULL: every remaining write path is
+    // `NativeMailboxStore.append`, which always sets both. The backfill below
+    // is defense in depth for a row inserted by the pre-cutover write paths
+    // between `0004` running and this migration — same per-(tenant,
+    // principal, folder) row_number() `0004` used, guarded by "uid" IS NULL
+    // so an already-backfilled row is left alone.
+    id: "0005_drop_pre_native_columns",
+    statements: [
+      sql`UPDATE "mailbox"."principal_mail" AS pm
+         SET "uid" = seq."rn", "modseq" = seq."rn"
+         FROM (
+           SELECT "id",
+             row_number() OVER (
+               PARTITION BY "tenant_id", "principal_id", "folder"
+               ORDER BY "created_at", "id"
+             ) AS "rn"
+           FROM "mailbox"."principal_mail"
+           WHERE "uid" IS NULL
+         ) AS seq
+         WHERE pm."id" = seq."id"`,
+      sql`ALTER TABLE "mailbox"."principal_mail"
+         ALTER COLUMN "uid" SET NOT NULL`,
+      sql`ALTER TABLE "mailbox"."principal_mail"
+         ALTER COLUMN "modseq" SET NOT NULL`,
+      sql`DROP TABLE IF EXISTS "mailbox"."mailbox"`,
+    ],
+  },
 ];
 
 const DIALECT = new PgDialect();

@@ -63,11 +63,9 @@ export async function withTestDb(): Promise<MailboxDb> {
     return db;
   })();
   const db = await shared;
-  // `mailbox` references `principal_mail`, so both are truncated in one
-  // statement rather than leaving the management layer behind. The control
-  // plane is reset too, so no test inherits another's scopes.
+  // The control plane is reset too, so no test inherits another's scopes.
   await db.execute(
-    sql`TRUNCATE TABLE "mailbox"."principal_mail", "mailbox"."mailbox"`,
+    sql`TRUNCATE TABLE "mailbox"."principal_mail", "mailbox"."mailbox_state"`,
   );
   await db.execute(sql`TRUNCATE TABLE "tenant", "principal" CASCADE`);
   return db;

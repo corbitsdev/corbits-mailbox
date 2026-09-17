@@ -94,23 +94,13 @@ describe("runMailboxMigrations", () => {
         "uid",
       ]);
 
-      const stateColumns = await db.execute<{ column_name: string }>(
-        sql`SELECT column_name FROM information_schema.columns
-            WHERE table_schema = 'mailbox' AND table_name = 'mailbox'
-            ORDER BY column_name`,
+      // The pre-native management layer ("mailbox"."mailbox") was dropped in
+      // 0005 — the mail plane is now the only table this schema owns.
+      const stateTable = await db.execute<{ exists: boolean }>(
+        sql`SELECT EXISTS (SELECT 1 FROM information_schema.tables
+            WHERE table_schema = 'mailbox' AND table_name = 'mailbox') AS exists`,
       );
-      expect(stateColumns.map((c) => c.column_name)).toEqual([
-        "archived_at",
-        "assignee",
-        "classification",
-        "id",
-        "principal_id",
-        "priority",
-        "read_at",
-        "status",
-        "tenant_id",
-        "trashed_at",
-      ]);
+      expect(stateTable[0]?.exists).toBe(false);
 
       const mailIndexes = await db.execute<{ indexname: string }>(
         sql`SELECT indexname FROM pg_indexes
@@ -131,30 +121,28 @@ describe("runMailboxMigrations", () => {
         "principal_mail_tenant_id_principal_id_message_key_idx",
       ]);
 
-      const stateIndexes = await db.execute<{ indexname: string }>(
-        sql`SELECT indexname FROM pg_indexes
-            WHERE schemaname = 'mailbox' AND tablename = 'mailbox'
-            ORDER BY indexname`,
-      );
-      // The management layer carries the triage filters and one partial index
-      // per view predicate — eager rows are what make the unread one possible.
-      expect(stateIndexes.map((i) => i.indexname)).toEqual([
-        "mailbox_pkey",
-        "mailbox_tenant_id_principal_id_archived_at_idx",
-        "mailbox_tenant_id_principal_id_assignee_idx",
-        "mailbox_tenant_id_principal_id_classification_idx",
-        "mailbox_tenant_id_principal_id_priority_idx",
-        "mailbox_tenant_id_principal_id_status_idx",
-        "mailbox_tenant_id_principal_id_trashed_at_idx",
-        "mailbox_tenant_id_principal_id_unread_idx",
-      ]);
-
       // The dedupe index is partial: NULL-key external mail is unconstrained.
       const partial = await db.execute<{ indexdef: string }>(
         sql`SELECT indexdef FROM pg_indexes WHERE schemaname = 'mailbox'
             AND indexname = 'principal_mail_tenant_id_principal_id_message_key_idx'`,
       );
       expect(partial[0]?.indexdef).toContain("WHERE (message_key IS NOT NULL)");
+    });
+  });
+
+  test("0005 leaves uid and modseq NOT NULL: every write path is the native store now", async () => {
+    await fromEmpty(async ({ db }) => {
+      await runMailboxMigrations(db);
+      const rows = await db.execute<{ column_name: string; is_nullable: string }>(
+        sql`SELECT column_name, is_nullable FROM information_schema.columns
+            WHERE table_schema = 'mailbox' AND table_name = 'principal_mail'
+              AND column_name IN ('uid', 'modseq')
+            ORDER BY column_name`,
+      );
+      expect(rows.map((r) => [r.column_name, r.is_nullable])).toEqual([
+        ["modseq", "NO"],
+        ["uid", "NO"],
+      ]);
     });
   });
 
@@ -170,109 +158,6 @@ describe("runMailboxMigrations", () => {
       expect(row?.indexdef).toContain(
         "(tenant_id, principal_id, created_at DESC, id DESC)",
       );
-    });
-  });
-
-  test("the partial indexes match their view predicates", async () => {
-    await fromEmpty(async ({ db }) => {
-      await runMailboxMigrations(db);
-      const rows = await db.execute<{
-        indexname: string;
-        indexdef: string;
-      }>(
-        sql`SELECT indexname, indexdef FROM pg_indexes
-            WHERE schemaname = 'mailbox'
-              AND indexname LIKE 'mailbox_tenant_id_principal_id_%_idx'
-              AND indexdef LIKE '%WHERE%'
-            ORDER BY indexname`,
-      );
-      const byName = new Map(rows.map((r) => [r.indexname, r.indexdef]));
-      expect([...byName.keys()]).toEqual([
-        "mailbox_tenant_id_principal_id_archived_at_idx",
-        "mailbox_tenant_id_principal_id_trashed_at_idx",
-        "mailbox_tenant_id_principal_id_unread_idx",
-      ]);
-      for (const def of byName.values()) {
-        expect(def).toContain("(tenant_id, principal_id)");
-      }
-      expect(
-        byName.get("mailbox_tenant_id_principal_id_archived_at_idx"),
-      ).toContain("archived_at IS NOT NULL) AND (trashed_at IS NULL");
-      expect(
-        byName.get("mailbox_tenant_id_principal_id_trashed_at_idx"),
-      ).toContain("trashed_at IS NOT NULL");
-      expect(
-        byName.get("mailbox_tenant_id_principal_id_unread_idx"),
-      ).toContain(
-        "read_at IS NULL) AND (archived_at IS NULL) AND (trashed_at IS NULL",
-      );
-    });
-  });
-
-  // The split gives the archived/trash views two possible plans, and which one
-  // wins is a question about the DATA, not about the schema: drive from the
-  // mail keyset (ordering free, but scan until 51 archived messages turn up) or
-  // drive from the mailbox partial index (enumerate the whole view, then sort
-  // it). Both cases below are seeded and asserted rather than assumed.
-  async function seedViewPlan(
-    db: ReturnType<typeof handle>["db"],
-    archivedEvery: number,
-  ) {
-    await seedScope(db, "acme", "user-1");
-    await db.execute(sql`
-      INSERT INTO "mailbox"."principal_mail"
-        ("tenant_id","principal_id","address","direction","raw","created_at")
-      SELECT 'acme','user-1','user-1@acme.example','inbound','\\x00'::bytea,
-             now() - (g || ' seconds')::interval
-      FROM generate_series(1, 20000) g
-    `);
-    // A read mailbox: every message has been opened, so every one has a
-    // management row, and only every `archivedEvery`-th is archived. That is
-    // what makes the archived view SPARSE within a large `mailbox` rather than
-    // simply small — the case where a partial index earns its keep.
-    await db.execute(sql`
-      INSERT INTO "mailbox"."mailbox" ("id","tenant_id","principal_id","read_at","archived_at")
-      SELECT "id", "tenant_id", "principal_id", now(),
-             CASE WHEN m.n % ${sql.raw(String(archivedEvery))} = 0 THEN now() END
-        FROM (SELECT *, row_number() OVER (ORDER BY "created_at") AS n
-                FROM "mailbox"."principal_mail") m
-    `);
-    await db.execute(sql`ANALYZE "mailbox"."principal_mail"`);
-    await db.execute(sql`ANALYZE "mailbox"."mailbox"`);
-    const plan = await db.execute<{ "QUERY PLAN": string }>(sql`
-      EXPLAIN (ANALYZE)
-      SELECT pm."id" FROM "mailbox"."principal_mail" pm
-        LEFT JOIN "mailbox"."mailbox" mb ON mb."id" = pm."id"
-      WHERE pm."tenant_id" = 'acme' AND pm."principal_id" = 'user-1'
-        AND pm."direction" = 'inbound'
-        AND mb."archived_at" IS NOT NULL AND mb."trashed_at" IS NULL
-      ORDER BY pm."created_at" DESC, pm."id" DESC
-      LIMIT 51
-    `);
-    return plan.map((r) => r["QUERY PLAN"]).join("\n");
-  }
-
-  test("a dense archived view pages off the mail keyset with no sort", async () => {
-    await fromEmpty(async ({ db }) => {
-      await runMailboxMigrations(db);
-      // One in twenty archived: a page of 51 is reachable within ~1000 mail
-      // rows, so the planner takes the ordering for free rather than sorting.
-      const text = await seedViewPlan(db, 20);
-      expect(text).toContain(
-        "principal_mail_tenant_id_principal_id_created_at_id_idx",
-      );
-      expect(text).not.toContain("Sort Method");
-    });
-  });
-
-  test("a sparse archived view pages off the mailbox partial index", async () => {
-    await fromEmpty(async ({ db }) => {
-      await runMailboxMigrations(db);
-      // One in four thousand archived: walking the mail keyset would scan the
-      // principal's whole history to fill one page, so the partial index —
-      // which enumerates the entire view directly — wins even with the sort.
-      const text = await seedViewPlan(db, 4000);
-      expect(text).toContain("mailbox_tenant_id_principal_id_archived_at_idx");
     });
   });
 
@@ -313,16 +198,19 @@ describe("runMailboxMigrations", () => {
         0xff,
         0xfe,
       ]);
-      for (const [key, raw] of [
+      for (const [i, [key, raw]] of [
         ["legacy-threaded", threaded],
         ["legacy-headerless", headerless],
         ["legacy-invalid-utf8", invalidUtf8],
-      ] as const) {
+      ].entries() as IterableIterator<[number, readonly [string, Uint8Array]]>) {
+        // uid/modseq are NOT NULL as of 0005 — supplied explicitly since these
+        // rows simulate pre-native legacy inserts that predate the native
+        // store's own uid assignment.
         await db.execute(sql`
           INSERT INTO "mailbox"."principal_mail"
-            ("tenant_id","principal_id","address","direction","raw","message_key")
+            ("tenant_id","principal_id","address","direction","raw","message_key","uid","modseq")
           VALUES ('acme','user-1','user-1@acme.example','inbound',
-                  ${Buffer.from(raw)}, ${key})
+                  ${Buffer.from(raw)}, ${key}, ${i + 1}, ${i + 1})
         `);
       }
 
@@ -375,15 +263,15 @@ describe("runMailboxMigrations", () => {
         0x00,
         0x41,
       ]);
-      for (const [key, raw] of [
+      for (const [i, [key, raw]] of [
         ["nul-ok", ok],
         ["nul-body", nulBody],
-      ] as const) {
+      ].entries() as IterableIterator<[number, readonly [string, Uint8Array]]>) {
         await db.execute(sql`
           INSERT INTO "mailbox"."principal_mail"
-            ("tenant_id","principal_id","address","direction","raw","message_key")
+            ("tenant_id","principal_id","address","direction","raw","message_key","uid","modseq")
           VALUES ('acme','user-1','user-1@acme.example','inbound',
-                  ${Buffer.from(raw)}, ${key})
+                  ${Buffer.from(raw)}, ${key}, ${i + 1}, ${i + 1})
         `);
       }
 
@@ -397,6 +285,7 @@ describe("runMailboxMigrations", () => {
         "0002_mail_threading_headers",
         "0003_mail_references",
         "0004_native_mailbox_store",
+        "0005_drop_pre_native_columns",
       ]);
 
       const rows = await db.execute<{
@@ -452,16 +341,16 @@ describe("runMailboxMigrations", () => {
         0x00,
         0x41,
       ]);
-      for (const [key, raw] of [
+      for (const [i, [key, raw]] of [
         ["refs-folded", folded],
         ["refs-none", none],
         ["refs-decoy", decoy],
-      ] as const) {
+      ].entries() as IterableIterator<[number, readonly [string, Uint8Array]]>) {
         await db.execute(sql`
           INSERT INTO "mailbox"."principal_mail"
-            ("tenant_id","principal_id","address","direction","raw","message_key")
+            ("tenant_id","principal_id","address","direction","raw","message_key","uid","modseq")
           VALUES ('acme','user-1','user-1@acme.example','inbound',
-                  ${Buffer.from(raw)}, ${key})
+                  ${Buffer.from(raw)}, ${key}, ${i + 1}, ${i + 1})
         `);
       }
 
@@ -519,12 +408,12 @@ describe("runMailboxMigrations", () => {
           "From: a@b.c\nMessage-ID: <lf@acme.example>\nIn-Reply-To: <p@x>\n\nMessage-ID: <body@x>\nBody\n",
         ],
       ] as const;
-      for (const [key, text] of cases) {
+      for (const [i, [key, text]] of cases.entries()) {
         await db.execute(sql`
           INSERT INTO "mailbox"."principal_mail"
-            ("tenant_id","principal_id","address","direction","raw","message_key")
+            ("tenant_id","principal_id","address","direction","raw","message_key","uid","modseq")
           VALUES ('acme','user-1','user-1@acme.example','inbound',
-                  ${Buffer.from(enc.encode(text))}, ${key})
+                  ${Buffer.from(enc.encode(text))}, ${key}, ${i + 1}, ${i + 1})
         `);
       }
       await runMailboxMigrations(db);
@@ -561,6 +450,7 @@ describe("runMailboxMigrations", () => {
         ["0002_mail_threading_headers", "1"],
         ["0003_mail_references", "1"],
         ["0004_native_mailbox_store", "1"],
+        ["0005_drop_pre_native_columns", "1"],
       ]);
     });
   });
@@ -670,39 +560,6 @@ describe("runMailboxMigrations", () => {
     });
   });
 
-  test("mailbox FKs: its own mail plane plus the same control-plane pair", async () => {
-    // The key to `principal_mail` is what makes a message and its triage state
-    // one lifecycle; the scope FKs mirror the mail plane's for the same reason
-    // they exist there.
-    await fromEmpty(async ({ db }) => {
-      await runMailboxMigrations(db);
-      const rows = await db.execute<{
-        constraint_name: string;
-        table_name: string;
-        delete_rule: string;
-      }>(sql`
-        SELECT tc.constraint_name, ccu.table_name, rc.delete_rule
-          FROM information_schema.table_constraints tc
-          JOIN information_schema.referential_constraints rc
-            ON rc.constraint_name = tc.constraint_name
-           AND rc.constraint_schema = tc.table_schema
-          JOIN information_schema.constraint_column_usage ccu
-            ON ccu.constraint_name = tc.constraint_name
-           AND ccu.constraint_schema = tc.table_schema
-         WHERE tc.table_schema = 'mailbox' AND tc.table_name = 'mailbox'
-           AND tc.constraint_type = 'FOREIGN KEY'
-         ORDER BY tc.constraint_name
-      `);
-      expect(
-        rows.map((r) => [r.constraint_name, r.table_name, r.delete_rule]),
-      ).toEqual([
-        ["mailbox_id_fkey", "principal_mail", "CASCADE"],
-        ["mailbox_principal_id_principal_id_fk", "principal", "CASCADE"],
-        ["mailbox_tenant_id_tenant_id_fk", "tenant", "CASCADE"],
-      ]);
-    });
-  });
-
   test("builds into the mailbox schema regardless of the session search_path", async () => {
     // The DDL is schema-qualified end to end, so a host whose connection
     // selects some other search_path still gets (and finds) this package's
@@ -718,12 +575,10 @@ describe("runMailboxMigrations", () => {
       await runMailboxMigrations(drizzle(client));
       const found = await admin.unsafe(
         `SELECT to_regclass('mailbox.principal_mail') AS t,
-                to_regclass('mailbox.mailbox') AS m,
                 to_regclass('mailbox.corbits_mailbox_migrations') AS l,
                 to_regclass('mbx_elsewhere.principal_mail') AS stray`,
       );
       expect(found[0]!.t).not.toBeNull();
-      expect(found[0]!.m).not.toBeNull();
       expect(found[0]!.l).not.toBeNull();
       expect(found[0]!.stray).toBeNull();
     } finally {
@@ -769,6 +624,7 @@ describe("runMailboxMigrations under concurrent cold start", () => {
       "0002_mail_threading_headers",
       "0003_mail_references",
       "0004_native_mailbox_store",
+      "0005_drop_pre_native_columns",
     ]);
   });
 
