@@ -6,7 +6,7 @@ live in a dedicated `mailbox` schema in the host's database, foreign-keyed to
 the host's `tenant` and `principal` tables. Backend only; this package ships no
 UI.
 
-Requires `@intx` 0.2.2 or newer.
+Requires `@intx` 0.3.0 or newer.
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for the data model.
 

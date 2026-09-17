@@ -103,7 +103,7 @@ export async function createReferenceHost(): Promise<ReferenceHost> {
   // every launch verb rather than pretending to serve it, and it opts out of
   // the asset/git surface by passing null for both.
   const authenticateSidecar: SidecarAuthenticator = async ({ sidecarId }) => ({
-    kind: "sidecar",
+    kind: "shared",
     sidecarId,
   });
   const refuse = (verb: string) => (): never => {
@@ -111,9 +111,7 @@ export async function createReferenceHost(): Promise<ReferenceHost> {
   };
   const sessionService: SessionService = {
     stageWorkflowStep: refuse("stageWorkflowStep"),
-    deployInstanceAtHead: refuse("deployInstanceAtHead"),
-    deploySingleStepAtHead: refuse("deploySingleStepAtHead"),
-    deployWorkflowDefinition: refuse("deployWorkflowDefinition"),
+    deployWorkflowFromSource: refuse("deployWorkflowFromSource"),
     sendUserMessage: refuse("sendUserMessage"),
     endSession: refuse("endSession"),
   };
