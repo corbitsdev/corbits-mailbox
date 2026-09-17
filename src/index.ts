@@ -21,6 +21,17 @@ export {
 export { createMailboxDb } from "./db.js";
 export type { MailboxDb } from "./db.js";
 
+// The native `MailboxStore` over `mailbox.principal_mail` /
+// `mailbox.mailbox_state` (migration `0004_native_mailbox_store`) — the
+// vendored `executeSearch`/`executeThread` from `@intx/mailbox` run over it
+// unmodified.
+export {
+  createPrincipalMailboxStore,
+  openNativeMailboxStore,
+  moveNativeMailboxMessage,
+} from "./native-store.js";
+export type { NativeMailboxStore } from "./native-store.js";
+
 // Two tables: the immutable mail plane, and the mutable management layer keyed
 // by mail id. There is no `mailboxPriorities`/`mailboxStatuses` export and no
 // `MailboxPriority`/`MailboxStatus` type — the vocabulary is the host's, passed

@@ -77,17 +77,21 @@ describe("runMailboxMigrations", () => {
         "address",
         "created_at",
         "direction",
+        "flags",
+        "folder",
         "from_address",
         "id",
         "in_reply_to",
         "message_id",
         "message_key",
+        "modseq",
         "principal_id",
         "raw",
         "references",
         "refs",
         "subject",
         "tenant_id",
+        "uid",
       ]);
 
       const stateColumns = await db.execute<{ column_name: string }>(
@@ -392,6 +396,7 @@ describe("runMailboxMigrations", () => {
         "0001_principal_mailbox",
         "0002_mail_threading_headers",
         "0003_mail_references",
+        "0004_native_mailbox_store",
       ]);
 
       const rows = await db.execute<{
@@ -555,6 +560,7 @@ describe("runMailboxMigrations", () => {
         ["0001_principal_mailbox", "1"],
         ["0002_mail_threading_headers", "1"],
         ["0003_mail_references", "1"],
+        ["0004_native_mailbox_store", "1"],
       ]);
     });
   });
@@ -762,6 +768,7 @@ describe("runMailboxMigrations under concurrent cold start", () => {
       "0001_principal_mailbox",
       "0002_mail_threading_headers",
       "0003_mail_references",
+      "0004_native_mailbox_store",
     ]);
   });
 
