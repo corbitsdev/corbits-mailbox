@@ -10,6 +10,8 @@ import {
   readMailboxThread,
   readMailboxMessageByMessageId,
   decodeMailboxThreadCursor,
+  listMailboxThreads,
+  readMailboxThreadByMessageId,
 } from "./thread.js";
 import { withTestDb, seedScope } from "./test-helpers.js";
 import type { MailboxDb } from "./db.js";
@@ -654,5 +656,60 @@ describe("the cached references column", () => {
         ),
       );
     expect(rows[0]?.references).toEqual([root.messageId]);
+  });
+});
+
+describe("listMailboxThreads", () => {
+  test("scopes to the refs filter: a thread with no message in the given refs is excluded", async () => {
+    await send({ subject: "In workbench", refs: [WORKBENCH], messageKey: "in" });
+    await send({
+      subject: "In other workbench",
+      refs: [OTHER_WORKBENCH],
+      messageKey: "out",
+    });
+
+    const page = await listMailboxThreads(
+      db,
+      { tenantId: "t1", principalId: "p1" },
+      { refs: [WORKBENCH] },
+    );
+    expect(page.items.map((item) => item.rootMessageId).length).toBe(1);
+    expect(page.items[0]?.subject).toBe("In workbench");
+  });
+});
+
+describe("readMailboxThreadByMessageId", () => {
+  test("returns the thread for its root Message-ID", async () => {
+    const root = await send({ subject: "Root", messageKey: "root" });
+    const reply = await send({
+      subject: "Re: Root",
+      inReplyTo: root.messageId,
+      references: [root.messageId],
+      messageKey: "reply",
+    });
+
+    const page = await readMailboxThreadByMessageId(
+      db,
+      { tenantId: "t1", principalId: "p1" },
+      { rootMessageId: root.messageId },
+    );
+    expect(page?.items.map((item) => item.id)).toEqual([root.id, reply.id]);
+  });
+
+  test("a non-root Message-ID resolves to null", async () => {
+    const root = await send({ subject: "Root", messageKey: "root" });
+    const reply = await send({
+      subject: "Re: Root",
+      inReplyTo: root.messageId,
+      references: [root.messageId],
+      messageKey: "reply",
+    });
+
+    const page = await readMailboxThreadByMessageId(
+      db,
+      { tenantId: "t1", principalId: "p1" },
+      { rootMessageId: reply.messageId },
+    );
+    expect(page).toBeNull();
   });
 });

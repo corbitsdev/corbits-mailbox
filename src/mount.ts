@@ -45,6 +45,17 @@ import {
   canonicalMailboxPriorities,
   type MailboxVocabulary,
 } from "./vocabulary.js";
+import {
+  listMailboxThreads,
+  readMailboxThreadByMessageId,
+  decodeMailboxThreadListCursor,
+  MAX_MAILBOX_THREAD_LIST_LIMIT,
+  DEFAULT_MAILBOX_THREAD_LIST_LIMIT,
+  MAX_MAILBOX_THREAD_LIMIT,
+  type MailboxThreadSummary,
+  type MailboxThreadMessage,
+} from "./thread.js";
+import { MailboxRefArraySchema, type MailboxRef } from "./read.js";
 
 const logger = getLogger(["corbits-mailbox", "mount"]);
 
@@ -136,6 +147,48 @@ const LimitSchema = type("undefined")
 
 function isUuid(value: string): boolean {
   return !(UuidSchema(value) instanceof type.errors);
+}
+
+/**
+ * Parse an optional `?limit=` against the given default/max, the same
+ * refuse-don't-clamp posture as `LimitSchema` above — reused for the thread
+ * routes, which have their own ceilings.
+ */
+function parseOptionalLimit(
+  raw: string | undefined,
+  defaultLimit: number,
+  max: number,
+): { limit: number } | { error: string } {
+  if (raw === undefined) return { limit: defaultLimit };
+  if (!/^\d+$/.test(raw)) return { error: "limit must be a positive integer" };
+  const limit = Number(raw);
+  if (!Number.isSafeInteger(limit) || limit < 1) {
+    return { error: "limit must be a positive integer" };
+  }
+  if (limit > max) return { error: `limit must be at most ${max}` };
+  return { limit };
+}
+
+/**
+ * `?refs=` is a JSON-encoded array of `{kind, id}` refs — the same shape
+ * `MailboxRef` uses everywhere else in this package. Omitted means no ref
+ * filter.
+ */
+function parseOptionalRefs(
+  raw: string | undefined,
+): { refs?: MailboxRef[] } | { error: string } {
+  if (raw === undefined) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { error: "refs must be JSON-encoded" };
+  }
+  const refs = MailboxRefArraySchema(parsed);
+  if (refs instanceof type.errors) {
+    return { error: "invalid refs filter" };
+  }
+  return { refs };
 }
 
 /**
@@ -765,6 +818,141 @@ export function mountMailbox<E extends Env>(
         updated: results.filter((r) => r.ok).length,
         results,
       });
+    },
+  );
+
+  app.get(
+    "/me/threads",
+    describeRoute({
+      tags: TAGS,
+      summary: "List the caller's conversations, newest activity first",
+      description:
+        "Groups every inbound message in scope into threads by RFC 5256 References " +
+        "linking, keyset-paginated on (lastCreatedAt, rootId). `refs` (optional, JSON-encoded " +
+        "array of {kind, id}) scopes the listing to threads with at least one message " +
+        "carrying one of the given refs, e.g. a tenant or workbench ref.",
+      parameters: [
+        {
+          name: "refs",
+          in: "query",
+          description: "JSON-encoded array of {kind, id} refs, OR'd together.",
+          schema: { type: "string" },
+        },
+        {
+          name: "limit",
+          in: "query",
+          schema: {
+            type: "integer",
+            minimum: 1,
+            maximum: MAX_MAILBOX_THREAD_LIST_LIMIT,
+            default: DEFAULT_MAILBOX_THREAD_LIST_LIMIT,
+          },
+        },
+        { name: "cursor", in: "query", schema: { type: "string" } },
+      ],
+      responses: {
+        200: { description: "A page of thread summaries plus an optional nextCursor" },
+        400: { description: "Malformed refs, cursor, or an out-of-range limit" },
+      },
+    }),
+    async (c) => {
+      const parsedRefs = parseOptionalRefs(c.req.query("refs"));
+      if ("error" in parsedRefs) return c.json({ error: parsedRefs.error }, 400);
+      const parsedLimit = parseOptionalLimit(
+        c.req.query("limit"),
+        DEFAULT_MAILBOX_THREAD_LIST_LIMIT,
+        MAX_MAILBOX_THREAD_LIST_LIMIT,
+      );
+      if ("error" in parsedLimit) return c.json({ error: parsedLimit.error }, 400);
+      const resolved = await resolvePrincipal(c);
+      if (!resolved) {
+        return c.json({ threads: [] });
+      }
+      let page;
+      try {
+        page = await listMailboxThreads(db, resolved, {
+          limit: parsedLimit.limit,
+          ...(c.req.query("cursor") !== undefined
+            ? { cursor: c.req.query("cursor")! }
+            : {}),
+          ...(parsedRefs.refs !== undefined ? { refs: parsedRefs.refs } : {}),
+        });
+      } catch (err) {
+        if (err instanceof RangeError) {
+          return c.json({ error: err.message }, 400);
+        }
+        throw err;
+      }
+      const body: { threads: MailboxThreadSummary[]; nextCursor?: string } = {
+        threads: page.items,
+      };
+      if (page.nextCursor !== undefined) body.nextCursor = page.nextCursor;
+      return c.json(body);
+    },
+  );
+
+  app.get(
+    "/me/threads/:rootMessageId",
+    describeRoute({
+      tags: TAGS,
+      summary: "Read one conversation by its root Message-ID",
+      description:
+        "Oldest first, keyset-paginated. `rootMessageId` must name a message that is itself " +
+        "a thread root in this scope; a non-root or unknown Message-ID is a 404.",
+      parameters: [
+        {
+          name: "rootMessageId",
+          in: "path",
+          required: true,
+          schema: { type: "string" },
+        },
+        {
+          name: "limit",
+          in: "query",
+          schema: {
+            type: "integer",
+            minimum: 1,
+            maximum: MAX_MAILBOX_THREAD_LIMIT,
+          },
+        },
+        { name: "cursor", in: "query", schema: { type: "string" } },
+      ],
+      responses: {
+        200: { description: "The thread's messages plus an optional nextCursor" },
+        400: { description: "Malformed cursor or an out-of-range limit" },
+        403: { description: "No resolvable principalId" },
+        404: { description: "No such thread root for this principalId" },
+      },
+    }),
+    async (c) => {
+      const resolved = await resolvePrincipal(c);
+      if (!resolved) {
+        return c.json({ error: "No resolvable principalId" }, 403);
+      }
+      const rootMessageId = c.req.param("rootMessageId");
+      const rawCursor = c.req.query("cursor");
+      const rawLimit = c.req.query("limit");
+      let page;
+      try {
+        page = await readMailboxThreadByMessageId(db, resolved, {
+          rootMessageId,
+          ...(rawCursor !== undefined ? { cursor: rawCursor } : {}),
+          ...(rawLimit !== undefined ? { limit: Number(rawLimit) } : {}),
+        });
+      } catch (err) {
+        if (err instanceof RangeError) {
+          return c.json({ error: err.message }, 400);
+        }
+        throw err;
+      }
+      if (page === null) {
+        return c.json({ error: "Thread not found" }, 404);
+      }
+      const body: { messages: MailboxThreadMessage[]; nextCursor?: string } = {
+        messages: page.items,
+      };
+      if (page.nextCursor !== undefined) body.nextCursor = page.nextCursor;
+      return c.json(body);
     },
   );
 

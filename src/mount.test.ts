@@ -1,8 +1,10 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
+import { eq } from "drizzle-orm";
 import { mountMailbox, MAX_MAILBOX_PAGE_LIMIT } from "./mount.js";
 import { createInMemoryMailboxEventBus } from "./bus.js";
 import { writeMailboxMessage } from "./write.js";
+import { principalMail } from "./schema.js";
 import { withTestDb, seedScope, TEST_VOCABULARY } from "./test-helpers.js";
 import type { MailboxDb } from "./db.js";
 
@@ -25,6 +27,84 @@ function buildApp(
   });
   return app;
 }
+
+describe("thread routes", () => {
+  test("GET /me/threads lists conversations scoped by refs", async () => {
+    await writeMailboxMessage(db, {
+      tenantId: "t1",
+      principalId: "p1",
+      address: "p1@t1.example",
+      fromAddress: "sender@t1.example",
+      subject: "In workbench",
+      body: "Body",
+      messageKey: "in",
+      refs: [{ kind: "workbench", id: "wb-1" }],
+    });
+    await writeMailboxMessage(db, {
+      tenantId: "t1",
+      principalId: "p1",
+      address: "p1@t1.example",
+      fromAddress: "sender@t1.example",
+      subject: "Elsewhere",
+      body: "Body",
+      messageKey: "out",
+      refs: [{ kind: "workbench", id: "wb-2" }],
+    });
+
+    const app = buildApp(() => ({ tenantId: "t1", principalId: "p1" }));
+    const res = await app.request(
+      `/me/threads?refs=${encodeURIComponent(
+        JSON.stringify([{ kind: "workbench", id: "wb-1" }]),
+      )}`,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { threads: { rootMessageId: string }[] };
+    expect(body.threads.length).toBe(1);
+  });
+
+  test("GET /me/threads returns empty when resolvePrincipal yields null", async () => {
+    const app = buildApp(() => null);
+    const res = await app.request("/me/threads");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ threads: [] });
+  });
+
+  test("GET /me/threads/:rootMessageId reads a thread by its root Message-ID", async () => {
+    const written = await writeMailboxMessage(db, {
+      tenantId: "t1",
+      principalId: "p1",
+      address: "p1@t1.example",
+      fromAddress: "sender@t1.example",
+      subject: "Root",
+      body: "Body",
+      messageKey: "root",
+    });
+    const [row] = await db
+      .select({ messageId: principalMail.messageId })
+      .from(principalMail)
+      .where(eq(principalMail.id, written!.id));
+
+    const app = buildApp(() => ({ tenantId: "t1", principalId: "p1" }));
+    const res = await app.request(
+      `/me/threads/${encodeURIComponent(row!.messageId!)}`,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { messages: { id: string }[] };
+    expect(body.messages.map((m) => m.id)).toEqual([written!.id]);
+  });
+
+  test("GET /me/threads/:rootMessageId returns 404 for an unknown Message-ID", async () => {
+    const app = buildApp(() => ({ tenantId: "t1", principalId: "p1" }));
+    const res = await app.request("/me/threads/no-such-message-id");
+    expect(res.status).toBe(404);
+  });
+
+  test("GET /me/threads/:rootMessageId returns 403 with no resolvable principalId", async () => {
+    const app = buildApp(() => null);
+    const res = await app.request("/me/threads/anything");
+    expect(res.status).toBe(403);
+  });
+});
 
 describe("no-member asymmetry", () => {
   test("list returns empty 200 when resolvePrincipal yields null", async () => {

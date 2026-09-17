@@ -33,6 +33,8 @@ describe("OpenAPI", () => {
       "/me/inbox/{id}/restore",
       "/me/inbox/{id}/trash",
       "/me/inbox/{id}/unread",
+      "/me/threads",
+      "/me/threads/{rootMessageId}",
     ]);
   });
 
@@ -41,7 +43,7 @@ describe("OpenAPI", () => {
     const operations = Object.values(spec.paths ?? {}).flatMap((path) =>
       Object.values(path ?? {}),
     ) as { summary?: string; tags?: string[]; responses?: object }[];
-    expect(operations.length).toBe(12);
+    expect(operations.length).toBe(14);
     for (const op of operations) {
       expect(op.summary).toBeString();
       expect(op.tags).toEqual(["mailbox"]);

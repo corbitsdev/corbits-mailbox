@@ -560,6 +560,492 @@ async function fetchThreadNodesByMessageId(
   return nodes;
 }
 
+// ---------------------------------------------------------------------------
+// Thread listing: every conversation in (tenantId, principalId), grouped by
+// the same RFC 5256 References linking `readMailboxThread` resolves within
+// one ref, but applied across the WHOLE scope rather than one ref — a
+// workbench's chat timeline wants "what are my conversations", not "what is
+// under this one entity".
+// ---------------------------------------------------------------------------
+
+export const DEFAULT_MAILBOX_THREAD_LIST_LIMIT = 50;
+/** Same ceiling every other paged mailbox surface enforces. */
+export const MAX_MAILBOX_THREAD_LIST_LIMIT = 200;
+
+/**
+ * This reader loads every row in scope to compute ancestry — there is no
+ * table that already stores "which thread is this row in". A tenant/principal
+ * past this many rows degrades: only the newest
+ * `MAX_MAILBOX_THREAD_LIST_SCAN_ROWS` are considered when grouping into
+ * threads, so the list stays correct for recent activity but a thread whose
+ * own messages straddle the cutoff can appear split into two rather than
+ * merged into one. Logged once per read when the cap is hit.
+ */
+export const MAX_MAILBOX_THREAD_LIST_SCAN_ROWS = 20_000;
+
+export const MailboxThreadSummarySchema = type({
+  /** The root message's row id — stable even when it has no Message-ID. */
+  rootId: "string",
+  rootMessageId: "string",
+  "subject?": "string",
+  messageCount: "number",
+  unreadCount: "number",
+  lastMessageId: "string",
+  lastFromAddress: "string",
+  lastCreatedAt: "string",
+});
+export type MailboxThreadSummary = typeof MailboxThreadSummarySchema.infer;
+
+export const MailboxThreadListResponseSchema = type({
+  threads: MailboxThreadSummarySchema.array(),
+  "nextCursor?": "string",
+});
+
+export type MailboxThreadListPage = {
+  items: MailboxThreadSummary[];
+  nextCursor?: string;
+};
+
+export type MailboxThreadListArgs = {
+  cursor?: string;
+  /** 1..`MAX_MAILBOX_THREAD_LIST_LIMIT`; defaults to `DEFAULT_MAILBOX_THREAD_LIST_LIMIT`. */
+  limit?: number;
+  /**
+   * Scope the listing to threads with at least one message carrying one of
+   * these refs (e.g. the caller's tenant/workbench). OR'd together — a
+   * thread matches if any of its messages carries any of the given refs.
+   * Omitted or empty means no ref filter: every conversation in scope.
+   */
+  refs?: MailboxRef[];
+};
+
+const MailboxThreadListCursorSchema = type({
+  createdAt: "string",
+  id: "string",
+});
+type MailboxThreadListCursor = typeof MailboxThreadListCursorSchema.infer;
+
+export function encodeMailboxThreadListCursor(row: {
+  createdAt: string;
+  id: string;
+}): string {
+  const payload: MailboxThreadListCursor = {
+    createdAt: row.createdAt,
+    id: row.id,
+  };
+  return base64urlEncode(new TextEncoder().encode(JSON.stringify(payload)));
+}
+
+export function decodeMailboxThreadListCursor(
+  raw: string,
+): MailboxThreadListCursor | null {
+  let json: string;
+  try {
+    json = new TextDecoder().decode(base64urlDecode(raw));
+  } catch {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    return null;
+  }
+  const result = MailboxThreadListCursorSchema(parsed);
+  if (result instanceof type.errors) return null;
+  if (!CURSOR_CREATED_AT.test(result.createdAt)) return null;
+  if (Number.isNaN(new Date(result.createdAt).getTime())) return null;
+  return result;
+}
+
+/** One row as scanned for tenant-wide thread grouping — never selects `raw`. */
+type TenantScanRow = {
+  id: string;
+  messageId: string | null;
+  inReplyTo: string | null;
+  references: string[];
+  fromAddress: string | null;
+  subject: string | null;
+  createdAtText: string;
+  read: boolean;
+};
+
+async function scanTenantThreadRows(
+  db: MailboxDb,
+  scope: MailboxThreadScope,
+  refs?: MailboxRef[],
+): Promise<TenantScanRow[]> {
+  const conditions = [
+    eq(principalMail.tenantId, scope.tenantId),
+    eq(principalMail.principalId, scope.principalId),
+    eq(principalMail.direction, "inbound"),
+  ];
+  if (refs !== undefined && refs.length > 0) {
+    const refConditions = refs.map((ref) => refCondition(ref));
+    conditions.push(
+      sql`(${sql.join(refConditions, sql` OR `)})`,
+    );
+  }
+  const rows = await db
+    .select({
+      id: principalMail.id,
+      messageId: principalMail.messageId,
+      inReplyTo: principalMail.inReplyTo,
+      references: principalMail.references,
+      fromAddress: principalMail.fromAddress,
+      subject: principalMail.subject,
+      createdAtText: sql<string>`to_char(${principalMail.createdAt}, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
+      readAt: mailbox.readAt,
+    })
+    .from(principalMail)
+    .leftJoin(mailbox, eq(mailbox.id, principalMail.id))
+    .where(and(...conditions))
+    .orderBy(sql`${principalMail.createdAt} DESC`, sql`${principalMail.id} DESC`)
+    .limit(MAX_MAILBOX_THREAD_LIST_SCAN_ROWS + 1);
+
+  if (rows.length > MAX_MAILBOX_THREAD_LIST_SCAN_ROWS) {
+    logger.warn(
+      "mailbox thread scan hit its row cap; oldest activity in this mailbox is excluded from grouping",
+      { tenantId: scope.tenantId, principalId: scope.principalId },
+    );
+  }
+  const capped = rows.slice(0, MAX_MAILBOX_THREAD_LIST_SCAN_ROWS);
+
+  const dropped = newDroppedReferences();
+  const projected = capped.map((row) => ({
+    id: row.id,
+    messageId: row.messageId,
+    inReplyTo: row.inReplyTo,
+    references: readRowReferences(row.references, row.id, dropped),
+    fromAddress: row.fromAddress,
+    subject: row.subject,
+    createdAtText: row.createdAtText,
+    read: row.readAt !== null,
+  }));
+  reportDroppedReferences(dropped);
+  return projected;
+}
+
+/**
+ * Build the same ancestry graph `readMailboxThread` builds — nodes keyed by
+ * row id, oldest-carrier-wins msg-id lookup, RFC 5256 candidate parents, and
+ * cycle-broken final parents — over an already-fetched row set rather than a
+ * single ref-scoped page. No breadth-first ancestor expansion here: the whole
+ * scanned set is already in hand, so a parent outside it (because it fell
+ * past `MAX_MAILBOX_THREAD_LIST_SCAN_ROWS`, exactly like a parent outside the
+ * ref elsewhere in this file) resolves to `null` rather than being fetched.
+ */
+function buildTenantThreadGraph(rows: TenantScanRow[]): {
+  nodes: Map<string, ThreadNode>;
+  byMessageId: Map<string, string>;
+  finalParent: Map<string, string | null>;
+} {
+  const nodes = new Map<string, ThreadNode>();
+  const byMessageId = new Map<string, string>();
+
+  function addNode(node: ThreadNode): void {
+    if (!nodes.has(node.id)) nodes.set(node.id, node);
+    if (node.messageId === null) return;
+    const existingId = byMessageId.get(node.messageId);
+    if (existingId === undefined) {
+      byMessageId.set(node.messageId, node.id);
+      return;
+    }
+    const existing = nodes.get(existingId)!;
+    if (
+      node.createdAt < existing.createdAt ||
+      (node.createdAt === existing.createdAt && node.id < existingId)
+    ) {
+      byMessageId.set(node.messageId, node.id);
+    }
+  }
+
+  for (const row of rows) {
+    addNode({
+      id: row.id,
+      messageId: row.messageId,
+      inReplyTo: row.inReplyTo,
+      references: row.references,
+      createdAt: row.createdAtText,
+    });
+  }
+
+  const rawParent = new Map<string, string | null>();
+  for (const node of nodes.values()) {
+    const candidates = [
+      ...(node.inReplyTo !== null ? [node.inReplyTo] : []),
+      ...[...node.references].reverse(),
+    ];
+    let parent: string | null = null;
+    for (const candidate of candidates) {
+      const found = byMessageId.get(candidate);
+      if (found !== undefined && found !== node.id) {
+        parent = found;
+        break;
+      }
+    }
+    rawParent.set(node.id, parent);
+  }
+
+  const finalParent = resolveAcyclicParents(nodes, rawParent);
+  return { nodes, byMessageId, finalParent };
+}
+
+/** Walk each node's final-parent chain to its root, memoized. Acyclic by
+ * construction — `finalParent` already had every cycle cut. */
+function computeThreadRoots(
+  nodes: Map<string, ThreadNode>,
+  finalParent: Map<string, string | null>,
+): Map<string, string> {
+  const roots = new Map<string, string>();
+  function rootOf(id: string): string {
+    const cached = roots.get(id);
+    if (cached !== undefined) return cached;
+    const parent = finalParent.get(id) ?? null;
+    const root = parent === null || !nodes.has(parent) ? id : rootOf(parent);
+    roots.set(id, root);
+    return root;
+  }
+  for (const id of nodes.keys()) rootOf(id);
+  return roots;
+}
+
+/**
+ * List every conversation in (tenantId, principalId), newest activity first,
+ * keyset-paged on (lastCreatedAt, rootId).
+ *
+ * A "thread" is one root of the RFC 5256 References graph built across the
+ * whole scope — the same linking `readMailboxThread` resolves within a single
+ * ref, generalized to every message this principal can see in this tenant.
+ * `lastCreatedAt`/`lastMessageId` name the newest message in the group; a
+ * thread with only its root message reports that root as its own "last".
+ *
+ * Throws `RangeError` on a malformed cursor or an out-of-range limit.
+ */
+export async function listMailboxThreads(
+  db: MailboxDb,
+  scope: MailboxThreadScope,
+  args: MailboxThreadListArgs = {},
+): Promise<MailboxThreadListPage> {
+  const limit = args.limit ?? DEFAULT_MAILBOX_THREAD_LIST_LIMIT;
+  if (
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    limit > MAX_MAILBOX_THREAD_LIST_LIMIT
+  ) {
+    throw new RangeError(
+      `mailbox thread list limit must be an integer in 1..${MAX_MAILBOX_THREAD_LIST_LIMIT}`,
+    );
+  }
+  let cursor: MailboxThreadListCursor | undefined;
+  if (args.cursor !== undefined) {
+    const decoded = decodeMailboxThreadListCursor(args.cursor);
+    if (decoded === null) {
+      throw new RangeError("malformed mailbox thread list cursor");
+    }
+    cursor = decoded;
+  }
+  if (args.refs !== undefined) {
+    for (const ref of args.refs) {
+      const checked = MailboxRefSchema(ref);
+      if (checked instanceof type.errors) {
+        throw new RangeError(`invalid mailbox thread list ref: ${checked.summary}`);
+      }
+    }
+  }
+
+  const rows = await scanTenantThreadRows(db, scope, args.refs);
+  const { nodes, finalParent } = buildTenantThreadGraph(rows);
+  const roots = computeThreadRoots(nodes, finalParent);
+  const rowById = new Map(rows.map((row) => [row.id, row]));
+
+  type Group = {
+    rootId: string;
+    messageCount: number;
+    unreadCount: number;
+    lastId: string;
+    lastCreatedAt: string;
+  };
+  const groups = new Map<string, Group>();
+  for (const row of rows) {
+    const rootId = roots.get(row.id)!;
+    let group = groups.get(rootId);
+    if (group === undefined) {
+      group = {
+        rootId,
+        messageCount: 0,
+        unreadCount: 0,
+        lastId: row.id,
+        lastCreatedAt: row.createdAtText,
+      };
+      groups.set(rootId, group);
+    }
+    group.messageCount += 1;
+    if (!row.read) group.unreadCount += 1;
+    if (
+      row.createdAtText > group.lastCreatedAt ||
+      (row.createdAtText === group.lastCreatedAt && row.id > group.lastId)
+    ) {
+      group.lastId = row.id;
+      group.lastCreatedAt = row.createdAtText;
+    }
+  }
+
+  const sorted = [...groups.values()].sort((a, b) => {
+    if (a.lastCreatedAt !== b.lastCreatedAt) {
+      return a.lastCreatedAt < b.lastCreatedAt ? 1 : -1;
+    }
+    return a.rootId < b.rootId ? 1 : -1;
+  });
+
+  const afterCursor = cursor
+    ? sorted.filter(
+        (group) =>
+          group.lastCreatedAt < cursor.createdAt ||
+          (group.lastCreatedAt === cursor.createdAt && group.rootId < cursor.id),
+      )
+    : sorted;
+
+  const hasMore = afterCursor.length > limit;
+  const page = hasMore ? afterCursor.slice(0, limit) : afterCursor;
+
+  const items: MailboxThreadSummary[] = page.map((group) => {
+    const root = rowById.get(group.rootId)!;
+    const last = rowById.get(group.lastId)!;
+    const summary: MailboxThreadSummary = {
+      rootId: group.rootId,
+      rootMessageId: root.messageId ?? root.id,
+      messageCount: group.messageCount,
+      unreadCount: group.unreadCount,
+      lastMessageId: last.messageId ?? last.id,
+      lastFromAddress: last.fromAddress ?? "",
+      lastCreatedAt: group.lastCreatedAt,
+    };
+    if (root.subject !== null) summary.subject = root.subject;
+    return summary;
+  });
+
+  const result: MailboxThreadListPage = { items };
+  if (hasMore) {
+    const lastGroup = page[page.length - 1]!;
+    result.nextCursor = encodeMailboxThreadListCursor({
+      createdAt: lastGroup.lastCreatedAt,
+      id: lastGroup.rootId,
+    });
+  }
+  return result;
+}
+
+export type MailboxThreadByMessageIdArgs = {
+  rootMessageId: string;
+  cursor?: string;
+  /** 1..`MAX_MAILBOX_THREAD_LIMIT`; defaults to `DEFAULT_MAILBOX_THREAD_LIMIT`. */
+  limit?: number;
+};
+
+/** Synthetic ref this function's cursor is minted under — reusing the
+ * ref-scoped cursor codec `readMailboxThread` already has, rather than a
+ * third cursor shape, since the two are otherwise identical. */
+function rootMessageIdCursorRef(rootMessageId: string): MailboxRef {
+  return { kind: "__mailbox_thread_root__", id: rootMessageId };
+}
+
+/**
+ * Read one conversation by its root `Message-ID`, scoped to
+ * (tenantId, principalId) — the same shape `readMailboxThread` returns
+ * (oldest first, keyset-paged), but the thread is found by walking the whole
+ * scope's References graph to the given root rather than by an entity ref.
+ *
+ * Returns `null` when no message in scope carries `rootMessageId`, or when
+ * that message is not itself a root (a caller has the wrong Message-ID — the
+ * true root is a message it points at that this reader can see).
+ *
+ * Throws `RangeError` on a malformed cursor or an out-of-range limit.
+ */
+export async function readMailboxThreadByMessageId(
+  db: MailboxDb,
+  scope: MailboxThreadScope,
+  args: MailboxThreadByMessageIdArgs,
+): Promise<MailboxThreadPage | null> {
+  const limit = args.limit ?? DEFAULT_MAILBOX_THREAD_LIMIT;
+  if (
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    limit > MAX_MAILBOX_THREAD_LIMIT
+  ) {
+    throw new RangeError(
+      `mailbox thread limit must be an integer in 1..${MAX_MAILBOX_THREAD_LIMIT}`,
+    );
+  }
+  let cursor: MailboxThreadCursor | undefined;
+  if (args.cursor !== undefined) {
+    const decoded = decodeMailboxThreadCursor(args.cursor);
+    if (decoded === null) throw new RangeError("malformed mailbox thread cursor");
+    if (decoded.ref !== canonicalMailboxThreadRef(rootMessageIdCursorRef(args.rootMessageId))) {
+      throw new RangeError(
+        "mailbox thread cursor was minted for a different root Message-ID",
+      );
+    }
+    cursor = decoded;
+  }
+
+  const rows = await scanTenantThreadRows(db, scope);
+  const { nodes, byMessageId, finalParent } = buildTenantThreadGraph(rows);
+  const startId = byMessageId.get(args.rootMessageId);
+  if (startId === undefined) return null;
+  const roots = computeThreadRoots(nodes, finalParent);
+  const rootId = roots.get(startId)!;
+  if (rootId !== startId) return null;
+
+  const rowById = new Map(rows.map((row) => [row.id, row]));
+  const memberIds = [...nodes.keys()].filter((id) => roots.get(id) === rootId);
+  const members = memberIds
+    .map((id) => rowById.get(id)!)
+    .sort((a, b) => {
+      if (a.createdAtText !== b.createdAtText) {
+        return a.createdAtText < b.createdAtText ? -1 : 1;
+      }
+      return a.id < b.id ? -1 : 1;
+    });
+
+  const afterCursor = cursor
+    ? members.filter(
+        (row) =>
+          row.createdAtText > cursor.createdAt ||
+          (row.createdAtText === cursor.createdAt && row.id > cursor.id),
+      )
+    : members;
+
+  const hasMore = afterCursor.length > limit;
+  const page = hasMore ? afterCursor.slice(0, limit) : afterCursor;
+
+  const items: MailboxThreadMessage[] = page.map((row) => {
+    const item: MailboxThreadMessage = {
+      id: row.id,
+      messageId: row.messageId ?? row.id,
+      references: row.references,
+      fromAddress: row.fromAddress ?? "",
+      createdAt: row.createdAtText,
+      read: row.read,
+      archived: false,
+      parentId: finalParent.get(row.id) ?? null,
+    };
+    if (row.inReplyTo !== null) item.inReplyTo = row.inReplyTo;
+    if (row.subject !== null) item.subject = row.subject;
+    return item;
+  });
+
+  const result: MailboxThreadPage = { items };
+  if (hasMore) {
+    const last = page[page.length - 1]!;
+    result.nextCursor = encodeMailboxThreadCursor(
+      { createdAt: last.createdAtText, id: last.id },
+      rootMessageIdCursorRef(args.rootMessageId),
+    );
+  }
+  return result;
+}
+
 /**
  * Look one message up by its `Message-ID`, scoped to (tenantId, principalId).
  * Returns null when this mailbox holds no such message — including when
