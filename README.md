@@ -1,4 +1,4 @@
-# corbits-mailbox
+# @corbits/mailbox
 
 **[`@corbits/mailbox`](./package.json)** — a universal, principal-keyed inbox,
 mountable onto a Hono host backed by an Interchange-shaped Postgres. Its tables
@@ -9,6 +9,56 @@ UI.
 Requires `@intx` 0.2.2 or newer.
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for the data model.
+
+## Quickstart
+
+Run the migrations first — nothing works without them. They create the
+`mailbox` schema in the host's database (FK'd to the host's `tenant` and
+`principal` tables, which must already exist), so run them after the host's
+own control-plane migrations at boot:
+
+```ts
+import { Hono } from "hono";
+import {
+  createMailboxDb,
+  runMailboxMigrations,
+  mountMailbox,
+  createInMemoryMailboxEventBus,
+} from "@corbits/mailbox";
+
+const { db } = createMailboxDb(process.env.DATABASE_URL!);
+await runMailboxMigrations(db);
+
+const app = new Hono();
+mountMailbox(app, {
+  db,
+  bus: createInMemoryMailboxEventBus(),
+  resolvePrincipal: (ctx) => resolveFromSession(ctx),
+  vocabulary: {
+    priorities: ["urgent", "high", "normal", "low"],
+    statuses: ["needs-action", "done"],
+  },
+});
+```
+
+The vocabulary is the host's, not the package's: `priorities` is ordered, most
+urgent first, and drives `sort=priority` ranking. See
+`examples/reference-host/src/index.ts` for the full version mounted on a real
+`@intx/hub-api` app.
+
+### Beyond mounting
+
+- List and get: `listUserMailbox`, `getMailboxMessage` (`src/read.ts`),
+  served at `GET /me/inbox*`.
+- Mutate: `markMailboxMessageRead/Unread`, `archive/trash/restoreMailboxMessage`,
+  `applyMailboxBulkAction`, `assignMailboxMessage`, `enrichMailboxMessage`
+  (`src/mutations.ts`).
+- Threads: `readMailboxThread`, `readMailboxMessageByMessageId`,
+  `listMailboxThreads` (`src/thread.ts`).
+- Live updates: the mount serves an SSE stream of per-row event nudges off
+  the `MailboxEventBus` (`src/bus.ts`); bring your own bus or use
+  `createInMemoryMailboxEventBus`.
+- Writes: `deliverInboxItems` / `writeMailboxMessages` — see Write paths below.
 
 ## Dual-write persist
 
@@ -37,11 +87,7 @@ See ARCHITECTURE.md's persist section for the full contract, including
 ## Install
 
 ```sh
-# from npm (ships prebuilt dist/)
 bun add @corbits/mailbox
-
-# from git (prepare hook builds dist/ on the way in)
-bun add github:corbitsdev/corbits-mailbox
 ```
 
 ## Layout
