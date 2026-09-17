@@ -107,6 +107,73 @@ describe("read/unread", () => {
   });
 });
 
+describe("GET /me/inbox/threads", () => {
+  test("groups a reply under its parent via References", async () => {
+    const rootId = "<root-1@t1.example>";
+    const root = await writeMailboxMessage(db, {
+      ...SCOPE,
+      address: "p1@t1.example",
+      fromAddress: "a@t1.example",
+      subject: "Kickoff",
+      body: "Body",
+      messageId: rootId,
+    });
+    await writeMailboxMessage(db, {
+      ...SCOPE,
+      address: "p1@t1.example",
+      fromAddress: "b@t1.example",
+      subject: "Re: Kickoff",
+      body: "Reply",
+      inReplyTo: rootId,
+      references: [rootId],
+    });
+
+    const app = buildApp();
+    const res = await app.request("/me/inbox/threads");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      threads: {
+        uid: number;
+        envelope: { subject: string };
+        children: { uid: number; envelope: { subject: string } }[];
+      }[];
+    };
+    expect(body.threads).toHaveLength(1);
+    const [thread] = body.threads;
+    expect(thread!.uid).toBe(root!.uid);
+    expect(thread!.envelope.subject).toBe("Kickoff");
+    expect(thread!.children).toHaveLength(1);
+    expect(thread!.children[0]!.envelope.subject).toBe("Re: Kickoff");
+  });
+
+  test("invalid folder is a 400", async () => {
+    const app = buildApp();
+    const res = await app.request("/me/inbox/threads?folder=bogus");
+    expect(res.status).toBe(400);
+  });
+});
+
+describe("GET /me/inbox/threads/:rootUid", () => {
+  test("returns the single thread rooted at that uid", async () => {
+    const uid = await seedMessage("Solo");
+    const app = buildApp();
+    const res = await app.request(`/me/inbox/threads/${uid}`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      thread: { uid: number; envelope: { subject: string }; children: unknown[] };
+    };
+    expect(body.thread.uid).toBe(uid);
+    expect(body.thread.envelope.subject).toBe("Solo");
+    expect(body.thread.children).toHaveLength(0);
+  });
+
+  test("unknown rootUid is a 404", async () => {
+    const app = buildApp();
+    const res = await app.request("/me/inbox/threads/999");
+    expect(res.status).toBe(404);
+  });
+});
+
 describe("archive/trash/restore", () => {
   test("archive moves the message out of INBOX and into Archive", async () => {
     const uid = await seedMessage("To archive");
