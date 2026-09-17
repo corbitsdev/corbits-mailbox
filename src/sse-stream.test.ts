@@ -7,7 +7,7 @@ import {
   type MailboxEventBus,
   type MailboxEventScope,
 } from "./bus.js";
-import { withTestDb, seedScope, TEST_VOCABULARY } from "./test-helpers.js";
+import { withTestDb, seedScope } from "./test-helpers.js";
 import { writeMailboxMessage } from "./write.js";
 
 describe("SSE stream", () => {
@@ -16,7 +16,6 @@ describe("SSE stream", () => {
     await seedScope(db, "t1", "p1");
     const bus = createInMemoryMailboxEventBus();
     const app = mountMailbox(new Hono(), {
-      vocabulary: TEST_VOCABULARY,
       db,
       bus,
       resolvePrincipal: () => ({ tenantId: "t1", principalId: "p1" }),
@@ -68,7 +67,6 @@ describe("SSE stream", () => {
     await seedScope(db, "tenantB", "alice");
     const bus = createInMemoryMailboxEventBus();
     const app = mountMailbox(new Hono(), {
-      vocabulary: TEST_VOCABULARY,
       db,
       bus,
       resolvePrincipal: () => ({ tenantId: "tenantA", principalId: "alice" }),
@@ -130,7 +128,6 @@ describe("SSE stream", () => {
     const bus = createInMemoryMailboxEventBus();
     const scope = { tenantId: "t1", principalId: "p1" };
     const app = mountMailbox(new Hono(), {
-      vocabulary: TEST_VOCABULARY,
       db,
       bus,
       resolvePrincipal: () => scope,
@@ -196,7 +193,6 @@ describe("SSE stream", () => {
       },
     };
     const app = mountMailbox(new Hono(), {
-      vocabulary: TEST_VOCABULARY,
       db,
       bus,
       resolvePrincipal: () => scope,

@@ -8,7 +8,7 @@ import { Hono } from "hono";
 import { mountMailbox } from "./mount.js";
 import { createInMemoryMailboxEventBus } from "./bus.js";
 import { writeMailboxMessage } from "./write.js";
-import { withTestDb, seedScope, TEST_VOCABULARY } from "./test-helpers.js";
+import { withTestDb, seedScope } from "./test-helpers.js";
 import type { MailboxDb } from "./db.js";
 
 const SCOPE = { tenantId: "t1", principalId: "p1" };
@@ -16,7 +16,6 @@ const SCOPE = { tenantId: "t1", principalId: "p1" };
 function stream(db: MailboxDb, heartbeatIntervalMs: number) {
   const bus = createInMemoryMailboxEventBus();
   const app = mountMailbox(new Hono(), {
-    vocabulary: TEST_VOCABULARY,
     db,
     bus,
     resolvePrincipal: () => SCOPE,
@@ -120,7 +119,6 @@ describe("SSE heartbeat", () => {
     const db = await withTestDb();
     const bus = createInMemoryMailboxEventBus();
     const app = mountMailbox(new Hono(), {
-      vocabulary: TEST_VOCABULARY,
       db,
       bus,
       resolvePrincipal: () => SCOPE,
@@ -143,7 +141,6 @@ describe("SSE heartbeat", () => {
     // not on the first request, same as a bad vocabulary.
     const db = await withTestDb();
     const base = {
-      vocabulary: TEST_VOCABULARY,
       db,
       bus: createInMemoryMailboxEventBus(),
       resolvePrincipal: () => SCOPE,

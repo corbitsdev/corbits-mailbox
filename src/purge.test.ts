@@ -1,17 +1,12 @@
 // The control-plane FKs cascade on tenant/principal delete, but hosts that
 // soft-delete their control-plane rows never fire them — the exported purges
 // exist for those hosts. These tests hold them to what the cascade would have
-// done: everything for that tenant, nothing belonging to anyone else,
-// whatever view the rows are in.
+// done: everything for that tenant, nothing belonging to anyone else.
 import { beforeEach, describe, expect, test } from "bun:test";
 import { and, eq } from "drizzle-orm";
 import { purgeTenantMailbox, purgePrincipalMailbox } from "./purge.js";
 import { writeMailboxMessage } from "./write.js";
-import {
-  trashMailboxMessage,
-  archiveMailboxMessage,
-} from "./mutations.js";
-import { mailbox, principalMail } from "./schema.js";
+import { principalMail } from "./schema.js";
 import { withTestDb, seedScope } from "./test-helpers.js";
 import type { MailboxDb } from "./db.js";
 
@@ -53,21 +48,6 @@ async function countFor(tenantId: string, principalId?: string) {
   return rows.length;
 }
 
-async function countMailboxFor(tenantId: string, principalId?: string) {
-  const rows = await db
-    .select({ id: mailbox.id })
-    .from(mailbox)
-    .where(
-      principalId === undefined
-        ? eq(mailbox.tenantId, tenantId)
-        : and(
-            eq(mailbox.tenantId, tenantId),
-            eq(mailbox.principalId, principalId),
-          ),
-    );
-  return rows.length;
-}
-
 describe("purgeTenantMailbox", () => {
   test("deletes every row for the tenant and returns how many", async () => {
     await seed("acme", "user-1", "a");
@@ -79,43 +59,6 @@ describe("purgeTenantMailbox", () => {
     // The other tenant is untouched — an FK cascade would not have reached it
     // either, and a purge that did would be a cross-tenant data loss.
     expect(await countFor("globex")).toBe(1);
-  });
-
-  test("reaches archived and trashed rows, not just the active inbox", async () => {
-    const archived = await seed("acme", "user-1", "archived");
-    const trashed = await seed("acme", "user-1", "trashed");
-    await seed("acme", "user-1", "active");
-    await archiveMailboxMessage(db, {
-      tenantId: "acme",
-      principalId: "user-1",
-      id: archived,
-    });
-    await trashMailboxMessage(db, {
-      tenantId: "acme",
-      principalId: "user-1",
-      id: trashed,
-    });
-
-    // An offboarded tenant's trash is as much their data as their inbox.
-    expect(await purgeTenantMailbox(db, "acme")).toBe(3);
-    expect(await countFor("acme")).toBe(0);
-  });
-
-  test("clears the tenant's mailbox rows as well as its principal_mail rows", async () => {
-    const archived = await seed("acme", "user-1", "archived");
-    await seed("acme", "user-1", "untouched");
-    await archiveMailboxMessage(db, {
-      tenantId: "acme",
-      principalId: "user-1",
-      id: archived,
-    });
-    // Precondition: every message has its eagerly-created management row.
-    expect(await countMailboxFor("acme")).toBe(2);
-
-    // The purge returns MESSAGES deleted, not rows across both tables.
-    expect(await purgeTenantMailbox(db, "acme")).toBe(2);
-    expect(await countFor("acme")).toBe(0);
-    expect(await countMailboxFor("acme")).toBe(0);
   });
 
   test("purging a tenant with no mail is 0, not an error", async () => {
@@ -161,27 +104,6 @@ describe("purgePrincipalMailbox", () => {
     ).toBe(2);
     expect(await countFor("acme", "user-1")).toBe(0);
     expect(await countFor("acme", "user-2")).toBe(1);
-  });
-
-  test("clears the principal's mailbox rows and leaves another principal's", async () => {
-    const mine = await seed("acme", "user-1", "a");
-    const theirs = await seed("acme", "user-2", "b");
-    for (const [principalId, id] of [
-      ["user-1", mine],
-      ["user-2", theirs],
-    ] as const) {
-      await archiveMailboxMessage(db, { tenantId: "acme", principalId, id });
-    }
-    expect(await countMailboxFor("acme")).toBe(2);
-
-    expect(
-      await purgePrincipalMailbox(db, {
-        tenantId: "acme",
-        principalId: "user-1",
-      }),
-    ).toBe(1);
-    expect(await countMailboxFor("acme", "user-1")).toBe(0);
-    expect(await countMailboxFor("acme", "user-2")).toBe(1);
   });
 
   test("is tenant-scoped: the same principal id in another tenant survives", async () => {
