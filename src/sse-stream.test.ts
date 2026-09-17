@@ -19,6 +19,8 @@ describe("SSE stream", () => {
       db,
       bus,
       resolvePrincipal: () => ({ tenantId: "t1", principalId: "p1" }),
+      senderAddressFor: () => "sender@t1.example",
+      deliver: () => {},
     });
     const res = await app.request("/me/inbox/events");
     expect(res.status).toBe(200);
@@ -70,6 +72,8 @@ describe("SSE stream", () => {
       db,
       bus,
       resolvePrincipal: () => ({ tenantId: "tenantA", principalId: "alice" }),
+      senderAddressFor: () => "sender@tenantA.example",
+      deliver: () => {},
     });
     const res = await app.request("/me/inbox/events");
     expect(res.status).toBe(200);
@@ -131,6 +135,8 @@ describe("SSE stream", () => {
       db,
       bus,
       resolvePrincipal: () => scope,
+      senderAddressFor: () => "sender@t1.example",
+      deliver: () => {},
       // Short heartbeat so the handler notices the overflow-close promptly.
       heartbeatIntervalMs: 50,
     });
@@ -196,6 +202,8 @@ describe("SSE stream", () => {
       db,
       bus,
       resolvePrincipal: () => scope,
+      senderAddressFor: () => "sender@t1.example",
+      deliver: () => {},
       // Short heartbeat so the loop notices `closed` and runs finally promptly.
       heartbeatIntervalMs: 50,
     });

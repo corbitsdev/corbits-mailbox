@@ -19,6 +19,8 @@ function stream(db: MailboxDb, heartbeatIntervalMs: number) {
     db,
     bus,
     resolvePrincipal: () => SCOPE,
+      senderAddressFor: () => "sender@t1.example",
+      deliver: () => {},
     heartbeatIntervalMs,
   });
   return { app, bus };
@@ -122,6 +124,8 @@ describe("SSE heartbeat", () => {
       db,
       bus,
       resolvePrincipal: () => SCOPE,
+      senderAddressFor: () => "sender@t1.example",
+      deliver: () => {},
     });
     const res = await app.request("/me/inbox/events");
 
@@ -144,6 +148,8 @@ describe("SSE heartbeat", () => {
       db,
       bus: createInMemoryMailboxEventBus(),
       resolvePrincipal: () => SCOPE,
+      senderAddressFor: () => "sender@t1.example",
+      deliver: () => {},
     };
     for (const heartbeatIntervalMs of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
       expect(() =>

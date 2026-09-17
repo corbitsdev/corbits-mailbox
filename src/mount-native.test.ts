@@ -22,6 +22,8 @@ function buildApp() {
     db,
     bus: createInMemoryMailboxEventBus(),
     resolvePrincipal: () => SCOPE,
+    senderAddressFor: () => "p1@t1.example",
+    deliver: () => {},
   });
   return app;
 }

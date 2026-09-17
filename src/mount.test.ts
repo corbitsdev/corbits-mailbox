@@ -20,6 +20,8 @@ function buildApp(
     db,
     bus: createInMemoryMailboxEventBus(),
     resolvePrincipal,
+    senderAddressFor: () => "sender@t1.example",
+    deliver: () => {},
   });
   return app;
 }
