@@ -7,7 +7,11 @@ export {
   MAX_MAILBOX_PAGE_LIMIT,
   MAX_PENDING_SSE_EVENTS,
 } from "./mount.js";
-export type { MountMailboxOpts, ResolvedPrincipal } from "./mount.js";
+export type {
+  MountMailboxOpts,
+  ResolvedPrincipal,
+  OutgoingMailboxMessage,
+} from "./mount.js";
 
 export { runMailboxMigrations, MigrationChecksumError } from "./migrations.js";
 

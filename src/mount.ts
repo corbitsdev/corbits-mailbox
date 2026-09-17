@@ -1,6 +1,7 @@
 import type { Context, Env, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { describeRoute } from "hono-openapi";
+import { type } from "arktype";
 import { getLogger } from "@intx/log";
 import { executeSearch, executeThread } from "@intx/mailbox";
 import type { Thread } from "@intx/types/runtime";
@@ -13,10 +14,19 @@ import {
   type MailboxEventOp,
 } from "./bus.js";
 import { openNativeMailboxStore, moveNativeMailboxMessage } from "./native-store.js";
+import { assertMsgId, buildMailFrame, generateMailboxMessageId, headerValue } from "./frame.js";
 
 const logger = getLogger(["corbits-mailbox", "mount"]);
 
 export type ResolvedPrincipal = { tenantId: string; principalId: string };
+
+/** A message this package has assembled and appended to the caller's Sent folder. */
+export type OutgoingMailboxMessage = {
+  raw: Uint8Array;
+  from: string;
+  to: string[];
+  messageId: string;
+};
 
 export type MountMailboxOpts = {
   db: MailboxDb;
@@ -29,7 +39,29 @@ export type MountMailboxOpts = {
    * proxies default to.
    */
   heartbeatIntervalMs?: number;
+  /**
+   * The caller's own address, as the host resolves it — the `From:` of every
+   * message `POST /me/inbox/send` builds.
+   */
+  senderAddressFor: (
+    principal: ResolvedPrincipal,
+  ) => Promise<string> | string;
+  /**
+   * The host's actual transport. This package only builds the RFC 5322
+   * message and appends a copy to the caller's `Sent` folder — it never puts
+   * a byte on a wire itself. `POST /me/inbox/send` calls this, once, after
+   * that append settles; the host owns getting `message.raw` to
+   * `message.to`.
+   */
+  deliver: (message: OutgoingMailboxMessage) => Promise<void> | void;
 };
+
+const SendMailboxMessageSchema = type({
+  to: "string[] > 0",
+  "subject?": "string",
+  body: "string > 0",
+  "inReplyTo?": "string",
+});
 
 const DEFAULT_LIMIT = 50;
 /** Documented ceiling on `?limit=`. Exceeding it is a 400, never a silent clamp. */
@@ -170,7 +202,7 @@ export function mountMailbox<E extends Env>(
   app: Hono<E>,
   opts: MountMailboxOpts,
 ): Hono<E> {
-  const { db, bus, resolvePrincipal } = opts;
+  const { db, bus, resolvePrincipal, senderAddressFor, deliver } = opts;
   const heartbeatIntervalMs =
     opts.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
   if (!Number.isFinite(heartbeatIntervalMs) || heartbeatIntervalMs <= 0) {
@@ -352,6 +384,111 @@ export function mountMailbox<E extends Env>(
       const root = threads.find((thread) => thread.ref.uid === rootUid);
       if (!root) return c.json({ error: "Thread not found" }, 404);
       return c.json({ thread: enrichThread(store, root) });
+    },
+  );
+
+  app.post(
+    "/me/inbox/send",
+    describeRoute({
+      tags: TAGS,
+      summary: "Send a message from the caller's mailbox",
+      description:
+        "Builds an RFC 5322 message, appends a copy to the caller's Sent " +
+        "folder via the native store, then hands it to the host's own " +
+        "`deliver` — this package owns no transport.",
+      responses: {
+        200: { description: "The Sent copy's messageId and uid" },
+        400: { description: "Malformed body" },
+        403: { description: "No resolvable principalId" },
+      },
+    }),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    async (c: Context<any, any, any>) => {
+      const resolved = await resolvePrincipal(c);
+      if (!resolved) return c.json({ error: "No resolvable principalId" }, 403);
+
+      let json: unknown;
+      try {
+        json = await c.req.json();
+      } catch {
+        return c.json({ error: "Malformed JSON body" }, 400);
+      }
+      const parsed = SendMailboxMessageSchema(json);
+      if (parsed instanceof type.errors) {
+        return c.json({ error: parsed.summary }, 400);
+      }
+
+      const fromAddress = headerValue(await senderAddressFor(resolved));
+      const messageId = generateMailboxMessageId(fromAddress);
+      const subject = parsed.subject ?? "";
+
+      let inReplyTo: string | undefined;
+      let references: string[] | undefined;
+      if (parsed.inReplyTo !== undefined) {
+        inReplyTo = headerValue(parsed.inReplyTo);
+        try {
+          assertMsgId(inReplyTo, "inReplyTo");
+        } catch (err) {
+          return c.json({ error: (err as Error).message }, 400);
+        }
+        // Best-effort ancestry lookup: the parent's own References chain,
+        // followed by the parent itself. A parent this store cannot find
+        // (a different mailbox, a purged message) still threads on
+        // `inReplyTo` alone — the chain just starts here instead of further
+        // back.
+        let parentReferences: string[] = [];
+        for (const folder of LIST_FOLDERS) {
+          const folderStore = await openNativeMailboxStore(db, {
+            ...resolved,
+            folder,
+          });
+          const parent = folderStore.messages.find(
+            (m) => m.envelope.messageId === inReplyTo,
+          );
+          if (parent) {
+            parentReferences = [...parent.envelope.references];
+            break;
+          }
+        }
+        references = [...parentReferences, inReplyTo];
+      }
+
+      const frameArgs: Parameters<typeof buildMailFrame>[0] = {
+        from: fromAddress,
+        to: parsed.to.join(", "),
+        subject,
+        body: parsed.body,
+        messageId,
+      };
+      if (inReplyTo !== undefined) frameArgs.inReplyTo = inReplyTo;
+      if (references !== undefined) frameArgs.references = references;
+      const raw = buildMailFrame(frameArgs);
+
+      const sentStore = await openNativeMailboxStore(db, {
+        ...resolved,
+        folder: "Sent",
+      });
+      const uid = sentStore.append(
+        raw,
+        {
+          messageId,
+          from: fromAddress,
+          to: parsed.to,
+          subject,
+          date: new Date(),
+          inReplyTo,
+          references: references ?? [],
+          interchangeType: undefined,
+          interchangeCorrelationId: undefined,
+        },
+        [],
+      );
+      await sentStore.settled;
+      publish(resolved, `Sent:${uid}`, "create");
+
+      await deliver({ raw, from: fromAddress, to: parsed.to, messageId });
+
+      return c.json({ messageId, uid });
     },
   );
 

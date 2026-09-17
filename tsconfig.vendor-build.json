@@ -3,10 +3,9 @@
   "compilerOptions": {
     "types": ["node"],
     "noEmit": false,
-    "emitDeclarationOnly": true,
     "declaration": true,
     "declarationMap": false,
-    "outDir": "dist/.vendor-types-raw",
+    "outDir": "dist/.vendor-build-raw",
     "rootDir": "."
   },
   "include": [

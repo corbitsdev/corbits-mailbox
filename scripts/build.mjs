@@ -6,21 +6,22 @@
  * dependencies at this pin) are vendored under `vendor/` — see
  * VENDORED.md — because `@intx/mailbox` has never been published. A
  * published `@corbits/mailbox` therefore cannot depend on them: there is
- * nothing on npm for a consumer to install. Instead this build BUNDLES the
- * three vendored packages into `dist/index.js`, so a plain `npm install` of
- * the tarball is self-contained. Every other dependency (the real npm
- * packages in `dependencies`/`peerDependencies`) stays external — the
- * consumer installs those themselves.
+ * nothing on npm for a consumer to install. Instead this build emits the
+ * three vendored packages' own JS (via `tsc`, no bundler) into
+ * `dist/vendor/<name>/`, so a plain `npm install` of the tarball is
+ * self-contained.
  *
- * Type declarations follow the same split: `dist/*.d.ts` is emitted from
- * `src/` as before, but it still contains bare `@intx/mailbox` /
- * `@intx/mime` / `@intx/types` import specifiers (tsc does not rewrite
- * import text just because `paths` resolved it — that mapping is
- * compile-time only). A consumer's own `tsc` would fail to resolve those
- * the same way Node failed to resolve the bare runtime import. So this
- * script also compiles the three vendored packages' own declarations into
- * `dist/vendor/<name>/`, then rewrites every bare `@intx/*` specifier in
- * `dist/**\/*.d.ts` to a relative path into `dist/vendor/`.
+ * There is no bundler anywhere in this build. `tsc` emits our own `src/`
+ * as plain JS + `.d.ts` (module-for-module, matching the source layout),
+ * and separately emits the three vendored packages the same way. Every
+ * bare `@intx/mailbox` / `@intx/mime` / `@intx/types` import specifier
+ * (tsc does not rewrite import text just because `paths` resolved it —
+ * that mapping is compile-time only) is then rewritten, in BOTH the
+ * emitted `.js` and the emitted `.d.ts`, to a relative path into
+ * `dist/vendor/`. Every other dependency (the real npm packages in
+ * `dependencies`/`peerDependencies`, plus `@intx/crypto`/`@intx/log`,
+ * which are real npm packages too) is left alone for the consumer to
+ * install.
  */
 import { execFileSync } from "node:child_process";
 import {
@@ -44,13 +45,13 @@ function run(command, args) {
 
 rmSync(dist, { recursive: true, force: true });
 
-// 1. Declarations for our own src/, unchanged in shape from before.
+// 1. Our own src/: plain tsc JS emit + declarations, module-for-module.
 run("bun", ["x", "tsc", "-p", "tsconfig.build.json"]);
 
-// 2. Declarations for the three vendored packages, compiled standalone so
-//    they can be relocated under dist/vendor/ and referenced by relative
-//    path instead of by bare package name.
-run("bun", ["x", "tsc", "-p", "tsconfig.vendor-types.json"]);
+// 2. The three vendored packages: same plain tsc JS + declaration emit,
+//    compiled standalone so they can be relocated under dist/vendor/ and
+//    referenced by relative path instead of by bare package name.
+run("bun", ["x", "tsc", "-p", "tsconfig.vendor-build.json"]);
 
 const VENDOR_PACKAGES = {
   "intx-mailbox": "@intx/mailbox",
@@ -58,61 +59,28 @@ const VENDOR_PACKAGES = {
   "intx-types": "@intx/types",
 };
 
-const rawVendorRoot = join(dist, ".vendor-types-raw", "vendor");
+const rawVendorRoot = join(dist, ".vendor-build-raw", "vendor");
 for (const dir of Object.keys(VENDOR_PACKAGES)) {
   const from = join(rawVendorRoot, dir, "src");
   const to = join(dist, "vendor", dir);
   mkdirSync(to, { recursive: true });
   cpSync(from, to, { recursive: true });
 }
-rmSync(join(dist, ".vendor-types-raw"), { recursive: true, force: true });
+rmSync(join(dist, ".vendor-build-raw"), { recursive: true, force: true });
 
-// 3. Bundle the runtime JS. @intx/mailbox, @intx/mime, and @intx/types get
-//    inlined (they're intentionally left off the `--external` list);
-//    everything else — the package's real npm dependencies/peerDependencies
-//    — is left for the consumer to install.
-const EXTERNAL = [
-  "@hono/standard-validator",
-  "@standard-community/standard-json",
-  "@standard-community/standard-openapi",
-  "arktype",
-  "hono-openapi",
-  "@intx/crypto",
-  "@intx/log",
-  "drizzle-orm",
-  "hono",
-  "postgres",
-];
-// `--ignore-dce-annotations`: this package's own `sideEffects: false` is
-// metadata for CONSUMER bundlers, not an instruction to bun about its own
-// build. Without this flag, bun (at least on Linux) reads that field for
-// this build too and tree-shakes src/index.ts's re-export-only module down
-// to a bare `export { ... }` stub with every import deleted — the named
-// bindings are gone but the export list survives, so the emitted dist/
-// throws "X is not declared in this file" for every export at import time.
-run("bun", [
-  "build",
-  "src/index.ts",
-  "--outdir",
-  dist,
-  "--target",
-  "node",
-  "--format",
-  "esm",
-  "--ignore-dce-annotations",
-  ...EXTERNAL.flatMap((pkg) => ["--external", pkg]),
-]);
-
-// 4. Rewrite bare `@intx/*` specifiers in every emitted .d.ts (ours and the
-//    vendored packages' own, which cross-reference each other) into
-//    relative paths under dist/vendor/.
-function listDtsFiles(dir) {
+// 3. Rewrite bare `@intx/*` specifiers in every emitted file — `.js` (ours
+//    and the vendored packages' own runtime code) and `.d.ts` (same,
+//    cross-referencing each other) — into relative paths under
+//    dist/vendor/. A package's own `exports` subpaths (e.g.
+//    `@intx/types/runtime`) map 1:1 onto that package's own src/ file
+//    names, which is exactly how they land under dist/vendor/<pkg>/.
+function listEmittedFiles(dir) {
   const out = [];
   for (const entry of readdirSync(dir)) {
     const full = join(dir, entry);
     if (statSync(full).isDirectory()) {
-      out.push(...listDtsFiles(full));
-    } else if (entry.endsWith(".d.ts")) {
+      out.push(...listEmittedFiles(full));
+    } else if (entry.endsWith(".js") || entry.endsWith(".d.ts")) {
       out.push(full);
     }
   }
@@ -137,9 +105,22 @@ function rewriteImports(file) {
       return `from "${rel}"`;
     },
   );
+  // The vendored packages' own source (unlike ours) writes extensionless
+  // relative specifiers, resolved at dev time only via `moduleResolution:
+  // "bundler"`. `tsc` emits import text verbatim — it does not add
+  // extensions — so a plain `node` ESM resolver (no bundler, no
+  // resolution-mode help) fails on them. Append `.js` to any relative
+  // specifier that doesn't already end in a resolvable extension.
+  text = text.replace(
+    /from\s+"(\.\.?\/[^"]+)"/g,
+    (match, spec) => {
+      if (/\.(js|json|mjs|cjs)$/.test(spec)) return match;
+      return `from "${spec}.js"`;
+    },
+  );
   writeFileSync(file, text);
 }
 
-for (const file of listDtsFiles(dist)) {
+for (const file of listEmittedFiles(dist)) {
   rewriteImports(file);
 }

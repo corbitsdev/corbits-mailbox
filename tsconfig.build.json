@@ -5,7 +5,6 @@
       "node"
     ],
     "noEmit": false,
-    "emitDeclarationOnly": true,
     "declaration": true,
     "declarationMap": true,
     "outDir": "dist",
