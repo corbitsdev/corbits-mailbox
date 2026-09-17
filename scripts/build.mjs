@@ -83,6 +83,13 @@ const EXTERNAL = [
   "hono",
   "postgres",
 ];
+// `--ignore-dce-annotations`: this package's own `sideEffects: false` is
+// metadata for CONSUMER bundlers, not an instruction to bun about its own
+// build. Without this flag, bun (at least on Linux) reads that field for
+// this build too and tree-shakes src/index.ts's re-export-only module down
+// to a bare `export { ... }` stub with every import deleted — the named
+// bindings are gone but the export list survives, so the emitted dist/
+// throws "X is not declared in this file" for every export at import time.
 run("bun", [
   "build",
   "src/index.ts",
@@ -92,6 +99,7 @@ run("bun", [
   "node",
   "--format",
   "esm",
+  "--ignore-dce-annotations",
   ...EXTERNAL.flatMap((pkg) => ["--external", pkg]),
 ]);
 
