@@ -34,6 +34,7 @@ beforeEach(async () => {
 async function send(args: {
   principalId?: string;
   subject: string;
+  body?: string;
   inReplyTo?: string;
   references?: string[];
   refs?: { kind: string; id: string }[];
@@ -46,7 +47,7 @@ async function send(args: {
     address: `${principalId}@t1.example`,
     fromAddress: "sender@t1.example",
     subject: args.subject,
-    body: "Body",
+    body: args.body ?? "Body",
     messageKey: args.messageKey,
     ...(args.inReplyTo !== undefined ? { inReplyTo: args.inReplyTo } : {}),
     ...(args.references !== undefined ? { references: args.references } : {}),
@@ -95,6 +96,32 @@ describe("readMailboxThread", () => {
     expect(byId.get(root.id)?.parentId).toBeNull();
     expect(byId.get(first.id)?.parentId).toBe(root.id);
     expect(byId.get(second.id)?.parentId).toBe(first.id);
+  });
+
+  test("each message carries its own decoded body", async () => {
+    const root = await send({
+      subject: "Root",
+      body: "Root body text",
+      refs: [WORKBENCH],
+      messageKey: "root",
+    });
+    const reply = await send({
+      subject: "Re: Root",
+      body: "Reply body text",
+      inReplyTo: root.messageId,
+      references: [root.messageId],
+      refs: [WORKBENCH],
+      messageKey: "reply",
+    });
+
+    const page = await readMailboxThread(
+      db,
+      { tenantId: "t1", principalId: "p1" },
+      { ref: WORKBENCH },
+    );
+    const byId = new Map(page.items.map((item) => [item.id, item.body]));
+    expect(byId.get(root.id)).toBe("Root body text");
+    expect(byId.get(reply.id)).toBe("Reply body text");
   });
 
   test("falls back to References, newest ancestor first, when In-Reply-To names nothing present", async () => {
@@ -694,6 +721,30 @@ describe("readMailboxThreadByMessageId", () => {
       { rootMessageId: root.messageId },
     );
     expect(page?.items.map((item) => item.id)).toEqual([root.id, reply.id]);
+  });
+
+  test("each message carries its own decoded body", async () => {
+    const root = await send({
+      subject: "Root",
+      body: "Root body text",
+      messageKey: "root",
+    });
+    const reply = await send({
+      subject: "Re: Root",
+      body: "Reply body text",
+      inReplyTo: root.messageId,
+      references: [root.messageId],
+      messageKey: "reply",
+    });
+
+    const page = await readMailboxThreadByMessageId(
+      db,
+      { tenantId: "t1", principalId: "p1" },
+      { rootMessageId: root.messageId },
+    );
+    const byId = new Map(page?.items.map((item) => [item.id, item.body]));
+    expect(byId.get(root.id)).toBe("Root body text");
+    expect(byId.get(reply.id)).toBe("Reply body text");
   });
 
   test("a non-root Message-ID resolves to null", async () => {

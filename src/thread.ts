@@ -13,6 +13,7 @@ import { getLogger } from "@intx/log";
 import { base64urlDecode, base64urlEncode } from "@intx/types";
 import { mailbox, principalMail } from "./schema.js";
 import type { MailboxDb } from "./db.js";
+import { decodeMailFrame } from "./frame.js";
 import {
   MailboxRefSchema,
   PRINCIPAL_MAIL_LIST_COLUMNS,
@@ -57,6 +58,13 @@ export const MailboxThreadMessageSchema = type({
   read: "boolean",
   archived: "boolean",
   parentId: "string | null",
+  /**
+   * The message's full text body, decoded from the stored MIME frame — the
+   * same body `MailboxMessageDetailSchema` (`read.ts`) returns for a single
+   * message. A frame the MIME parser rejects degrades to `""` (logged),
+   * never a failed read.
+   */
+  body: "string",
 });
 export type MailboxThreadMessage = typeof MailboxThreadMessageSchema.infer;
 
@@ -337,6 +345,9 @@ export async function readMailboxThread(
       createdAtText: sql<string>`to_char(${principalMail.createdAt}, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
       readAt: mailbox.readAt,
       archivedAt: mailbox.archivedAt,
+      // Selected in the same scan (never a per-row follow-up query) so `body`
+      // can be decoded without an N+1 — see `decodeMailFrame` below.
+      raw: principalMail.raw,
     })
     .from(principalMail)
     .leftJoin(mailbox, eq(mailbox.id, principalMail.id))
@@ -351,6 +362,7 @@ export async function readMailboxThread(
   const projected = pageRows.map((row) => ({
     row,
     references: readRowReferences(row.references, row.id, dropped),
+    body: decodeMailFrame(row.raw)?.body ?? "",
   }));
   reportDroppedReferences(dropped);
 
@@ -442,7 +454,7 @@ export async function readMailboxThread(
 
   const finalParent = resolveAcyclicParents(nodes, rawParent);
 
-  const items = projected.map(({ row, references }) => {
+  const items = projected.map(({ row, references, body }) => {
     const item: MailboxThreadMessage = {
       id: row.id,
       // The row id is the last resort, not the cache: a frame with no
@@ -454,6 +466,7 @@ export async function readMailboxThread(
       read: row.readAt !== null,
       archived: row.archivedAt !== null,
       parentId: finalParent.get(row.id) ?? null,
+      body,
     };
     if (row.inReplyTo !== null) item.inReplyTo = row.inReplyTo;
     if (row.subject !== null) item.subject = row.subject;
@@ -658,7 +671,13 @@ export function decodeMailboxThreadListCursor(
   return result;
 }
 
-/** One row as scanned for tenant-wide thread grouping — never selects `raw`. */
+/**
+ * One row as scanned for tenant-wide thread grouping.
+ *
+ * `body` is decoded from `raw` in the same scan (never a per-row follow-up
+ * query) so `readMailboxThreadByMessageId` can serve message text without an
+ * N+1 — see `decodeMailFrame`.
+ */
 type TenantScanRow = {
   id: string;
   messageId: string | null;
@@ -668,12 +687,21 @@ type TenantScanRow = {
   subject: string | null;
   createdAtText: string;
   read: boolean;
+  body: string;
 };
 
+/**
+ * @param includeBody Also select `raw` and decode `body` in this same scan
+ *   (never a per-row follow-up query). Only `readMailboxThreadByMessageId`
+ *   needs message text; `listMailboxThreads` never surfaces body and does
+ *   not pay for decoding or transferring `raw` across up to
+ *   `MAX_MAILBOX_THREAD_LIST_SCAN_ROWS` rows.
+ */
 async function scanTenantThreadRows(
   db: MailboxDb,
   scope: MailboxThreadScope,
   refs?: MailboxRef[],
+  includeBody = false,
 ): Promise<TenantScanRow[]> {
   const conditions = [
     eq(principalMail.tenantId, scope.tenantId),
@@ -696,6 +724,7 @@ async function scanTenantThreadRows(
       subject: principalMail.subject,
       createdAtText: sql<string>`to_char(${principalMail.createdAt}, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
       readAt: mailbox.readAt,
+      ...(includeBody ? { raw: principalMail.raw } : {}),
     })
     .from(principalMail)
     .leftJoin(mailbox, eq(mailbox.id, principalMail.id))
@@ -721,6 +750,7 @@ async function scanTenantThreadRows(
     subject: row.subject,
     createdAtText: row.createdAtText,
     read: row.readAt !== null,
+    body: "raw" in row && row.raw ? (decodeMailFrame(row.raw)?.body ?? "") : "",
   }));
   reportDroppedReferences(dropped);
   return projected;
@@ -989,7 +1019,7 @@ export async function readMailboxThreadByMessageId(
     cursor = decoded;
   }
 
-  const rows = await scanTenantThreadRows(db, scope);
+  const rows = await scanTenantThreadRows(db, scope, undefined, true);
   const { nodes, byMessageId, finalParent } = buildTenantThreadGraph(rows);
   const startId = byMessageId.get(args.rootMessageId);
   if (startId === undefined) return null;
@@ -1029,6 +1059,7 @@ export async function readMailboxThreadByMessageId(
       read: row.read,
       archived: false,
       parentId: finalParent.get(row.id) ?? null,
+      body: row.body,
     };
     if (row.inReplyTo !== null) item.inReplyTo = row.inReplyTo;
     if (row.subject !== null) item.subject = row.subject;
