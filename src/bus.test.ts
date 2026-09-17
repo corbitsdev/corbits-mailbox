@@ -1,12 +1,10 @@
 import { describe, test, expect } from "bun:test";
 import { type } from "arktype";
 import {
-  MAILBOX_EVENT_OPS,
   MailboxEventSchema,
   publishMailboxEvent,
   type MailboxEvent,
 } from "./bus.js";
-import { MAILBOX_BULK_ACTIONS } from "./mutations.js";
 
 const SCOPE = { tenantId: "t1", principalId: "p1" };
 const noopLogger = { error: () => {} };
@@ -35,19 +33,6 @@ describe("MailboxEventSchema", () => {
       op: "delete_everything",
     });
     expect(result instanceof type.errors).toBe(true);
-  });
-});
-
-describe("MAILBOX_EVENT_OPS vs MAILBOX_BULK_ACTIONS", () => {
-  // MAILBOX_EVENT_OPS is duplicated from MAILBOX_BULK_ACTIONS rather than
-  // importing it (to avoid a bus.ts -> mutations.ts -> write.ts -> bus.ts
-  // cycle), and nothing at runtime enforces that the copy stays in sync.
-  // This is that enforcement: a bulk action added to mutations.ts without a
-  // matching entry here fails this test instead of silently losing its op.
-  test("every bulk action has a matching event op", () => {
-    for (const action of MAILBOX_BULK_ACTIONS) {
-      expect(MAILBOX_EVENT_OPS).toContain(action);
-    }
   });
 });
 

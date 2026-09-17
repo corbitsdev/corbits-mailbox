@@ -1,26 +1,11 @@
 import { type } from "arktype";
 
 /**
- * The operation that produced an event, when the publisher knows it. Mirrors
- * `MailboxBulkAction` in mutations.ts (`mark_read`, `mark_unread`, `trash`,
- * `archive`, `restore`) plus the three operations mutations.ts does not own:
- * `create` (a new message landed, from `writeMailboxMessage`,
- * `deliverInboxItems`, or `createMailboxPersist`), `enrich` (triage stamp),
- * `assign` (delegation). Duplicated here rather than imported from
- * mutations.ts to avoid a bus.ts -> mutations.ts -> write.ts -> bus.ts import
- * cycle; mount.ts's route table keeps the two lists in sync, and
- * `bus.test.ts` asserts every `MailboxBulkAction` value is a member of this
- * list.
- *
- * This is a deliberately different name from its two siblings, not an
- * accident: mount.ts's HTTP route table calls the same five shared values a
- * "verb" (the path segment), mutations.ts calls them an "action", and this
- * is an "op". The three names share five values because a single-message
- * mutation and its bulk equivalent report the same op, but `MailboxEventOp`
- * is a strict superset — `create`, `enrich`, `assign` are not bulk actions
- * and never will be — so this stays its own vocabulary rather than
- * importing/aliasing `MailboxBulkAction`, which would claim an equivalence
- * the two sets don't have.
+ * The operation that produced an event, when the publisher knows it: `create`
+ * (a new message landed, from `writeMailboxMessage`, `deliverInboxItems`, or
+ * `createMailboxPersist`) plus the five verbs `mount.ts`'s route table
+ * registers over the native store (`mark_read`, `mark_unread`, `archive`,
+ * `trash`, `restore`).
  */
 export const MAILBOX_EVENT_OPS = [
   "create",
@@ -29,8 +14,6 @@ export const MAILBOX_EVENT_OPS = [
   "trash",
   "archive",
   "restore",
-  "enrich",
-  "assign",
 ] as const;
 export type MailboxEventOp = (typeof MAILBOX_EVENT_OPS)[number];
 

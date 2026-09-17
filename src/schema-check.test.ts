@@ -88,29 +88,20 @@ async function bootFailure(promise: Promise<void>): Promise<Error> {
 }
 
 describe("expectedColumnTypes", () => {
-  test("is derived from the drizzle tables, covering both of them", () => {
+  test("is derived from the drizzle tables: the mail plane alone, since 0005 dropped the management table", () => {
     const expected = expectedColumnTypes();
     const tables = new Set(expected.map((e) => e.table));
-    expect(tables).toEqual(new Set(["principal_mail", "mailbox"]));
+    expect(tables).toEqual(new Set(["principal_mail"]));
   });
 
   test("expects zoneless timestamps and text ids on every relevant column", () => {
     const byKey = new Map(
       expectedColumnTypes().map((e) => [`${e.table}.${e.column}`, e.dataType]),
     );
-    // The two conventions this package just adopted, asserted from the
-    // derivation rather than from the DDL — so reverting either the schema or
-    // the migration on its own is caught here as well as by the parity suite.
-    for (const key of [
-      "principal_mail.created_at",
-      "mailbox.read_at",
-      "mailbox.archived_at",
-      "mailbox.trashed_at",
-    ]) {
-      expect(byKey.get(key)).toBe("timestamp without time zone");
-    }
+    expect(byKey.get("principal_mail.created_at")).toBe(
+      "timestamp without time zone",
+    );
     expect(byKey.get("principal_mail.id")).toBe("text");
-    expect(byKey.get("mailbox.id")).toBe("text");
     expect(byKey.get("principal_mail.raw")).toBe("bytea");
     expect(byKey.get("principal_mail.refs")).toBe("jsonb");
   });
@@ -192,84 +183,21 @@ describe("boot against a host table this package did not create", () => {
     expect(await ledgerRows(schema)).toBe(0);
   });
 
-  test("a missing INDEXED column is rejected earlier still, by the DDL itself", async () => {
-    // Not every missing column reaches the schema check: the migration's own
-    // `CREATE INDEX IF NOT EXISTS` runs first and Postgres answers 42703 for a
-    // column that is not there. That is a perfectly good rejection — it is
-    // loud, it is inside the same transaction, and it leaves no ledger row —
-    // but it is NOT a `SchemaTypeMismatchError`, and a host catching only that
-    // type would miss it. Pinned here so the difference is documented rather
-    // than discovered.
-    const schema = "mailbox";
-    await inFreshSchema(schema, async ({ db }) => {
-      await admin.unsafe(`
-        CREATE TABLE "${schema}"."mailbox" (
-          "id" text PRIMARY KEY,
-          "tenant_id" text NOT NULL,
-          "principal_id" text NOT NULL,
-          "read_at" timestamp,
-          "archived_at" timestamp,
-          "trashed_at" timestamp,
-          "priority" text,
-          "classification" text
-        )`);
-      const failure = await bootFailure(runMailboxMigrations(db));
-      expect(failure).toBeInstanceOf(Error);
-      expect(failure).not.toBeInstanceOf(SchemaTypeMismatchError);
-      expect(failure.message).toContain(
-        "mailbox_tenant_id_principal_id_status_idx",
-      );
-    });
-    expect(await ledgerRows(schema)).toBe(0);
-  });
-
-  test("names every mismatch at once rather than only the first", async () => {
-    const schema = "mailbox";
-    await inFreshSchema(schema, async ({ db }) => {
-      await admin.unsafe(`
-        CREATE TABLE "${schema}"."mailbox" (
-          "id" uuid PRIMARY KEY,
-          "tenant_id" text NOT NULL,
-          "principal_id" text NOT NULL,
-          "read_at" timestamptz,
-          "archived_at" timestamp,
-          "trashed_at" timestamp,
-          "priority" text,
-          "classification" text,
-          "status" text,
-          "assignee" text
-        )`);
-      const failure = (await bootFailure(
-        runMailboxMigrations(db),
-      )) as SchemaTypeMismatchError;
-      expect(failure.mismatches).toEqual([
-        "mailbox.id is uuid, expected text",
-        "mailbox.read_at is timestamp with time zone, " +
-          "expected timestamp without time zone",
-      ]);
-      // The message is what a host operator actually sees, so it has to say
-      // what to do about it, not just what is wrong.
-      expect(failure.message).toContain("CREATE TABLE IF NOT EXISTS");
-      expect(failure.message).toContain("Rename or move the conflicting table");
-    });
-    expect(await ledgerRows(schema)).toBe(0);
-  });
-
   test("a rejected boot leaves the NEXT boot still rejecting", async () => {
     const schema = "mailbox";
     await inFreshSchema(schema, async ({ db }) => {
       await admin.unsafe(`
-        CREATE TABLE "${schema}"."mailbox" (
+        CREATE TABLE "${schema}"."principal_mail" (
           "id" text PRIMARY KEY,
           "tenant_id" text NOT NULL,
           "principal_id" text NOT NULL,
-          "read_at" timestamptz,
-          "archived_at" timestamp,
-          "trashed_at" timestamp,
-          "priority" text,
-          "classification" text,
-          "status" text,
-          "assignee" text
+          "address" text NOT NULL,
+          "direction" text NOT NULL,
+          "raw" bytea NOT NULL,
+          "from_address" text,
+          "message_key" text,
+          "refs" jsonb,
+          "created_at" timestamptz NOT NULL DEFAULT now()
         )`);
       await expect(runMailboxMigrations(db)).rejects.toThrow(
         SchemaTypeMismatchError,
@@ -281,14 +209,6 @@ describe("boot against a host table this package did not create", () => {
         SchemaTypeMismatchError,
       );
       expect(await ledgerRows(schema)).toBe(0);
-      // And the sound table was rolled back too — a partially-built schema
-      // would be its own quiet trap.
-      const rows = await db.execute<{ n: number }>(
-        sql`SELECT count(*)::int AS n FROM information_schema.tables
-             WHERE table_schema = 'mailbox'
-               AND table_name = 'principal_mail'`,
-      );
-      expect(rows[0]!.n).toBe(0);
     });
   });
 });

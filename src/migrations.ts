@@ -337,6 +337,134 @@ export const MIGRATIONS: Migration[] = [
            AND h."references" IS NOT NULL`,
     ],
   },
+  {
+    // The native `MailboxStore` slice: IMAP-shaped columns on the existing mail
+    // plane (folder/uid/modseq/flags), plus a per-(tenant, principal, folder)
+    // counters table. Additive only — the old `mailbox` management columns
+    // (read_at/archived_at/trashed_at/priority/…) are untouched and still the
+    // source of truth for every reader that has not moved to the native store
+    // yet; this migration only backfills the new columns FROM them.
+    id: "0004_native_mailbox_store",
+    statements: [
+      sql`ALTER TABLE "mailbox"."principal_mail"
+         ADD COLUMN IF NOT EXISTS "folder" text NOT NULL DEFAULT 'INBOX'`,
+      sql`ALTER TABLE "mailbox"."principal_mail"
+         ADD COLUMN IF NOT EXISTS "uid" bigint`,
+      sql`ALTER TABLE "mailbox"."principal_mail"
+         ADD COLUMN IF NOT EXISTS "modseq" bigint`,
+      sql`ALTER TABLE "mailbox"."principal_mail"
+         ADD COLUMN IF NOT EXISTS "flags" text[] NOT NULL DEFAULT '{}'`,
+      // Folder + \Seen backfill, from the pre-existing management row: trashed
+      // wins over archived (a message can carry both timestamps; Trash is the
+      // more final state), everything else lands in INBOX. Guarded by
+      // "uid" IS NULL so a re-run (or a fresh row already written through the
+      // native path) is left alone.
+      sql`UPDATE "mailbox"."principal_mail" AS pm
+         SET "folder" = CASE
+               WHEN mb."trashed_at" IS NOT NULL THEN 'Trash'
+               WHEN mb."archived_at" IS NOT NULL THEN 'Archive'
+               ELSE 'INBOX'
+             END,
+             "flags" = CASE
+               WHEN mb."read_at" IS NOT NULL THEN ARRAY['\Seen']
+               ELSE '{}'
+             END
+         FROM "mailbox"."mailbox" AS mb
+         WHERE mb."id" = pm."id" AND pm."uid" IS NULL`,
+      // A message can be delivered before its management row exists in the
+      // eager-creation window; treat that as an untouched INBOX message rather
+      // than leaving folder/flags at their column defaults implicitly.
+      sql`UPDATE "mailbox"."principal_mail"
+         SET "folder" = 'INBOX', "flags" = '{}'
+         WHERE "uid" IS NULL
+           AND "id" NOT IN (SELECT "id" FROM "mailbox"."mailbox")`,
+      // uid/modseq: row order by created_at (then id, for a stable tiebreak),
+      // scoped per (tenant_id, principal_id, folder) — the same scope every
+      // other mailbox counter here uses. Both counters share one sequence per
+      // group; nothing requires them to diverge for a backfilled row.
+      sql`UPDATE "mailbox"."principal_mail" AS pm
+         SET "uid" = seq."rn", "modseq" = seq."rn"
+         FROM (
+           SELECT "id",
+             row_number() OVER (
+               PARTITION BY "tenant_id", "principal_id", "folder"
+               ORDER BY "created_at", "id"
+             ) AS "rn"
+           FROM "mailbox"."principal_mail"
+           WHERE "uid" IS NULL
+         ) AS seq
+         WHERE pm."id" = seq."id"`,
+      // No NOT NULL on "uid"/"modseq": the pre-existing write paths
+      // (`writeMailboxMessage`, `deliverInboxItems`, …) do not populate them,
+      // and this slice is additive-only — they stay nullable so those paths
+      // keep inserting exactly as they do today. Only the native store
+      // populates them, on every row it writes.
+      //
+      // Per-(tenant, principal, folder) IMAP counters. `uid_validity` is
+      // derived once at backfill from that group's earliest `created_at`
+      // (epoch seconds — stable, and distinct across groups created at
+      // different times); a folder created fresh through the native store
+      // stamps its own at creation instead.
+      sql`CREATE TABLE IF NOT EXISTS "mailbox"."mailbox_state" (
+         "tenant_id" text NOT NULL,
+         "principal_id" text NOT NULL,
+         "folder" text NOT NULL,
+         "uid_validity" bigint NOT NULL,
+         "uid_next" bigint NOT NULL,
+         "highest_modseq" bigint NOT NULL,
+         PRIMARY KEY ("tenant_id", "principal_id", "folder"),
+         CONSTRAINT "mailbox_state_tenant_id_tenant_id_fk"
+           FOREIGN KEY ("tenant_id") REFERENCES "public"."tenant" ("id") ON DELETE CASCADE,
+         CONSTRAINT "mailbox_state_principal_id_principal_id_fk"
+           FOREIGN KEY ("principal_id") REFERENCES "public"."principal" ("id") ON DELETE CASCADE
+       )`,
+      sql`INSERT INTO "mailbox"."mailbox_state"
+           ("tenant_id", "principal_id", "folder", "uid_validity", "uid_next", "highest_modseq")
+         SELECT "tenant_id", "principal_id", "folder",
+                extract(epoch FROM min("created_at"))::bigint,
+                max("uid") + 1,
+                max("modseq")
+         FROM "mailbox"."principal_mail"
+         GROUP BY "tenant_id", "principal_id", "folder"
+         ON CONFLICT ("tenant_id", "principal_id", "folder") DO NOTHING`,
+    ],
+  },
+  {
+    // This library exists ONLY to give a human principal a native
+    // `MailboxStore` — every reader and writer now goes through
+    // `NativeMailboxStore`, and the pre-native management layer
+    // (`"mailbox"."mailbox"`: read_at/archived_at/trashed_at,
+    // priority/classification/status/assignee) has no reader left. Dropping
+    // the table drops those columns and their indexes with it, in one
+    // statement, rather than an ALTER per column.
+    //
+    // uid/modseq become NOT NULL: every remaining write path is
+    // `NativeMailboxStore.append`, which always sets both. The backfill below
+    // is defense in depth for a row inserted by the pre-cutover write paths
+    // between `0004` running and this migration — same per-(tenant,
+    // principal, folder) row_number() `0004` used, guarded by "uid" IS NULL
+    // so an already-backfilled row is left alone.
+    id: "0005_drop_pre_native_columns",
+    statements: [
+      sql`UPDATE "mailbox"."principal_mail" AS pm
+         SET "uid" = seq."rn", "modseq" = seq."rn"
+         FROM (
+           SELECT "id",
+             row_number() OVER (
+               PARTITION BY "tenant_id", "principal_id", "folder"
+               ORDER BY "created_at", "id"
+             ) AS "rn"
+           FROM "mailbox"."principal_mail"
+           WHERE "uid" IS NULL
+         ) AS seq
+         WHERE pm."id" = seq."id"`,
+      sql`ALTER TABLE "mailbox"."principal_mail"
+         ALTER COLUMN "uid" SET NOT NULL`,
+      sql`ALTER TABLE "mailbox"."principal_mail"
+         ALTER COLUMN "modseq" SET NOT NULL`,
+      sql`DROP TABLE IF EXISTS "mailbox"."mailbox"`,
+    ],
+  },
 ];
 
 const DIALECT = new PgDialect();

@@ -61,9 +61,9 @@ describe("resolveMailboxRecipients", () => {
     ]);
   });
 
-  test("excludes ins_ instance addresses", () => {
+  test("excludes run_ instance addresses", () => {
     expect(
-      resolveMailboxRecipients(["ins_run42@acme.example"], DOMAIN),
+      resolveMailboxRecipients(["run_42@acme.example"], DOMAIN),
     ).toEqual([]);
   });
 
@@ -78,7 +78,7 @@ describe("resolveMailboxRecipients", () => {
       [
         "usr_alice@acme.example",
         "bob@acme.example",
-        "ins_run42@acme.example",
+        "run_42@acme.example",
         "usr_mallory@evil.example",
         "Carol <usr_carol@ACME.example>",
       ],

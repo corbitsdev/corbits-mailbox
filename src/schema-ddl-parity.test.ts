@@ -8,7 +8,7 @@ import postgres from "postgres";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { sql } from "drizzle-orm";
 import { getTableConfig } from "drizzle-orm/pg-core";
-import { mailbox, principalMail } from "./schema.js";
+import { principalMail } from "./schema.js";
 import { runMailboxMigrations } from "./migrations.js";
 import { createHostControlPlane, TEST_DATABASE_URL } from "./test-helpers.js";
 
@@ -106,14 +106,10 @@ async function liveIndexes(table: string): Promise<IndexDescriptor[]> {
   return rows.map((row) => canonicalizeIndexDef(row.indexdef)).sort();
 }
 
-// Both tables, not just the mail plane: `mailbox` is a public export too, and
-// the divergence this suite exists to catch — a declared index the migrations
-// never create — is exactly as invisible on the newer table as on the older
-// one.
-const TABLES = [
-  { name: "principal_mail", declared: principalMail },
-  { name: "mailbox", declared: mailbox },
-] as const;
+// `mailbox.mailbox` (the pre-native management layer) was dropped in
+// `0005_drop_pre_native_columns` — the mail plane is the only table left to
+// hold to this parity.
+const TABLES = [{ name: "principal_mail", declared: principalMail }] as const;
 
 describe("schema.ts vs. the DDL runMailboxMigrations actually creates", () => {
   for (const { name, declared } of TABLES) {
@@ -122,38 +118,19 @@ describe("schema.ts vs. the DDL runMailboxMigrations actually creates", () => {
     });
   }
 
-  it("indexes the triage columns per tenant_id+principal_id, not as bare single columns", async () => {
-    const live = await liveIndexes("mailbox");
-    for (const column of ["priority", "classification", "status", "assignee"]) {
-      expect(live).toContain(
-        `mailbox_tenant_id_principal_id_${column}_idx USING btree(tenant_id asc, principal_id asc, ${column} asc)`,
-      );
-    }
-    // Bare single-column forms must stay absent: an index on a low-cardinality
-    // column is not an access path the planner would choose.
-    expect(
-      live.filter((descriptor) =>
-        /^mailbox_(priority|classification|status|assignee)_idx USING /.test(
-          descriptor,
-        ),
-      ),
-    ).toEqual([]);
-  });
-
   it("keeps the keyset access path on the mail plane, where the split left it", async () => {
     expect(await liveIndexes("principal_mail")).toContain(
       "principal_mail_tenant_id_principal_id_created_at_id_idx USING btree(tenant_id asc, principal_id asc, created_at desc, id desc)",
     );
   });
 
-  it("carries one partial index per view predicate on mailbox", async () => {
-    // Including unread: every message has an eagerly-created management row,
-    // so the unread count is an index-only scan on this partial index.
-    const live = await liveIndexes("mailbox");
-    for (const name of ["archived_at", "trashed_at", "unread"]) {
-      expect(live).toContain(
-        `mailbox_tenant_id_principal_id_${name}_idx USING btree(tenant_id asc, principal_id asc) [partial]`,
-      );
-    }
+  it("no longer has a live mailbox.mailbox table", async () => {
+    const rows = await drizzle(client).execute<{ exists: boolean }>(sql`
+      SELECT EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = ${SCHEMA} AND table_name = 'mailbox'
+      ) AS "exists"
+    `);
+    expect(rows[0]!.exists).toBe(false);
   });
 });

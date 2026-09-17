@@ -1,14 +1,82 @@
 # corbits-mailbox
 
-**[`@corbits/mailbox`](./package.json)** — a universal, principal-keyed inbox,
-mountable onto a Hono host backed by an Interchange-shaped Postgres. Its tables
-live in a dedicated `mailbox` schema in the host's database, foreign-keyed to
-the host's `tenant` and `principal` tables. Backend only; this package ships no
-UI.
+**[`@corbits/mailbox`](./package.json)** has one job: give a human principal
+a native Interchange mailbox — a real `@intx/mailbox` `MailboxStore` backed by
+Postgres, plus the thin HTTP routes a host's UI needs to list, read, and file
+it. Backend only; this package ships no UI. Everything the earlier,
+pre-native version of this package did — triage (priority/classification/
+status/assignee), delegation, host-defined vocabularies, its own
+threading/search, `/me/threads*` — is gone. The vendored `@intx/mailbox`
+`executeSearch`/`executeThread` are the search and thread primitives now, run
+directly over the native store.
 
 Requires `@intx` 0.2.2 or newer.
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for the data model.
+
+## Mount
+
+```ts
+import { mountMailbox, createInMemoryMailboxEventBus } from "@corbits/mailbox";
+
+mountMailbox(app, {
+  db,
+  bus: createInMemoryMailboxEventBus(),
+  resolvePrincipal: (ctx) => resolveCallerFromRequest(ctx),
+  senderAddressFor: (principal) => resolveCallerAddress(principal),
+  deliver: (message) => hostMailTransport.send(message),
+});
+```
+
+## Routes
+
+All under `/me/inbox`, scoped to the principal `resolvePrincipal` resolves for
+the request. With no resolvable principal, list returns an empty page (200);
+every other route returns 403.
+
+| | |
+| --- | --- |
+| `GET /me/inbox` | Newest first, keyset-paginated by uid. `?folder=` (`INBOX` default, `Archive`, or `Trash`), `?limit=`, `?cursor=`. Each item carries its `uid`, `flags`, parsed `envelope`, and base64 `raw` — the vendored `executeSearch` over the folder's native store, with envelope + raw fetched per ref. |
+| `POST /me/inbox/:uid/read` | `addFlags(uid, ["\Seen"])` |
+| `POST /me/inbox/:uid/unread` | `removeFlags(uid, ["\Seen"])` |
+| `POST /me/inbox/:uid/archive` | `moveNativeMailboxMessage` INBOX → Archive |
+| `POST /me/inbox/:uid/trash` | `moveNativeMailboxMessage` INBOX → Trash |
+| `POST /me/inbox/:uid/restore` | `moveNativeMailboxMessage` (`?folder=`, default Archive) → INBOX |
+| `GET /me/inbox/events` | SSE stream of `mailbox` events (`create`/`mark_read`/`mark_unread`/`archive`/`trash`/`restore`) for the caller's mailbox, plus a heartbeat every 25s. |
+| `GET /me/inbox/threads` | The vendored `executeThread` (REFERENCES) over the folder's native store — roots + children, each ref carrying the same envelope fields as `GET /me/inbox`. `?folder=`. |
+| `GET /me/inbox/threads/:rootUid` | The single native thread rooted at `rootUid`, same per-ref envelope fields. `?folder=`. |
+| `POST /me/inbox/send` | Body `{ to, subject?, body, inReplyTo? }`; builds an RFC 5322 message, appends it to the caller's `Sent` folder, and returns `{ messageId, uid }`. |
+
+`POST /me/inbox/send` only builds the message and files the caller's own
+`Sent` copy — the host's `deliver` mount dep owns actually getting the
+message to its recipients.
+
+## Writing into a mailbox
+
+Every write path — host code, ingress adapters, and the transport dual-write
+seam — lands through `NativeMailboxStore.append`, so uid/modseq are always
+set. There is no other write path left.
+
+```ts
+import { writeMailboxMessage, deliverInboxItems } from "@corbits/mailbox";
+
+// One message, appended into the principal's INBOX. Deduped on `messageId`
+// within that mailbox — a caller-supplied or minted one.
+await writeMailboxMessage(db, {
+  tenantId,
+  principalId,
+  address: "usr_alice@acme.example",
+  fromAddress: "bot@acme.example",
+  subject: "Run finished",
+  body: "...",
+}, bus);
+
+// Ingress adapters (mail connectors, webhooks): one item per external
+// (source, externalId), deduped on a messageId minted from that pair.
+await deliverInboxItems(db, [
+  { tenantId, principalId, address, fromAddress, subject, body, source: "gmail", externalId: "msg-1" },
+], { bus, enqueue: ({ id, item }) => hostTriage(id, item) });
+```
 
 ## Dual-write persist
 
@@ -18,21 +86,14 @@ import { createMailboxPersist } from "@corbits/mailbox";
 const persist = createMailboxPersist(db, {
   upstream: hostMailTransport.persist,
   authorizeSender: (address) => resolveActiveInstance(address),
-  // Called once per frame, before the transaction — every recipient row
-  // gets the same refs, so a bus subscriber sees them on the `create` event.
-  resolveRefs: ({ decoded }) =>
-    decoded ? [{ kind: "workbench", id: decoded.messageId ?? "" }] : undefined,
+  bus,
 });
 ```
 
-`resolveRefs` runs after `upstream` resolves and serially with it, and its
-refs are frozen at the frame's first successful insert — a retry still runs
-the resolver but a different result on that later call is discarded. Return
-a small set with the load-bearing ref first: the list is capped at
-`MAX_MAILBOX_REFS` by truncating from the end.
-
-See ARCHITECTURE.md's persist section for the full contract, including
-`resolveRefs`'s dual-write-failure semantics.
+`upstream` throwing still attempts the mailbox append (and the upstream error
+re-throws unchanged); a mailbox-append failure is logged and never rejects a
+persist upstream already completed. One append per resolved recipient, into
+their INBOX, deduped on the frame's Message-ID within that mailbox.
 
 ## Install
 
@@ -48,65 +109,8 @@ bun add github:corbitsdev/corbits-mailbox
 
 | | |
 | --- | --- |
-| `src/` | The published package. Owns `principal_mail` (the message, immutable) and `mailbox` (the management layer, created eagerly with each message). |
+| `src/` | The published package. Owns `principal_mail` (the mail plane) and `mailbox_state` (per-folder IMAP counters) — the two tables `NativeMailboxStore` reads and writes. |
 | `examples/reference-host` | Mounts it on a real `@intx/hub-api` app against a live Postgres and asserts the acceptance scenarios end to end. |
-
-## Write paths
-
-`src/write.ts` exports two batch write functions, each for a different shape
-of caller:
-
-- **`deliverInboxItems`** — the notify-item path. One external item (an
-  ingress adapter: a mail connector, a webhook), fanned out to every
-  addressed principal, deduped on `mailboxKey.inbox(source, externalId)`.
-- **`writeMailboxMessages`** — the conversation path. An arbitrary batch of
-  `{ scope, args }` pairs — for example a sender's own outbound copy
-  alongside every recipient's inbound copy of the same turn — committed in
-  one transaction with per-row dedupe on the `messageKey` unique index.
-
-Both commit every new row in the call as a single transaction (or none), and
-publish bus events only after commit, one per row actually written. See
-[ARCHITECTURE.md](./ARCHITECTURE.md) for the full write-path writeup,
-including `writeMailboxMessage`'s caller-supplied `messageId`, `direction`,
-and default `messageKey`.
-
-## Thread reads
-
-```ts
-import {
-  readMailboxThread,
-  readMailboxMessageByMessageId,
-} from "@corbits/mailbox";
-
-// The conversation under one entity ref, oldest first, keyset-paged.
-const page = await readMailboxThread(
-  db,
-  { tenantId, principalId },
-  { ref: { kind: "workbench", id: "wb-1" }, limit: 50 },
-);
-// page.items: { id, messageId, inReplyTo?, references, fromAddress, subject?,
-//               createdAt, read, archived, parentId, body }
-// page.nextCursor: pass back as `cursor` for the next page.
-
-// One message by its Message-ID, scoped to this mailbox.
-const message = await readMailboxMessageByMessageId(
-  db,
-  { tenantId, principalId },
-  "<child@acme.example>",
-);
-```
-
-`body` is the message's full text, decoded from the stored MIME frame in the
-same scan — the same body `getMailboxMessage`'s detail read returns for a
-single message. A frame the MIME parser rejects degrades to `""` (logged),
-never a failed read.
-
-`parentId` is resolved by RFC 5256 References linking — `In-Reply-To` first,
-then the `References` chain newest-to-oldest — across the whole ref-scoped set,
-not just the current page. It is `null`, never fabricated, when the nearest
-ancestor is not in this mailbox under this ref. Subjects are never used to
-group. A cursor is bound to the ref that minted it; paging it into a different
-ref is a `RangeError`, as is a malformed cursor or an out-of-range limit.
 
 ## Working on it
 

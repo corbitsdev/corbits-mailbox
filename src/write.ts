@@ -1,8 +1,13 @@
-import { sql } from "drizzle-orm";
+// The write boundary over the native `MailboxStore`. Every host-facing write
+// path (`writeMailboxMessage`, `deliverInboxItems`, and `persist.ts`'s
+// transport dual-write) lands through `NativeMailboxStore.append`, so uid and
+// modseq are always set — there is no second, uid-less insert path left in
+// this package.
+
 import { type } from "arktype";
 import { getLogger } from "@intx/log";
-import { mailbox, principalMail } from "./schema.js";
 import type { MailboxDb } from "./db.js";
+import { openNativeMailboxStore } from "./native-store.js";
 import { publishMailboxEvent, type MailboxEventBus } from "./bus.js";
 import {
   assertMsgId,
@@ -10,7 +15,6 @@ import {
   generateMailboxMessageId,
   headerValue,
 } from "./frame.js";
-import type { MailboxRef } from "./read.js";
 
 const logger = getLogger(["corbits-mailbox", "write"]);
 
@@ -48,9 +52,9 @@ export type MailboxScopeIds = typeof MailboxScopeIdsSchema.infer;
 /**
  * Refuse a blank mailbox scope before it reaches the database.
  *
- * `RangeError` for the same reason the bulk cap and the empty enrichment throw
- * it: this is a caller bug, not a request outcome, and the mount layer already
- * renders a `RangeError` from this package as a 400.
+ * `RangeError` for the same reason the frame-byte cap throws it: this is a
+ * caller bug, not a request outcome, and the mount layer renders a
+ * `RangeError` from this package as a 400.
  */
 export function assertMailboxScope(scope: {
   tenantId: string;
@@ -70,15 +74,10 @@ export function assertMailboxTenantId(tenantId: string): void {
   }
 }
 
-// A single row's `refs` is a compact set of pointers, not a dumping ground.
-// Cap what a writer can persist so a runaway producer can never inflate one
-// row's jsonb blob unboundedly; extras past the cap are dropped (logged).
-export const MAX_MAILBOX_REFS = 20;
-
 // Hard ceiling on a single durable frame (headers + body after build, or raw
 // bytes on the transport path). Multi-megabyte MIME would be copied once per
-// recipient and re-decoded on detail reads; refuse at the write boundary with
-// RangeError (same posture as the bulk-id and page-limit caps — never clamp).
+// recipient and re-decoded on read; refuse at the write boundary with
+// RangeError — never clamp.
 export const MAX_MAILBOX_FRAME_BYTES = 1_048_576;
 
 /** Throw `RangeError` when `raw` is strictly larger than `MAX_MAILBOX_FRAME_BYTES`. */
@@ -90,26 +89,6 @@ export function assertMailboxFrameBytes(raw: Uint8Array): void {
   }
 }
 
-// `messageKey` is the caller's own identifier and is absent for externally
-// delivered mail, which is never deduped — the warning below carries whatever
-// the caller actually supplied rather than minting an id nobody can correlate.
-export function boundRefs(
-  refs: MailboxRef[] | undefined,
-  messageKey: string | null,
-  /** Extra correlation fields merged into the truncation log line, e.g. `senderAddress` on the persist path. */
-  extra?: Record<string, unknown>,
-): MailboxRef[] | undefined {
-  if (refs === undefined || refs.length === 0) return undefined;
-  if (refs.length <= MAX_MAILBOX_REFS) return refs;
-  logger.warn("mailbox refs truncated to the cap for {messageKey}", {
-    messageKey,
-    received: refs.length,
-    kept: MAX_MAILBOX_REFS,
-    ...extra,
-  });
-  return refs.slice(0, MAX_MAILBOX_REFS);
-}
-
 export type WriteMailboxMessageArgs = {
   tenantId: string;
   principalId: string;
@@ -118,31 +97,14 @@ export type WriteMailboxMessageArgs = {
   subject: string;
   body: string;
   /**
-   * Idempotency key; a second write with the same key is a no-op (returns
-   * null). Omitted, a write still gets a stable key of its own: the package's
-   * transport key (`mailboxKey.transport`), derived from the frame's
-   * `messageId` and the recipient `principalId` — so a caller that retries
-   * the exact same `messageId` collapses onto one row without having to mint
-   * its own key, while two independent writes with different (minted)
-   * `messageId`s never collide.
-   */
-  messageKey?: string;
-  /**
    * The complete msg-id (angle brackets included) this write's frame carries
-   * as its `Message-ID:` header, and the value cached in
-   * `principal_mail.message_id`. `RangeError` (via `assertMsgId`) when it is
-   * not a bracketed msg-id. Omitted, one is minted the way it always was —
-   * `generateMailboxMessageId`.
+   * as its `Message-ID:` header. `RangeError` (via `assertMsgId`) when it is
+   * not a bracketed msg-id. Omitted, one is minted —
+   * `generateMailboxMessageId`. Also the write's idempotency key: a second
+   * write carrying the same `messageId` into the same (tenant, principal,
+   * folder) mailbox is a no-op (returns `null`).
    */
   messageId?: string;
-  /**
-   * `"inbound"` (default) or `"outbound"`. The mailbox row's own copy of who
-   * sent it: an inbound row is delivered mail, an outbound row is the
-   * sender's durable copy of a message they sent. Purely a stored fact —
-   * this package's inbox views stay inbound-only regardless of what a caller
-   * writes here (see ARCHITECTURE.md's Known limits).
-   */
-  direction?: "inbound" | "outbound";
   inReplyTo?: string;
   /**
    * The thread's ancestry, oldest first; each entry a bracketed msg-id. Emitted
@@ -150,40 +112,16 @@ export type WriteMailboxMessageArgs = {
    * `buildMailFrame`. `RangeError` on an entry that is not a bracketed msg-id.
    */
   references?: string[];
-  refs?: MailboxRef[];
-  /**
-   * Triage known at write time. Values are the HOST's vocabulary — this
-   * package has none of its own — so they are plain strings here and are
-   * validated at the mount boundary, which is where the vocabulary lives.
-   * The message's `mailbox` row is created with the message either way;
-   * these stamp it at delivery.
-   */
-  priority?: string;
-  classification?: string;
-  status?: string;
-};
-
-/**
- * Drizzle transaction handle used by the shared insert path. Both the root
- * `db.transaction` callback and a nested savepoint expose the same `insert`.
- */
-type MailboxInsertTx = {
-  insert: MailboxDb["insert"];
+  /** Defaults to `"INBOX"`. */
+  folder?: string;
 };
 
 /**
  * Normalize the threading fields once, on the way in, so the value cached in
- * `principal_mail.in_reply_to` and the value that ends up in the frame's
- * `In-Reply-To:` header are the SAME string.
- *
- * `buildMailFrame` already runs every threading value through `headerValue`
- * before writing it into `raw` — trimmed and newline-flattened. Without this,
- * `insertMailboxMessage` cached `args.inReplyTo` untrimmed, so a caller
- * passing `"  <parent@x> "` produced a row whose list projection (served from
- * the cached column) differed from its detail projection (served from the
- * frame) for the exact same message. Applying the same normalization here,
- * once, before either the cache write or the frame encode, is what keeps them
- * in agreement — not two independent trims that could drift apart.
+ * the store's envelope and the value that ends up in the frame's headers are
+ * the SAME string. `buildMailFrame` already runs every threading value
+ * through `headerValue` before writing it into `raw` — applying the same
+ * normalization here, once, keeps the envelope and the frame in agreement.
  */
 function normalizeThreadingArgs<
   T extends {
@@ -206,14 +144,9 @@ function normalizeThreadingArgs<
 }
 
 /**
- * Encode args into a durable MIME frame.
- *
- * Uses the caller's `messageId` (already validated as a bracketed msg-id by
- * `assertMsgId` below) when supplied, else mints a fresh one exactly as
- * before. Either way the id is returned alongside the bytes rather than
- * re-parsed out of them: it is what the row's `message_id` cache stores, and
- * re-decoding a frame this function just built to recover a value it already
- * had is work with a failure mode attached.
+ * Encode args into a durable MIME frame. Uses the caller's `messageId`
+ * (already validated as a bracketed msg-id by `assertMsgId` below) when
+ * supplied, else mints a fresh one.
  */
 function encodeMailboxFrame(args: WriteMailboxMessageArgs): {
   raw: Uint8Array;
@@ -259,177 +192,75 @@ function assertMailboxStringFieldsFit(args: {
 }
 
 /**
- * Insert the mail row and its eager management row on the given handle.
- * Returns the new id, or null when a non-null messageKey already existed
- * (`onConflictDoNothing`). Caller owns scope validation, frame encoding, and
- * any surrounding transaction. `raw` is re-asserted against
- * `MAX_MAILBOX_FRAME_BYTES` here as defense in depth.
- */
-async function insertMailboxMessage(
-  tx: MailboxInsertTx,
-  args: WriteMailboxMessageArgs,
-  raw: Uint8Array,
-  messageId: string,
-): Promise<{ id: string; messageKey: string } | null> {
-  assertMailboxFrameBytes(raw);
-  const direction = args.direction ?? "inbound";
-  const messageKey =
-    args.messageKey ?? mailboxKey.transport(messageId, args.principalId, direction);
-  const refs = boundRefs(args.refs, messageKey);
-
-  // The management row is created EAGERLY with the message: every mutation and
-  // the unread count are then plain operations on `mailbox`, and the unread
-  // partial index can serve the hottest endpoint. Split across transactions, a
-  // crash between the two would commit the mail row alone — and a retry then
-  // hits the messageKey dedupe and returns null, leaving a message no mutation
-  // can reach.
-  const rows = await tx
-    .insert(principalMail)
-    .values({
-      tenantId: args.tenantId,
-      principalId: args.principalId,
-      address: args.address,
-      direction,
-      raw: Buffer.from(raw),
-      subject: args.subject,
-      fromAddress: args.fromAddress,
-      messageKey,
-      messageId,
-      inReplyTo: args.inReplyTo ?? null,
-      // Absent and empty are the same chain, and NULL is the cheaper of the
-      // two — the same rule migration 0003's backfill applies.
-      references:
-        args.references === undefined || args.references.length === 0
-          ? null
-          : args.references,
-      refs: refs ?? null,
-    })
-    .onConflictDoNothing({
-      target: [
-        principalMail.tenantId,
-        principalMail.principalId,
-        principalMail.messageKey,
-      ],
-      where: sql`${principalMail.messageKey} IS NOT NULL`,
-    })
-    .returning({ id: principalMail.id, createdAt: principalMail.createdAt });
-
-  const inserted = rows[0];
-  if (!inserted) return null;
-
-  // An outbound row is the sender's own durable copy of a message they sent,
-  // not something to notify them about — it is created already-read (readAt
-  // pinned to the same createdAt Postgres just minted) so the unread count
-  // and the unread view exclude it without either needing a direction
-  // predicate of their own.
-  await tx.insert(mailbox).values({
-    id: inserted.id,
-    tenantId: args.tenantId,
-    principalId: args.principalId,
-    readAt: direction === "outbound" ? inserted.createdAt : null,
-    priority: args.priority ?? null,
-    classification: args.classification ?? null,
-    status: args.status ?? null,
-  });
-  return { id: inserted.id, messageKey };
-}
-
-/**
- * Insert one durable mailbox row, deduped on (tenantId, principalId,
- * messageKey) via a partial unique index that only constrains rows with a
- * non-null messageKey — externally-delivered mail with no key is never
- * deduped or constrained by it.
+ * Append one durable message into a principal's native mailbox, deduped on
+ * `messageId` within the target (tenant, principal, folder) mailbox: a second
+ * write carrying the same `messageId` is a no-op and returns `null`.
  *
- * Throws `RangeError` on a blank tenantId or principalId (see `assertMailboxScope`),
- * when the built frame exceeds `MAX_MAILBOX_FRAME_BYTES`, and a Postgres FK
- * violation on a tenant or principal the host's control plane does not know —
- * writing to a mailbox that cannot exist is a caller bug, not a deliverable
- * outcome.
+ * Throws `RangeError` on a blank tenantId/principalId (see
+ * `assertMailboxScope`), a non-msg-id `messageId`/`inReplyTo`/`references`
+ * entry, or a built frame over `MAX_MAILBOX_FRAME_BYTES`.
  *
- * Returns the new row id, or null when the messageKey was already written.
- * When `bus` is supplied, a successful insert also publishes a live signal
- * to the recipient — strictly best-effort: a publish failure is logged and
- * never turns a successful write into a caller-visible error.
+ * When `bus` is supplied, a successful append also publishes a live signal to
+ * the recipient — best-effort, same posture as everywhere else in this
+ * package.
  */
 export async function writeMailboxMessage(
   db: MailboxDb,
   rawArgs: WriteMailboxMessageArgs,
   bus?: MailboxEventBus,
-): Promise<{ id: string } | null> {
+): Promise<{ id: string; uid: number } | null> {
   assertMailboxScope(rawArgs);
   const args = normalizeThreadingArgs(rawArgs);
-  // Refuse obviously oversize string fields before allocating the full encode.
   assertMailboxStringFieldsFit(args);
-  // Encode and size-check the built frame before opening a transaction so
-  // oversize input never pays for a begin/rollback.
   const { raw, messageId } = encodeMailboxFrame(args);
   assertMailboxFrameBytes(raw);
-  // One transaction for the mail row and its management row.
-  const row = await db.transaction(async (tx) =>
-    insertMailboxMessage(tx, args, raw, messageId),
-  );
-  if (!row) return null;
 
+  const folder = args.folder ?? "INBOX";
+  const store = await openNativeMailboxStore(db, {
+    tenantId: args.tenantId,
+    principalId: args.principalId,
+    folder,
+  });
+  if (store.messages.some((m) => m.envelope.messageId === messageId)) {
+    return null;
+  }
+  const uid = store.append(
+    raw,
+    {
+      messageId,
+      from: args.fromAddress,
+      to: [args.address],
+      subject: args.subject,
+      date: new Date(),
+      inReplyTo: args.inReplyTo,
+      references: args.references ?? [],
+      interchangeType: undefined,
+      interchangeCorrelationId: undefined,
+    },
+    [],
+  );
+  await store.settled;
+
+  const id = `${args.tenantId}:${args.principalId}:${folder}:${uid}`;
   if (bus) {
     publishMailboxEvent(
       bus,
       { tenantId: args.tenantId, principalId: args.principalId },
-      row.id,
+      id,
       logger,
       "create",
     );
   }
-  return { id: row.id };
+  return { id, uid };
 }
 
 /**
- * Idempotency-key namespaces. Every hub-authored write prefixes its key with
- * the namespace that minted it, so two producers keying off the same
- * underlying id never collide on one row: an approval gate (`gate:<id>`) and
- * the run it belongs to (`run:<id>`) each get their own mailbox message even
- * when `<id>` is identical.
- *
- * Inbox keys use a versioned length-prefixed encoding
- * (`inbox2:${source.length}:${source}:${externalId}`) so the encoding is
- * injective over the (source, externalId) pair — (`a:b`,`c`) and (`a`,`b:c`)
- * never share a key. (A NUL-join would also be injective, but Postgres text
- * rejects U+0000.) The `inbox2:` prefix keeps the space disjoint from pre-upgrade
- * `inbox:<source>:<externalId>` keys: length-prefix alone would false-collide
- * when a historical source was pure decimal (e.g. old `inbox:5:gmail:123` ==
- * length-prefixed `inbox:5:gmail:123` for source=`gmail`). Pre-upgrade rows will
- * not dedupe against the new encoding and cannot false-collide with it — no
- * migration is performed; redelivery after upgrade may insert a second row.
+ * One externally-sourced item an ingress adapter (mail connector, webhook,
+ * anything durable-fanning-out into principal mailboxes) wants delivered.
+ * `source` + `externalId` are the adapter's own dedupe key: redelivering the
+ * same external item is a no-op, by minting the same `messageId` from them
+ * when the item carries none of its own.
  */
-// `transport` is the default `writeMailboxMessage` / `writeMailboxMessages`
-// fall back to when a caller supplies no `messageKey` of its own: keyed on
-// the frame's own `messageId` (caller-supplied or minted) plus the recipient
-// `principalId`. For the (default) `"inbound"` direction this matches
-// `persist.ts`'s transport dual-write key shape
-// (`transport:mid:<Message-ID>:<principalId>`) BYTE FOR BYTE and without
-// importing from it — a frame persist already delivered and a direct inbound
-// write for the same Message-ID + principal dedupe onto the same row, as
-// they always have. `"outbound"` gets a `:outbound` suffix instead of
-// silently sharing the inbound key: a sender's own copy of a turn and a
-// recipient's (or their own) inbound copy of the identical caller-supplied
-// Message-ID must NOT collapse onto one row. `persist.ts` owns a second
-// fallback (content-hash) for frames with no Message-ID at all, which never
-// happens on this package's own write path, where a `messageId` is always
-// present by the time a row is inserted.
-export const mailboxKey = {
-  inbox: (source: string, externalId: string) =>
-    `inbox2:${source.length}:${source}:${externalId}`,
-  gate: (gateId: string) => `gate:${gateId}`,
-  run: (runId: string) => `run:${runId}`,
-  transport: (
-    messageId: string,
-    principalId: string,
-    direction: "inbound" | "outbound" = "inbound",
-  ) =>
-    direction === "outbound"
-      ? `transport:mid:${messageId}:${principalId}:outbound`
-      : `transport:mid:${messageId}:${principalId}`,
-} as const;
-
 export type InboxItem = {
   tenantId: string;
   principalId: string;
@@ -443,65 +274,36 @@ export type InboxItem = {
   inReplyTo?: string;
   /** The thread's ancestry, oldest first; see `WriteMailboxMessageArgs`. */
   references?: string[];
-  refs?: MailboxRef[];
-  // An adapter that already knows an item's triage verdict stamps it
-  // at delivery rather than writing the row and immediately updating it.
-  // Host vocabulary; see `WriteMailboxMessageArgs`.
-  priority?: string;
-  classification?: string;
-  status?: string;
 };
 
 export type DeliverInboxItemsOpts = {
   bus?: MailboxEventBus;
   /**
-   * Optional host-supplied triage hook; called once per newly-delivered row,
-   * strictly after the batch commits. Best-effort: a throw is logged with the
-   * message id and never rejects the delivery — the durable row already exists,
-   * and a host whose hook permanently fails on the first try must triage
-   * independently (retries of this call will dedupe and skip enqueue).
+   * Optional host hook, called once per newly-delivered item, strictly after
+   * its append settles. Best-effort: a throw is logged with the item's id and
+   * never rejects the delivery.
    */
   enqueue?: (delivered: { id: string; item: InboxItem }) => void;
 };
 
-/** `id` is null exactly when the item was deduped — no row was written. */
-export type DeliveredInboxItem = { messageKey: string; id: string | null };
+/** `id` is null exactly when the item deduped against an existing message. */
+export type DeliveredInboxItem = { id: string | null };
 
 /**
- * Shared delivery seam for ingress adapters (mail connectors, webhooks,
- * anything durable-fanning-out into principal mailboxes). Dedupe key is
- * `mailboxKey.inbox(source, externalId)` (versioned length-prefixed;
- * injective over the pair) — the same external item re-delivered by a retried
- * adapter never writes twice. Triage logic itself is NOT this package's concern:
- * `enqueue`, if given, is invoked after commit for each newly inserted id.
- *
- * Throws `RangeError` on a blank tenantId or principalId anywhere in the batch,
- * and when any item's string fields or built frame exceed the frame-byte cap —
- * every item is scope-checked, field-checked, encoded, and frame-asserted
- * BEFORE the transaction opens so oversize input never begins a multi-row
- * insert. After that prevalidation, all new mail + management rows for the
- * call commit in ONE `db.transaction` (or none). Deduped keys (`id: null`) are
- * no-ops inside the transaction without breaking atomicity. Bus publish and
- * `enqueue` run only after commit, and only for newly inserted ids; a throwing
- * `enqueue` is logged and swallowed (same posture as `publishMailboxEvent`).
+ * Shared delivery seam for ingress adapters. Each item is delivered with
+ * `writeMailboxMessage`, one append at a time (the native store has no
+ * multi-row batch — see `NativeMailboxStore`), deduped on a `messageId` minted
+ * from `(source, externalId)` when the item carries none of its own, so the
+ * same external item redelivered by a retried adapter never appends twice.
  */
 export async function deliverInboxItems(
   db: MailboxDb,
   items: InboxItem[],
   opts?: DeliverInboxItemsOpts,
 ): Promise<DeliveredInboxItem[]> {
-  type Prepared = {
-    item: InboxItem;
-    messageKey: string;
-    writeArgs: WriteMailboxMessageArgs;
-    raw: Uint8Array;
-    messageId: string;
-  };
-  const prepared: Prepared[] = [];
+  const results: DeliveredInboxItem[] = [];
   for (const item of items) {
-    assertMailboxScope(item);
-    assertMailboxStringFieldsFit(item);
-    const messageKey = mailboxKey.inbox(item.source, item.externalId);
+    const messageId = `<inbox-${item.source}-${item.externalId}@mailbox.invalid>`;
     const writeArgs: WriteMailboxMessageArgs = {
       tenantId: item.tenantId,
       principalId: item.principalId,
@@ -509,169 +311,22 @@ export async function deliverInboxItems(
       fromAddress: item.fromAddress,
       subject: item.subject,
       body: item.body,
-      messageKey,
+      messageId,
     };
     if (item.inReplyTo !== undefined) writeArgs.inReplyTo = item.inReplyTo;
     if (item.references !== undefined) writeArgs.references = item.references;
-    if (item.refs !== undefined) writeArgs.refs = item.refs;
-    if (item.priority !== undefined) writeArgs.priority = item.priority;
-    if (item.classification !== undefined) {
-      writeArgs.classification = item.classification;
-    }
-    if (item.status !== undefined) writeArgs.status = item.status;
-    const normalizedWriteArgs = normalizeThreadingArgs(writeArgs);
-    const { raw, messageId } = encodeMailboxFrame(normalizedWriteArgs);
-    assertMailboxFrameBytes(raw);
-    prepared.push({
-      item,
-      messageKey,
-      writeArgs: normalizedWriteArgs,
-      raw,
-      messageId,
-    });
-  }
-
-  type Inserted = { id: string; item: InboxItem };
-  const { results, inserted } = await db.transaction(async (tx) => {
-    const results: DeliveredInboxItem[] = [];
-    const inserted: Inserted[] = [];
-    for (const { item, messageKey, writeArgs, raw, messageId } of prepared) {
-      const written = await insertMailboxMessage(tx, writeArgs, raw, messageId);
-      if (written === null) {
-        results.push({ messageKey, id: null });
-        continue;
+    const written = await writeMailboxMessage(db, writeArgs, opts?.bus);
+    results.push({ id: written?.id ?? null });
+    if (written && opts?.enqueue) {
+      try {
+        opts.enqueue({ id: written.id, item });
+      } catch (err) {
+        logger.error("mailbox enqueue failed for {id}", {
+          id: written.id,
+          error: err instanceof Error ? err : new Error(String(err)),
+        });
       }
-      results.push({ messageKey, id: written.id });
-      inserted.push({ id: written.id, item });
-    }
-    return { results, inserted };
-  });
-
-  // Post-commit only: live signals and host triage for newly inserted ids.
-
-  for (const { id, item } of inserted) {
-    if (opts?.bus) {
-      publishMailboxEvent(
-        opts.bus,
-        { tenantId: item.tenantId, principalId: item.principalId },
-        id,
-        logger,
-        "create",
-      );
-    }
-    if (!opts?.enqueue) continue;
-    try {
-      opts.enqueue({ id, item });
-    } catch (err) {
-      logger.error("mailbox enqueue failed for {rowId}", {
-        rowId: id,
-        error: err instanceof Error ? err : new Error(String(err)),
-      });
     }
   }
-
-  return results;
-}
-
-/**
- * One item of a `writeMailboxMessages` batch: an address plus the scope it
- * lands in. `args` omits `tenantId`/`principalId` — `scope` is the SOLE
- * source of both, so there is no second copy that could disagree with it.
- */
-export type WriteMailboxMessagesItem = {
-  scope: MailboxScopeIds;
-  args: Omit<WriteMailboxMessageArgs, "tenantId" | "principalId">;
-};
-
-export type WriteMailboxMessagesOpts = {
-  /** Best-effort live signal per inserted row, published only after commit. */
-  bus?: MailboxEventBus;
-};
-
-/**
- * Write an entire conversation turn — a sender's own outbound copy alongside
- * every recipient's inbound copy, or any other mixed-scope, mixed-direction
- * batch — as ONE transaction. This is the conversation path; `deliverInboxItems`
- * remains the notify-item path (ingress adapters fanning one external item out
- * to durable rows) and is unchanged by this function's existence.
- *
- * Each item is scope-checked, field-checked, encoded, and frame-asserted
- * BEFORE the transaction opens — same prevalidation discipline as
- * `deliverInboxItems` — so oversize or malformed input never begins a
- * multi-row insert. All rows then commit together inside one
- * `db.transaction`: a throw from any single item (a caller bug, or a control-
- * plane FK the item's scope does not satisfy) rolls back every row the batch
- * would otherwise have written, including ones already inserted earlier in
- * the same call.
- *
- * Dedupe is per row, on `(tenantId, principalId, messageKey)` via
- * `onConflictDoNothing` on the existing partial unique index — the same
- * mechanism `writeMailboxMessage` and `deliverInboxItems` use. A row whose
- * `messageKey` collides with one already committed is a no-op inside the
- * transaction, not a rollback trigger; retrying an entire successful batch
- * therefore commits nothing the second time and returns no ids.
- *
- * Returns one result per item, IN ITEM ORDER — `{ messageKey, id }`, `id`
- * null exactly when that item's messageKey deduped against an existing row
- * (matching `deliverInboxItems`'s `DeliveredInboxItem` shape). Bus events
- * publish only after commit, one per written row — never for a deduped item,
- * and never before the transaction is durable.
- */
-export async function writeMailboxMessages(
-  db: MailboxDb,
-  items: WriteMailboxMessagesItem[],
-  opts?: WriteMailboxMessagesOpts,
-): Promise<DeliveredInboxItem[]> {
-  type Prepared = {
-    scope: MailboxScopeIds;
-    writeArgs: WriteMailboxMessageArgs;
-    raw: Uint8Array;
-    messageId: string;
-    messageKey: string;
-  };
-  const prepared: Prepared[] = [];
-  for (const { scope, args } of items) {
-    assertMailboxScope(scope);
-    const writeArgs: WriteMailboxMessageArgs = {
-      ...normalizeThreadingArgs(args),
-      tenantId: scope.tenantId,
-      principalId: scope.principalId,
-    };
-    assertMailboxStringFieldsFit(writeArgs);
-    const { raw, messageId } = encodeMailboxFrame(writeArgs);
-    assertMailboxFrameBytes(raw);
-    // Computed here, once, rather than left to `insertMailboxMessage`'s own
-    // fallback — this is the value returned to the caller for EVERY item,
-    // including one that dedupes and never reaches an insert.
-    const messageKey =
-      writeArgs.messageKey ??
-      mailboxKey.transport(messageId, scope.principalId, writeArgs.direction ?? "inbound");
-    writeArgs.messageKey = messageKey;
-    prepared.push({ scope, writeArgs, raw, messageId, messageKey });
-  }
-
-  type Inserted = { id: string; scope: MailboxScopeIds };
-  const { results, inserted } = await db.transaction(async (tx) => {
-    const results: DeliveredInboxItem[] = [];
-    const inserted: Inserted[] = [];
-    for (const { scope, writeArgs, raw, messageId, messageKey } of prepared) {
-      const written = await insertMailboxMessage(tx, writeArgs, raw, messageId);
-      if (written === null) {
-        results.push({ messageKey, id: null });
-        continue;
-      }
-      results.push({ messageKey, id: written.id });
-      inserted.push({ id: written.id, scope });
-    }
-    return { results, inserted };
-  });
-
-  // Post-commit only: live signals for newly inserted ids, one per row.
-  if (opts?.bus) {
-    for (const { id, scope } of inserted) {
-      publishMailboxEvent(opts.bus, scope, id, logger, "create");
-    }
-  }
-
   return results;
 }

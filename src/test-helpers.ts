@@ -1,17 +1,6 @@
 import { createMailboxDb, type MailboxDb } from "./db.js";
 import { runMailboxMigrations } from "./migrations.js";
-import type { MailboxVocabulary } from "./vocabulary.js";
 import { sql } from "drizzle-orm";
-
-/**
- * A host vocabulary for the suite to mount with. The package ships none of its
- * own, so this list plays the host's role: it lives on THIS side of the mount
- * boundary.
- */
-export const TEST_VOCABULARY: MailboxVocabulary = {
-  priorities: ["urgent", "high", "normal", "low"],
-  statuses: ["needs-action", "done"],
-};
 
 export const TEST_DATABASE_URL =
   process.env.MAILBOX_TEST_DATABASE_URL ??
@@ -74,11 +63,9 @@ export async function withTestDb(): Promise<MailboxDb> {
     return db;
   })();
   const db = await shared;
-  // `mailbox` references `principal_mail`, so both are truncated in one
-  // statement rather than leaving the management layer behind. The control
-  // plane is reset too, so no test inherits another's scopes.
+  // The control plane is reset too, so no test inherits another's scopes.
   await db.execute(
-    sql`TRUNCATE TABLE "mailbox"."principal_mail", "mailbox"."mailbox"`,
+    sql`TRUNCATE TABLE "mailbox"."principal_mail", "mailbox"."mailbox_state"`,
   );
   await db.execute(sql`TRUNCATE TABLE "tenant", "principal" CASCADE`);
   return db;

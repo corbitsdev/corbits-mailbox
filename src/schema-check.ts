@@ -1,7 +1,7 @@
 import { getTableColumns, getTableName, sql } from "drizzle-orm";
 import type { PgTable } from "drizzle-orm/pg-core";
 import type { MailboxDb } from "./db.js";
-import { mailbox, principalMail } from "./schema.js";
+import { principalMail } from "./schema.js";
 
 /**
  * Every DDL statement in `MIGRATIONS` is `CREATE TABLE IF NOT EXISTS`, which is
@@ -58,7 +58,7 @@ export class SchemaTypeMismatchError extends Error {
   }
 }
 
-const GUARDED_TABLES: readonly PgTable[] = [principalMail, mailbox];
+const GUARDED_TABLES: readonly PgTable[] = [principalMail];
 
 type ExpectedColumn = { table: string; column: string; dataType: string };
 

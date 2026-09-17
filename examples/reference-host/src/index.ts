@@ -59,6 +59,12 @@ export type ReferenceHost = {
   request: (path: string, init?: RequestInit) => Promise<Response>;
   /** Who is signed in to the hub for subsequent requests; null = signed out. */
   setSession: (session: Session) => void;
+  /**
+   * Every message the mailbox's `deliver` mount dep was handed, in order.
+   * This reference host owns no real transport, so `deliver` just records
+   * here — the acceptance suite asserts against it instead of a network call.
+   */
+  deliveries: { raw: Uint8Array; from: string; to: string[]; messageId: string }[];
 };
 
 export async function createReferenceHost(): Promise<ReferenceHost> {
@@ -144,22 +150,24 @@ export async function createReferenceHost(): Promise<ReferenceHost> {
   };
 
   const bus = createInMemoryMailboxEventBus();
+  const deliveries: ReferenceHost["deliveries"] = [];
   // The convention: mounted @corbits/* modules serve under `/api`, matching
   // Interchange's own `app.route("/api/me", …)` / `app.route("/api/tenants", …)`.
   // The core registers its routes root-relative (`/me/inbox*`), so the host
   // nests them in a sub-app and routes that sub-app at `/api`. No `/v1`
   // segment and no vendor prefix — the served paths are `/api/me/inbox*`.
   const api = new Hono<AppEnv>();
-  // The triage vocabulary is the HOST's, not the package's: the core ships the
-  // ranking mechanism and generates its OpenAPI enums from whatever this host
-  // declares here. A different product would list different words.
   mountMailbox(api, {
     db,
     bus,
     resolvePrincipal,
-    vocabulary: {
-      priorities: ["urgent", "high", "normal", "low"],
-      statuses: ["needs-action", "done"],
+    // Matches `getSession`'s own `email` derivation above: this host encodes
+    // the mailbox address as `<principalId>@<tenantId>.example` throughout.
+    senderAddressFor: ({ tenantId, principalId }) =>
+      `${principalId}@${tenantId}.example`,
+    // No real transport here — see `ReferenceHost.deliveries`.
+    deliver: (message) => {
+      deliveries.push(message);
     },
   });
   app.route("/api", api);
@@ -171,5 +179,6 @@ export async function createReferenceHost(): Promise<ReferenceHost> {
     setSession: (next) => {
       session = next;
     },
+    deliveries,
   };
 }
