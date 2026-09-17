@@ -41,7 +41,7 @@ export type ResolvedRecipient = { address: string; principalId: string };
  *
  * - `usr_<principal>@domain` -> `<principal>`
  * - `<principal>@domain` (legacy bare) -> `<principal>`
- * - `ins_<id>@domain` -> excluded; instance addresses are not mailboxes
+ * - `run_<id>@domain` -> excluded; run addresses are not mailboxes
  * - any address whose domain is not `domain` -> skipped, since a mailbox row
  *   is tenant-scoped and delivering another tenant's address into this
  *   tenant would cross the isolation boundary
@@ -73,7 +73,7 @@ export function resolveMailboxRecipients(
     // Guaranteed by `extractAddrSpec`: exactly one `@`, both sides non-empty.
     const at = address.indexOf("@");
     if (address.slice(at + 1) !== tenantDomain) continue;
-    // Instance addresses (`ins_<id>@…`) belong to a running workflow instance,
+    // Run addresses (`run_<id>@…`) belong to a running workflow run,
     // not to a person, and have their own delivery path — they are never
     // principal mailboxes. `@intx/types` owns that format; do not re-derive it.
     if (isRunAddress(address)) continue;

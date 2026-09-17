@@ -7,9 +7,9 @@
   },
   "dependencies": {
     "@corbits/mailbox": "file:../..",
-    "@intx/db": "0.2.2",
-    "@intx/hub-api": "0.2.2",
-    "@intx/hub-sessions": "0.2.2",
+    "@intx/db": "0.3.0",
+    "@intx/hub-api": "0.3.0",
+    "@intx/hub-sessions": "0.3.0",
     "drizzle-orm": "0.45.2",
     "hono": "4.12.32",
     "postgres": "3.4.9"
