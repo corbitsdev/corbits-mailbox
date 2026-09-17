@@ -1,6 +1,6 @@
 {
   "name": "@corbits/mailbox",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "license": "LGPL-2.1-only",
   "description": "Universal principal-keyed inbox, mountable onto any Interchange host. Requires @intx 0.2.2 or newer.",

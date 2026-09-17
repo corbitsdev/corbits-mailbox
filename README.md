@@ -85,7 +85,7 @@ const page = await readMailboxThread(
   { ref: { kind: "workbench", id: "wb-1" }, limit: 50 },
 );
 // page.items: { id, messageId, inReplyTo?, references, fromAddress, subject?,
-//               createdAt, read, archived, parentId }
+//               createdAt, read, archived, parentId, body }
 // page.nextCursor: pass back as `cursor` for the next page.
 
 // One message by its Message-ID, scoped to this mailbox.
@@ -95,6 +95,11 @@ const message = await readMailboxMessageByMessageId(
   "<child@acme.example>",
 );
 ```
+
+`body` is the message's full text, decoded from the stored MIME frame in the
+same scan — the same body `getMailboxMessage`'s detail read returns for a
+single message. A frame the MIME parser rejects degrades to `""` (logged),
+never a failed read.
 
 `parentId` is resolved by RFC 5256 References linking — `In-Reply-To` first,
 then the `References` chain newest-to-oldest — across the whole ref-scoped set,
