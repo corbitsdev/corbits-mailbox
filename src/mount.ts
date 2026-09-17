@@ -2,8 +2,10 @@ import type { Context, Env, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { describeRoute } from "hono-openapi";
 import { getLogger } from "@intx/log";
-import { executeSearch } from "@intx/mailbox";
+import { executeSearch, executeThread } from "@intx/mailbox";
+import type { Thread } from "@intx/types/runtime";
 import type { MailboxDb } from "./db.js";
+import type { NativeMailboxStore } from "./native-store.js";
 import {
   publishMailboxEvent,
   type MailboxEvent,
@@ -108,6 +110,37 @@ type MailboxListItem = {
 
 // The five single-message mutations that move or flag a message. `op` is the
 // event op published on success.
+/**
+ * One node of `GET /me/inbox/threads(/:rootUid)`: the vendored
+ * `executeThread`'s ref (recursively, as `children`) plus the same envelope
+ * fields `GET /me/inbox` returns for that ref, so a client can render a
+ * thread without an extra fetch per message.
+ */
+type MailboxThreadNode = {
+  uid: number;
+  flags: string[];
+  envelope: MailboxListItem["envelope"];
+  children: MailboxThreadNode[];
+};
+
+function enrichThread(store: NativeMailboxStore, node: Thread): MailboxThreadNode {
+  const message = store.find(node.ref.uid);
+  return {
+    uid: node.ref.uid,
+    flags: message ? [...message.flags] : [],
+    envelope: {
+      messageId: message?.envelope.messageId ?? "",
+      from: message?.envelope.from ?? "",
+      to: message?.envelope.to ?? [],
+      subject: message?.envelope.subject ?? "",
+      date: new Date(message?.envelope.date ?? 0).toISOString(),
+      inReplyTo: message?.envelope.inReplyTo,
+      references: message?.envelope.references ?? [],
+    },
+    children: node.children.map((child) => enrichThread(store, child)),
+  };
+}
+
 const READ_VERBS = [
   { verb: "read", op: "mark_read" as const, flags: ["\\Seen"], add: true },
   { verb: "unread", op: "mark_unread" as const, flags: ["\\Seen"], add: false },
@@ -237,6 +270,88 @@ export function mountMailbox<E extends Env>(
         body.nextCursor = String(items[items.length - 1]!.uid);
       }
       return c.json(body);
+    },
+  );
+
+  app.get(
+    "/me/inbox/threads",
+    describeRoute({
+      tags: TAGS,
+      summary: "The caller's inbox as threads",
+      description:
+        "The vendored `executeThread` (REFERENCES algorithm) run over the " +
+        "folder's native store — roots plus children, each ref carrying the " +
+        "same envelope fields `GET /me/inbox` returns. With no resolvable " +
+        "principalId this returns an empty list, not a 403.",
+      parameters: [
+        {
+          name: "folder",
+          in: "query",
+          description: "INBOX (default), Archive, or Trash.",
+          schema: { type: "string", enum: [...LIST_FOLDERS] },
+        },
+      ],
+      responses: {
+        200: { description: "The folder's threads" },
+        400: { description: "Bad folder" },
+      },
+    }),
+    async (c) => {
+      const rawFolder = c.req.query("folder");
+      const folder = rawFolder === undefined ? DEFAULT_FOLDER : rawFolder;
+      if (!isListFolder(folder)) {
+        return c.json({ error: "invalid folder" }, 400);
+      }
+      const resolved = await resolvePrincipal(c);
+      if (!resolved) return c.json({ threads: [] });
+
+      const store = await openNativeMailboxStore(db, { ...resolved, folder });
+      const threads = await executeThread(folder, store, "references");
+      return c.json({
+        threads: threads.map((thread) => enrichThread(store, thread)),
+      });
+    },
+  );
+
+  app.get(
+    "/me/inbox/threads/:rootUid",
+    describeRoute({
+      tags: TAGS,
+      summary: "One thread, rooted at the given uid",
+      parameters: [
+        { ...ID_PARAM, name: "rootUid" },
+        {
+          name: "folder",
+          in: "query",
+          description: "INBOX (default), Archive, or Trash.",
+          schema: { type: "string", enum: [...LIST_FOLDERS] },
+        },
+      ],
+      responses: {
+        200: { description: "The thread rooted at rootUid" },
+        400: { description: "Bad rootUid or folder" },
+        403: { description: "No resolvable principalId" },
+        404: { description: "No thread rooted at that uid in this mailbox" },
+      },
+    }),
+    async (c) => {
+      const rootUid = parseUid(c.req.param("rootUid") ?? "");
+      if (rootUid === null) {
+        return c.json({ error: "rootUid must be a positive integer" }, 400);
+      }
+      const rawFolder = c.req.query("folder");
+      const folder = rawFolder === undefined ? DEFAULT_FOLDER : rawFolder;
+      if (!isListFolder(folder)) {
+        return c.json({ error: "invalid folder" }, 400);
+      }
+      const resolved = await resolvePrincipal(c);
+      if (!resolved) return c.json({ error: "No resolvable principalId" }, 403);
+
+      const store = await openNativeMailboxStore(db, { ...resolved, folder });
+      const threads = await executeThread(folder, store, "references");
+      const root = threads.find((thread) => thread.ref.uid === rootUid);
+      if (!root) return c.json({ error: "Thread not found" }, 404);
+      return c.json({ thread: enrichThread(store, root) });
     },
   );
 
