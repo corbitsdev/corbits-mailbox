@@ -23,6 +23,8 @@ mountMailbox(app, {
   db,
   bus: createInMemoryMailboxEventBus(),
   resolvePrincipal: (ctx) => resolveCallerFromRequest(ctx),
+  senderAddressFor: (principal) => resolveCallerAddress(principal),
+  deliver: (message) => hostMailTransport.send(message),
 });
 ```
 
@@ -43,6 +45,11 @@ every other route returns 403.
 | `GET /me/inbox/events` | SSE stream of `mailbox` events (`create`/`mark_read`/`mark_unread`/`archive`/`trash`/`restore`) for the caller's mailbox, plus a heartbeat every 25s. |
 | `GET /me/inbox/threads` | The vendored `executeThread` (REFERENCES) over the folder's native store — roots + children, each ref carrying the same envelope fields as `GET /me/inbox`. `?folder=`. |
 | `GET /me/inbox/threads/:rootUid` | The single native thread rooted at `rootUid`, same per-ref envelope fields. `?folder=`. |
+| `POST /me/inbox/send` | Body `{ to, subject?, body, inReplyTo? }`; builds an RFC 5322 message, appends it to the caller's `Sent` folder, and returns `{ messageId, uid }`. |
+
+`POST /me/inbox/send` only builds the message and files the caller's own
+`Sent` copy — the host's `deliver` mount dep owns actually getting the
+message to its recipients.
 
 ## Writing into a mailbox
 
