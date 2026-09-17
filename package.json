@@ -51,7 +51,7 @@
   ],
   "sideEffects": false,
   "scripts": {
-    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "build": "node scripts/build.mjs",
     "prepack": "bun run build",
     "prepare": "node scripts/prepare.mjs",
     "typecheck": "tsc --noEmit",
@@ -60,6 +60,7 @@
   },
   "dependencies": {
     "@hono/standard-validator": "0.2.3",
+    "@intx/crypto": "0.3.0",
     "@standard-community/standard-json": "0.3.5",
     "@standard-community/standard-openapi": "0.2.9",
     "arktype": "2.1.29",
@@ -67,14 +68,11 @@
   },
   "peerDependencies": {
     "@intx/log": "^0.2.2",
-    "@intx/mime": "^0.3.0",
-    "@intx/types": "^0.3.0",
     "drizzle-orm": "^0.45.2",
     "hono": "^4.12.0",
     "postgres": "^3.4.0"
   },
   "devDependencies": {
-    "@intx/crypto": "0.3.0",
     "@intx/log": "0.2.2",
     "@intx/mailbox": "workspace:*",
     "@intx/mime": "workspace:*",

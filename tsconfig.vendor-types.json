@@ -1,0 +1,23 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "noEmit": false,
+    "emitDeclarationOnly": true,
+    "declaration": true,
+    "declarationMap": false,
+    "outDir": "dist/.vendor-types-raw",
+    "rootDir": "."
+  },
+  "include": [
+    "vendor/intx-mailbox/src",
+    "vendor/intx-mime/src",
+    "vendor/intx-types/src"
+  ],
+  "exclude": [
+    "**/node_modules",
+    "**/dist",
+    "**/*.test.ts",
+    "**/test-helpers.ts"
+  ]
+}

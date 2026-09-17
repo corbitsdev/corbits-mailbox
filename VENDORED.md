@@ -30,3 +30,20 @@ consumed as an ordinary npm dependency instead.
 
 Publishing `@intx/mailbox` (and refreshing the `@intx/mime`/`@intx/types`
 npm releases to the pin it needs) retires all three rows in one move.
+
+## Published artifact
+
+None of the three vendored packages appear in the published manifest's
+`dependencies`/`peerDependencies` — there is nothing on npm for a consumer
+to install against. Instead `scripts/build.mjs` (invoked by `bun run
+build`) bundles `vendor/intx-mailbox`, `vendor/intx-mime`, and
+`vendor/intx-types` straight into `dist/index.js`, and compiles their
+declarations separately into `dist/vendor/<name>/`, rewriting the bare
+`@intx/mailbox`/`@intx/mime`/`@intx/types` specifiers in every emitted
+`.d.ts` to relative paths into that directory. This keeps the tarball
+self-contained for both `node --experimental-...`-free runtime use and a
+consumer's own `tsc`. It is a build-time workaround, not a vendoring
+delta: once `@intx/mailbox` (and the `@intx/mime`/`@intx/types` pins it
+needs) are published, the three packages move back to ordinary
+`dependencies`/`peerDependencies`, `scripts/build.mjs` goes back to a
+plain `tsc` invocation, and this section is deleted.
