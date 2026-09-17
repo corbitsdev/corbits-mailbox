@@ -56,7 +56,6 @@
     "prepare": "node scripts/prepare.mjs",
     "typecheck": "tsc --noEmit",
     "test": "bun test src",
-    "test:coverage": "bun test src --coverage",
     "test:acceptance": "bun run build && bun install --force && bun test --cwd examples/reference-host"
   },
   "dependencies": {
