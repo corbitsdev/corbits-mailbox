@@ -14,7 +14,7 @@
     "drizzle",
     "postgres"
   ],
-  "author": "Corbits",
+  "author": "Sawyer Cutler <sawyer@dirtroad.dev>",
   "homepage": "https://github.com/corbitsdev/corbits-mailbox#readme",
   "repository": {
     "type": "git",
