@@ -30,7 +30,8 @@
     "minimumIntxVersion": "0.2.2"
   },
   "workspaces": [
-    "examples/*"
+    "examples/*",
+    "vendor/*"
   ],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -67,16 +68,18 @@
   },
   "peerDependencies": {
     "@intx/log": "^0.2.2",
-    "@intx/mime": "^0.2.2",
-    "@intx/types": "^0.2.2",
+    "@intx/mime": "^0.3.0",
+    "@intx/types": "^0.3.0",
     "drizzle-orm": "^0.45.2",
     "hono": "^4.12.0",
     "postgres": "^3.4.0"
   },
   "devDependencies": {
+    "@intx/crypto": "0.3.0",
     "@intx/log": "0.2.2",
-    "@intx/mime": "0.2.2",
-    "@intx/types": "0.2.2",
+    "@intx/mailbox": "workspace:*",
+    "@intx/mime": "workspace:*",
+    "@intx/types": "workspace:*",
     "@types/bun": "1.1.14",
     "@types/json-schema": "7.0.15",
     "@types/node": "22.10.5",
