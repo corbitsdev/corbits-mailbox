@@ -14,7 +14,7 @@
     "drizzle",
     "postgres"
   ],
-  "author": "Corbits",
+  "author": "Sawyer Cutler <sawyer@dirtroad.dev>",
   "homepage": "https://github.com/corbitsdev/corbits-mailbox#readme",
   "repository": {
     "type": "git",
@@ -24,7 +24,7 @@
     "url": "https://github.com/corbitsdev/corbits-mailbox/issues"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=24"
   },
   "corbits": {
     "minimumIntxVersion": "0.2.2"

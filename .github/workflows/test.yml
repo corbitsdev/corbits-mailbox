@@ -56,7 +56,11 @@ jobs:
 
       # A consumer on plain Node must be able to install and import the
       # tarball; Node cannot strip types, so a src-pointing manifest would die
-      # here rather than after publish.
+      # here rather than after publish. Pinned to the engines floor (Node 24).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
       - name: node consumer smoke test
         run: |
           set -euo pipefail
