@@ -8,6 +8,7 @@ import {
 } from "./native-store.js";
 import { seedScope, withTestDb } from "./test-helpers.js";
 import type { MailboxDb } from "./db.js";
+import { sql } from "drizzle-orm";
 
 const TENANT_ID = "tenant-native";
 const PRINCIPAL_ID = "principal-native";
@@ -182,6 +183,8 @@ describe("native MailboxStore over the principal mailbox tables", () => {
     const writeInstant = new Date();
     const uid = inbox.append(new Uint8Array([1]), envelope({ date: writeInstant }), []);
     await inbox.settled;
+    // A host's session zone is rarely UTC; the read must not depend on it.
+    await db.execute(sql`SET TIME ZONE 'America/Los_Angeles'`);
 
     const reopened = await openNativeMailboxStore(db, {
       tenantId: TENANT_ID,
