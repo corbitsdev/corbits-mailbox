@@ -40,8 +40,16 @@ beforeAll(async () => {
   await setup.execute(sql`
     CREATE TABLE IF NOT EXISTS "principal" (
       "id" text PRIMARY KEY,
-      "tenant_id" text NOT NULL REFERENCES "tenant" ("id") ON DELETE CASCADE
+      "tenant_id" text NOT NULL REFERENCES "tenant" ("id") ON DELETE CASCADE,
+      "ref_id" text NOT NULL DEFAULT ''
     )
+  `);
+  // The shared CI Postgres can already have this table from an earlier step
+  // (`src/test-helpers.ts`'s control plane) with "ref_id" NOT NULL and no
+  // default — `CREATE TABLE IF NOT EXISTS` above no-ops against it, so add
+  // the column here too rather than assume which run created the table.
+  await setup.execute(sql`
+    ALTER TABLE "principal" ALTER COLUMN "ref_id" SET DEFAULT ''
   `);
 
   host = await createReferenceHost();
