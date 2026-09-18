@@ -145,12 +145,13 @@ export async function openNativeMailboxStore(
   // driver returns every timestamp column as raw text (its type parser is
   // disabled for those OIDs), and a bare value would come back ambiguous — so
   // format it as an explicit UTC instant here rather than trust the caller's
-  // (or postgres session's) local timezone to reinterpret it. Never cast
-  // inside WHERE — that would break the index (see schema.ts).
+  // (or postgres session's) local timezone to reinterpret it. The column is
+  // a naive UTC value, so no AT TIME ZONE: that would re-render it in the
+  // session zone. Never cast inside WHERE — that would break the index.
   const rows = await db.execute<Row>(sql`
     SELECT "id", "uid", "modseq", "flags", "raw", "subject", "from_address",
            "message_id", "in_reply_to", "references", "to_addresses",
-           to_char("created_at" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "created_at"
+           to_char("created_at", 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "created_at"
     FROM "mailbox"."principal_mail"
     WHERE "tenant_id" = ${tenantId} AND "principal_id" = ${principalId} AND "folder" = ${folder}
     ORDER BY "uid" ASC
