@@ -58,9 +58,9 @@ describe("POST /me/inbox/send", () => {
     const stored = sent.messages[0]!;
     expect(stored.envelope.messageId).toBe(body.messageId);
     expect(stored.envelope.from).toBe(FROM);
-    // The native store's persisted envelope doesn't round-trip `to` (see
-    // `native-store.ts`'s `toEnvelope`) — the recipient list lives in the
-    // raw frame's `To:` header instead, asserted on below via `raw`.
+    // Recipients are cached on `principal_mail` at write time and read back
+    // by `toEnvelope`, so listing Sent carries them without loading `raw`.
+    expect(stored.envelope.to).toEqual(["bob@example.com"]);
     expect(stored.envelope.subject).toBe("Hi");
     const raw = await sent.readRaw(stored.uid);
     const decodedRaw = new TextDecoder().decode(raw);

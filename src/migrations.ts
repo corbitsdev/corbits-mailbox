@@ -238,12 +238,14 @@ export const MIGRATIONS: Migration[] = [
     // `In-Reply-To` first and then the `References` chain newest-first, and
     // `readMailboxThread` runs on the list path, which never loads `raw`.
     id: "0003_mail_references",
-    // See `assertColumnsBeforeStatement` on `Migration`: this runs the column
-    // check right before the GIN index below, which is the first statement in
-    // this migration that would otherwise fail with a raw Postgres error
-    // ("column \"refs\" does not exist") on a host whose "principal_mail"
-    // predates this package, rather than the named diagnostic.
-    assertColumnsBeforeStatement: 3,
+    // No `assertColumnsBeforeStatement` here anymore: that check runs against
+    // the CURRENT `schema.ts` (via `expectedColumnTypes`), which now also
+    // names `to_addresses` — a column `0006_mail_to_addresses` hasn't added
+    // yet at this point in a fresh run, so the mid-migration check would fail
+    // every cold boot. The final `assertExpectedColumnTypes(tx)` after every
+    // migration still catches a host whose "principal_mail" predates this
+    // package, just as a raw Postgres error on the GIN index below instead of
+    // the named diagnostic in that one edge case.
     statements: [
       sql`ALTER TABLE "mailbox"."principal_mail"
          ADD COLUMN IF NOT EXISTS "references" jsonb`,
@@ -463,6 +465,16 @@ export const MIGRATIONS: Migration[] = [
       sql`ALTER TABLE "mailbox"."principal_mail"
          ALTER COLUMN "modseq" SET NOT NULL`,
       sql`DROP TABLE IF EXISTS "mailbox"."mailbox"`,
+    ],
+  },
+  {
+    // Recipients were never cached alongside subject/from/message_id, so
+    // `toEnvelope` hardcoded `to: []` for every listing. Same pattern as
+    // `references`: plain jsonb array of addresses, populated at write time.
+    id: "0006_mail_to_addresses",
+    statements: [
+      sql`ALTER TABLE "mailbox"."principal_mail"
+         ADD COLUMN IF NOT EXISTS "to_addresses" jsonb`,
     ],
   },
 ];
