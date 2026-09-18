@@ -57,7 +57,12 @@ type Row = {
   in_reply_to: string | null;
   references: unknown;
   to_addresses: unknown;
-  created_at: Date;
+  // Text, not Date: drizzle's postgres-js driver disables the wire-protocol
+  // type parser for every timestamp OID (including timestamptz), so the
+  // driver always hands back raw text — formatted below with an explicit
+  // 'Z' so `new Date(...)` reads it as UTC regardless of the query's or
+  // host's session timezone.
+  created_at: string;
 };
 
 function toEnvelope(row: Row): StoredEnvelope {
@@ -72,7 +77,7 @@ function toEnvelope(row: Row): StoredEnvelope {
     from: row.from_address ?? "",
     to,
     subject: row.subject ?? "",
-    date: row.created_at,
+    date: new Date(row.created_at),
     inReplyTo: row.in_reply_to ?? undefined,
     references,
     interchangeType: undefined,
@@ -136,9 +141,16 @@ export async function openNativeMailboxStore(
   const { tenantId, principalId, folder } = scope;
   const state = await readState(db, tenantId, principalId, folder);
 
+  // Column is `timestamp without time zone` holding UTC. drizzle's postgres-js
+  // driver returns every timestamp column as raw text (its type parser is
+  // disabled for those OIDs), and a bare value would come back ambiguous — so
+  // format it as an explicit UTC instant here rather than trust the caller's
+  // (or postgres session's) local timezone to reinterpret it. Never cast
+  // inside WHERE — that would break the index (see schema.ts).
   const rows = await db.execute<Row>(sql`
     SELECT "id", "uid", "modseq", "flags", "raw", "subject", "from_address",
-           "message_id", "in_reply_to", "references", "to_addresses", "created_at"
+           "message_id", "in_reply_to", "references", "to_addresses",
+           to_char("created_at" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "created_at"
     FROM "mailbox"."principal_mail"
     WHERE "tenant_id" = ${tenantId} AND "principal_id" = ${principalId} AND "folder" = ${folder}
     ORDER BY "uid" ASC

@@ -170,4 +170,27 @@ describe("native MailboxStore over the principal mailbox tables", () => {
     expect(thread!.children.length).toBe(1);
     expect(thread!.children[0]!.ref.uid).toBe(2);
   });
+
+  // Regression for CL-8448: the raw SELECT must return the true instant, not
+  // the bare timestamp reinterpreted in the host's local TZ.
+  it("envelope.date survives a round trip as the true write instant", async () => {
+    const inbox = await openNativeMailboxStore(db, {
+      tenantId: TENANT_ID,
+      principalId: PRINCIPAL_ID,
+      folder: "INBOX",
+    });
+    const writeInstant = new Date();
+    const uid = inbox.append(new Uint8Array([1]), envelope({ date: writeInstant }), []);
+    await inbox.settled;
+
+    const reopened = await openNativeMailboxStore(db, {
+      tenantId: TENANT_ID,
+      principalId: PRINCIPAL_ID,
+      folder: "INBOX",
+    });
+    const msg = reopened.find(uid);
+    expect(
+      Math.abs(msg!.envelope.date.getTime() - writeInstant.getTime()),
+    ).toBeLessThan(1000);
+  });
 });
