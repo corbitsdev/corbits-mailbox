@@ -20,8 +20,13 @@ export async function createHostControlPlane(
   await db.execute(sql`
     CREATE TABLE IF NOT EXISTS "principal" (
       "id" text PRIMARY KEY,
-      "tenant_id" text NOT NULL REFERENCES "tenant" ("id") ON DELETE CASCADE
+      "tenant_id" text NOT NULL REFERENCES "tenant" ("id") ON DELETE CASCADE,
+      "ref_id" text NOT NULL
     )
+  `);
+  // A test database created before ref_id existed keeps its table.
+  await db.execute(sql`
+    ALTER TABLE "principal" ADD COLUMN IF NOT EXISTS "ref_id" text NOT NULL DEFAULT ''
   `);
 }
 
@@ -40,7 +45,7 @@ export async function seedScope(
   );
   for (const principalId of principalIds) {
     await db.execute(
-      sql`INSERT INTO "principal" ("id", "tenant_id") VALUES (${principalId}, ${tenantId}) ON CONFLICT DO NOTHING`,
+      sql`INSERT INTO "principal" ("id", "tenant_id", "ref_id") VALUES (${principalId}, ${tenantId}, ${principalId}) ON CONFLICT DO NOTHING`,
     );
   }
 }

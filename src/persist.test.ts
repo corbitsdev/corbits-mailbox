@@ -228,6 +228,21 @@ describe("sender auth", () => {
     expect(await rowsFor("acme", "spy")).toHaveLength(0);
   });
 
+  test("a person addressed by ref id, as Interchange stamps a From, gets the row on their principal", async () => {
+    await db.execute(
+      sql`UPDATE "principal" SET "ref_id" = 'Mk9tHHtRxx' WHERE "id" = 'user-1'`,
+    );
+    const { upstream } = recordingUpstream();
+    const persist = createMailboxPersist(db, {
+      upstream,
+      authorizeSender: () => ACTIVE,
+    });
+
+    await persist(args({ recipients: ["Mk9tHHtRxx@acme.example"] }));
+
+    expect(await rowsFor("acme", "user-1")).toHaveLength(1);
+  });
+
   test("an unknown principal is skipped without costing the known one its copy", async () => {
     // Recipient local parts are sender-controlled: a typo'd address must not
     // mint a phantom mailbox, and must not take the real recipient down with it.
