@@ -10,7 +10,7 @@ threading/search, `/me/threads*` — is gone. The vendored `@intx/mailbox`
 `executeSearch`/`executeThread` are the search and thread primitives now, run
 directly over the native store.
 
-Requires `@intx` 0.2.2 or newer.
+Requires `@intx` 0.2.2 or newer and Node 24 or newer.
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for the data model.
 
