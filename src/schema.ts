@@ -110,6 +110,10 @@ export const principalMail = mailboxPgSchema.table(
     // for the reason spelled out on `refs`: nothing in Postgres constrains the
     // blob's shape, so every reader validates it instead.
     references: jsonb("references"),
+    // Recipients cached off the envelope at write time, same reason and same
+    // shape as `references`: `toEnvelope` reads it on the list path, which
+    // never loads `raw`. Plain array of addresses, no `$type<string[]>()`.
+    toAddresses: jsonb("to_addresses"),
     // Plain `jsonb` with NO `$type<MailboxRef[]>()`. A `$type` here is a claim
     // the column cannot keep: nothing in Postgres constrains this blob's shape,
     // and a row written by an older version (or by the host directly) will

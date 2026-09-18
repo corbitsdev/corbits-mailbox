@@ -56,6 +56,7 @@ type Row = {
   message_id: string | null;
   in_reply_to: string | null;
   references: unknown;
+  to_addresses: unknown;
   created_at: Date;
 };
 
@@ -63,10 +64,13 @@ function toEnvelope(row: Row): StoredEnvelope {
   const references = Array.isArray(row.references)
     ? (row.references as string[])
     : [];
+  const to = Array.isArray(row.to_addresses)
+    ? (row.to_addresses as string[])
+    : [];
   return {
     messageId: row.message_id ?? "",
     from: row.from_address ?? "",
-    to: [],
+    to,
     subject: row.subject ?? "",
     date: row.created_at,
     inReplyTo: row.in_reply_to ?? undefined,
@@ -134,7 +138,7 @@ export async function openNativeMailboxStore(
 
   const rows = await db.execute<Row>(sql`
     SELECT "id", "uid", "modseq", "flags", "raw", "subject", "from_address",
-           "message_id", "in_reply_to", "references", "created_at"
+           "message_id", "in_reply_to", "references", "to_addresses", "created_at"
     FROM "mailbox"."principal_mail"
     WHERE "tenant_id" = ${tenantId} AND "principal_id" = ${principalId} AND "folder" = ${folder}
     ORDER BY "uid" ASC
@@ -203,12 +207,13 @@ export async function openNativeMailboxStore(
           INSERT INTO "mailbox"."principal_mail"
             ("id", "tenant_id", "principal_id", "address", "direction", "raw",
              "subject", "from_address", "message_id", "in_reply_to", "references",
-             "created_at", "folder", "uid", "modseq", "flags")
+             "to_addresses", "created_at", "folder", "uid", "modseq", "flags")
           VALUES (
             ${rowId}, ${tenantId}, ${principalId}, ${envelope.from || envelope.to[0] || ""},
             'inbound', ${Buffer.from(raw)}, ${envelope.subject}, ${envelope.from},
             ${envelope.messageId || null}, ${envelope.inReplyTo ?? null},
             ${envelope.references.length > 0 ? JSON.stringify(envelope.references) : null},
+            ${envelope.to.length > 0 ? JSON.stringify(envelope.to) : null},
             ${envelope.date.toISOString()}, ${folder}, ${uid}, ${modseq}, ${pgTextArrayLiteral(flags)}::text[]
           )
         `).then(() =>

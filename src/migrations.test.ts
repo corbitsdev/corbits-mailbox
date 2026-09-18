@@ -91,6 +91,7 @@ describe("runMailboxMigrations", () => {
         "refs",
         "subject",
         "tenant_id",
+        "to_addresses",
         "uid",
       ]);
 
@@ -286,6 +287,7 @@ describe("runMailboxMigrations", () => {
         "0003_mail_references",
         "0004_native_mailbox_store",
         "0005_drop_pre_native_columns",
+        "0006_mail_to_addresses",
       ]);
 
       const rows = await db.execute<{
@@ -451,6 +453,7 @@ describe("runMailboxMigrations", () => {
         ["0003_mail_references", "1"],
         ["0004_native_mailbox_store", "1"],
         ["0005_drop_pre_native_columns", "1"],
+        ["0006_mail_to_addresses", "1"],
       ]);
     });
   });
@@ -625,6 +628,7 @@ describe("runMailboxMigrations under concurrent cold start", () => {
       "0003_mail_references",
       "0004_native_mailbox_store",
       "0005_drop_pre_native_columns",
+      "0006_mail_to_addresses",
     ]);
   });
 
