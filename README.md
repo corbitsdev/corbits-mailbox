@@ -36,7 +36,7 @@ every other route returns 403.
 
 | | |
 | --- | --- |
-| `GET /me/inbox` | Newest first, keyset-paginated by uid. `?folder=` (`INBOX` default, `Archive`, or `Trash`), `?limit=`, `?cursor=`. Each item carries its `uid`, `flags`, parsed `envelope`, and base64 `raw` — the vendored `executeSearch` over the folder's native store, with envelope + raw fetched per ref. |
+| `GET /me/inbox` | Newest first, keyset-paginated by uid. `?folder=` (`INBOX` default, `Sent`, `Archive`, or `Trash`), `?limit=`, `?cursor=`. Each item carries its `uid`, `flags`, parsed `envelope`, and base64 `raw` — the vendored `executeSearch` over the folder's native store, with envelope + raw fetched per ref. |
 | `POST /me/inbox/:uid/read` | `addFlags(uid, ["\Seen"])` |
 | `POST /me/inbox/:uid/unread` | `removeFlags(uid, ["\Seen"])` |
 | `POST /me/inbox/:uid/archive` | `moveNativeMailboxMessage` INBOX → Archive |
