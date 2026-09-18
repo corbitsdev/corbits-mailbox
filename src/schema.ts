@@ -26,6 +26,9 @@ export const mailboxPgSchema = pgSchema("mailbox");
 export const hostPrincipal = pgTable("principal", {
   id: text("id").primaryKey(),
   tenantId: text("tenant_id").notNull(),
+  // Interchange addresses a person as `<refId>@domain`, so delivery
+  // resolves that form too.
+  refId: text("ref_id").notNull(),
 });
 
 /**

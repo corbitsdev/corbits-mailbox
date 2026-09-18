@@ -16,14 +16,17 @@
 // to authorize gets NO mailbox row, while the frame is still delegated upstream
 // exactly as it would have been.
 
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, or, sql } from "drizzle-orm";
 import { getLogger } from "@intx/log";
 import { hostPrincipal } from "./schema.js";
 import type { MailboxDb } from "./db.js";
 import { openNativeMailboxStore } from "./native-store.js";
 import { publishMailboxEvent, type MailboxEventBus } from "./bus.js";
 import { decodeMailFrame, parseMsgIdList } from "./frame.js";
-import { resolveMailboxRecipients } from "./recipients.js";
+import {
+  resolveMailboxRecipients,
+  type ResolvedRecipient,
+} from "./recipients.js";
 import { assertMailboxScope, assertMailboxFrameBytes } from "./write.js";
 
 const logger = getLogger(["corbits-mailbox", "persist"]);
@@ -155,28 +158,32 @@ export function createMailboxPersist<R>(
     // control plane does not know cannot own a native mailbox. Filtering
     // here keeps one typo'd address from costing every real recipient on the
     // same frame their durable copy.
-    const known = new Set(
-      (
-        await db
-          .select({ id: hostPrincipal.id })
-          .from(hostPrincipal)
-          .where(
-            and(
-              eq(hostPrincipal.tenantId, auth.tenantId),
-              inArray(
-                hostPrincipal.id,
-                addressed.map((recipient) => recipient.principalId),
-              ),
-            ),
-          )
-      ).map((row) => row.id),
-    );
-    const resolved = addressed.filter((recipient) =>
-      known.has(recipient.principalId),
-    );
-    const unknown = addressed.filter(
-      (recipient) => !known.has(recipient.principalId),
-    );
+    // A local part names a principal by id (`usr_<id>` or bare) or, the way
+    // Interchange stamps a person's From, by `refId`. Addresses arrive
+    // lowercased, so the refId match is case-insensitive.
+    const locals = addressed.map((recipient) => recipient.principalId);
+    const rows = await db
+      .select({ id: hostPrincipal.id, refId: hostPrincipal.refId })
+      .from(hostPrincipal)
+      .where(
+        and(
+          eq(hostPrincipal.tenantId, auth.tenantId),
+          or(
+            inArray(hostPrincipal.id, locals),
+            inArray(sql`lower(${hostPrincipal.refId})`, locals),
+          ),
+        ),
+      );
+    const byId = new Map(rows.map((row) => [row.id, row.id]));
+    const byRefId = new Map(rows.map((row) => [row.refId.toLowerCase(), row.id]));
+    const resolved: ResolvedRecipient[] = [];
+    const unknown: ResolvedRecipient[] = [];
+    for (const recipient of addressed) {
+      const principalId =
+        byId.get(recipient.principalId) ?? byRefId.get(recipient.principalId);
+      if (principalId === undefined) unknown.push(recipient);
+      else resolved.push({ address: recipient.address, principalId });
+    }
     if (unknown.length > 0) {
       logger.warn("skipping mailbox delivery to unknown principals", {
         tenantId: auth.tenantId,
