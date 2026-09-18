@@ -78,7 +78,7 @@ export const MAX_PENDING_SSE_EVENTS = 100;
 
 const DEFAULT_FOLDER = "INBOX";
 /** Folders `?folder=` may name for `GET /me/inbox`. */
-const LIST_FOLDERS = ["INBOX", "Archive", "Trash"] as const;
+const LIST_FOLDERS = ["INBOX", "Sent", "Archive", "Trash"] as const;
 type ListFolder = (typeof LIST_FOLDERS)[number];
 
 function isListFolder(value: string): value is ListFolder {
@@ -232,7 +232,7 @@ export function mountMailbox<E extends Env>(
         {
           name: "folder",
           in: "query",
-          description: "INBOX (default), Archive, or Trash.",
+          description: "INBOX (default), Sent, Archive, or Trash.",
           schema: { type: "string", enum: [...LIST_FOLDERS] },
         },
         {
@@ -319,7 +319,7 @@ export function mountMailbox<E extends Env>(
         {
           name: "folder",
           in: "query",
-          description: "INBOX (default), Archive, or Trash.",
+          description: "INBOX (default), Sent, Archive, or Trash.",
           schema: { type: "string", enum: [...LIST_FOLDERS] },
         },
       ],
@@ -355,7 +355,7 @@ export function mountMailbox<E extends Env>(
         {
           name: "folder",
           in: "query",
-          description: "INBOX (default), Archive, or Trash.",
+          description: "INBOX (default), Sent, Archive, or Trash.",
           schema: { type: "string", enum: [...LIST_FOLDERS] },
         },
       ],
