@@ -24,7 +24,7 @@
     "url": "https://github.com/corbitsdev/corbits-mailbox/issues"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=24"
   },
   "corbits": {
     "minimumIntxVersion": "0.2.2"
