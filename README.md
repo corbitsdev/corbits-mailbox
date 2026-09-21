@@ -1,4 +1,4 @@
-# corbits-mailbox
+# @corbits/mailbox
 
 **[`@corbits/mailbox`](./package.json)** has one job: give a human principal
 a native Interchange mailbox — a real `@intx/mailbox` `MailboxStore` backed by
@@ -97,10 +97,10 @@ their INBOX, deduped on the frame's Message-ID within that mailbox.
 
 ## Install
 
-```sh
-# from npm (ships prebuilt dist/)
-bun add @corbits/mailbox
+Not published to npm yet. Until a registry publish, `bun add @corbits/mailbox`
+404s. Git is the install path.
 
+```sh
 # from git (prepare hook builds dist/ on the way in)
 bun add github:corbitsdev/corbits-mailbox
 ```
