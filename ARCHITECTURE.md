@@ -1,543 +1,297 @@
-# Architecture
+# @corbits/mailbox — Architecture
 
-How `@corbits/mailbox` is put together, and what it does and does not ask of
-the host that mounts it. For install, the mount snippet, the route table and the
-response contracts, see the [README](./README.md) —
-this document is about structure and reasoning, and does not repeat them.
+How the native mailbox is structured. Install, mount snippets, and the
+public function list live in the [README](./README.md). Concrete libraries,
+wire formats, and migration ids live in
+[IMPLEMENTATION.md](./IMPLEMENTATION.md).
 
-## The shape of the thing
+## Shape
 
-A **library, not a service**. It creates no HTTP server, opens no connection
-pool by default, owns no configuration, and starts no background work. A host
-calls two functions:
+A **library, not a service**. It creates no HTTP server, opens no
+connection pool by default, owns no configuration, and starts no
+background work. A host calls:
 
 - `runMailboxMigrations(db)` — once at boot, before serving.
-- `mountMailbox(app, opts)` — registers routes under `/me/inbox*` on a Hono app
-  the host already built, and returns the same app.
+- `mountMailbox(app, opts)` — registers `/me/inbox*` on a Hono app the
+  host already built, and returns the same app.
+
+Every durable write (HTTP send, `writeMailboxMessage`,
+`deliverInboxItems`, `createMailboxPersist`) lands through
+`NativeMailboxStore.append`. Search and threading are the vendored
+`@intx/mailbox` `executeSearch` / `executeThread` over that store.
+
+```
+host Hono app
+    │
+    ▼
+mountMailbox  ──▶  openNativeMailboxStore(folder)
+                       │
+         ┌─────────────┼──────────────┐
+         ▼             ▼              ▼
+   executeSearch   executeThread   append / flags / MOVE
+         │             │              │
+         └─────────────┴──────────────┘
+                       │
+                       ▼
+         mailbox.principal_mail
+         mailbox.mailbox_state
+```
 
 ## Where the routes are served
 
-The core registers root-relative paths and takes no base path, so the *mount
-point* is the host's decision. The convention every `@corbits/*-core` package
-documents is **`/api`** — the prefix Interchange serves its own routes under.
-No `/v1` segment, no vendor prefix.
+The core registers **root-relative** `/me/inbox*` paths and takes no base
+path. Nesting the host's Hono app under `/api` (Interchange's own prefix)
+is the host's decision, not a parameter on `mountMailbox`.
 
 ```ts
 const api = new Hono<AppEnv>();
-mountMailbox(api, { db, bus, resolvePrincipal, vocabulary });
+mountMailbox(api, { db, bus, resolvePrincipal, senderAddressFor, deliver });
 app.route("/api", api);
 ```
 
-which serves `/api/me/inbox`, `/api/me/inbox/unread-count`,
-`/api/me/inbox/events`, `/api/me/inbox/:id`, and the `POST` mutations beneath
-them. Nesting rather than teaching the core a base path keeps the frozen
-`mountX<E extends Env>(app, opts) => Hono<E>` seam untouched, and lands the
-mailbox behind whatever the host already declared for `/api/me/*` — on an
-Interchange host, `requireAuth`.
+Auth is whatever the host already declared for `/me/*`. This package does
+not install middleware.
 
-## The mount seam
+## Mount seam
 
-`mountMailbox<E extends Env>(app: Hono<E>, opts): Hono<E>` is generic over the
-host's Hono `Env` and returns the app unchanged in type. Everything the package
-cannot know on its own arrives through `opts`; nothing is reached for.
+`mountMailbox<E extends Env>(app, opts): Hono<E>` is generic over the
+host's Hono `Env` and returns the same app.
 
-| Option | Required | What it is |
+| Option | Required | Role |
 | --- | --- | --- |
-| `db` | yes | A drizzle `postgres-js` handle. The schema generic is `any` on purpose, so the host passes the handle it already has instead of opening a second pool. |
-| `bus` | yes | `MailboxEventBus` — per-mailbox fan-out backing the SSE route, keyed by the `(tenantId, principalId)` pair (`MailboxEventScope`). `createInMemoryMailboxEventBus()` ships as the zero-config default. |
-| `resolvePrincipal(ctx)` | yes | `{ tenantId, principalId } \| null`. `ctx` is typed `unknown`, so no Hono context typing leaks into the seam. |
-| `vocabulary` | yes | `{ priorities, statuses }` — the host's triage taxonomy; there is no default. |
-| `resolveSenderDisplays` | no | Batched `(tenantId, fromHeaders) => Map<address, label>`. Omitted, messages carry only the raw `From:` header. |
-| `heartbeatIntervalMs` | no | SSE keep-alive period, default 25s (under the 30s idle timeout most proxies default to). Exists so a test can observe a heartbeat without waiting. |
+| `db` | yes | The host's drizzle postgres-js handle. Schema generic is `any` so the host does not open a second pool. |
+| `bus` | yes | `MailboxEventBus` — per-mailbox fan-out for SSE, keyed by `(tenantId, principalId)`. |
+| `resolvePrincipal(ctx)` | yes | `{ tenantId, principalId } \| null`. `ctx` is `unknown` so Hono env typing does not leak into the seam. |
+| `senderAddressFor(principal)` | yes | The caller's `From:` for `POST /me/inbox/send`. |
+| `deliver(message)` | yes | Host transport. Called **after** the Sent copy appends. This package never puts a byte on a wire. |
+| `heartbeatIntervalMs` | no | SSE keep-alive; default 25s (under the usual 30s proxy idle timeout). |
 
-What it does **not** require: no auth middleware, no session library, no logger
-configuration, no UI. What it *does* require of the database is an
-Interchange-shaped control plane: `public.tenant` and `public.principal` in the
-same database, in place before `runMailboxMigrations` runs, because the mailbox
-tables foreign-key to both. Nothing changed in Interchange to make that work —
-the coupling lives entirely on this side.
+What it does **not** require: auth library, logger configuration, UI,
+triage vocabulary, sender-display resolver. What the **database** must
+already have: Interchange-shaped `public.tenant` and `public.principal` in
+the same database, in place before `runMailboxMigrations`, because mailbox
+tables foreign-key both with `ON DELETE CASCADE`.
 
-One further seam lives outside `mountMailbox`, on the write side:
-`createMailboxPersist(db, { upstream, authorizeSender, bus?, onRow?, resolveRefs? })`
-wraps a host's own mail-persist function so every addressed principal also
-gets a durable row. `authorizeSender(address) => { tenantId, domain } | null`
-is the host's decision — whether a sender address belongs to a *live* agent
-instance is not a schema fact. Returning `null` skips the mailbox write
-entirely while the frame still goes upstream. On the recipient side the
-package does consult the control plane: an address whose local part matches
-no known principal in the authorized tenant is skipped with a warning rather
-than minting a phantom mailbox row, and never costs the frame's real
-recipients their durable copy.
+### No-member asymmetry
 
-The wrapper's contract is **dual-write independence in both directions**: an
-`upstream` throw still attempts the mailbox write and then re-throws the
-original error, and a mailbox-write failure is logged and never rejects a
-persist that upstream already completed. Under retry, the mailbox side is
-idempotent: package-owned transport `messageKey`s plus `onConflictDoNothing`
-collapse duplicate frames without failing the call or re-announcing.
+When `resolvePrincipal` yields no principal:
 
-`resolveRefs(args)` — `args` is `MailboxPersistArgs` plus the resolved
-`senderAuthorization` and the `decoded` frame (or `null` if the parser
-rejected it) — is called ONCE per frame, before the transaction opens, not
-once per recipient: a host pointing every row at the same upstream entity
-does one lookup, not N. It runs AFTER `upstream` resolves and serially with
-it, so its latency adds to the call rather than overlapping. Its result is
-validated with `MailboxRefArraySchema` and capped at `MAX_MAILBOX_REFS` the
-same way `writeMailboxMessage`'s `refs` argument is (excess entries
-truncated from the end of the list, logged with `messageId` and
-`senderAddress`, never a throw) — so a resolver must return a small set with
-the load-bearing ref FIRST, since anything past the cap is silently dropped.
-Refs are then stored on every recipient row of that frame INSIDE the same
-transaction — so the post-commit bus `create` event and any SSE subscriber
-already see refs on the row once it's readable.
+- `GET /me/inbox` and `GET /me/inbox/threads` return an **empty** 200
+  (a caller with no mailbox identity sees an empty inbox).
+- Events, send, single-thread lookup, and mutations return **403**.
 
-Refs are frozen at the FIRST successful insert for a given frame: a retry
-(same idempotency key) still calls `resolveRefs` — it is not skipped — but
-because `onConflictDoNothing` writes no row on a retry, a different result
-from that second call is simply discarded; only the first call's refs ever
-land. A throwing `resolveRefs` is handled exactly like any other
-pre-transaction failure: it falls under the same dual-write contract as the
-rest of the wrapper — logged (naming `resolveRefs` as the failing stage),
-upstream unaffected (already ran, or still will, independently of this), and
-no mailbox row for that frame.
+That split is intentional.
 
-`resolvePrincipal`'s signature is identical across the Corbits cores, so a host
-mounting more than one passes the same function to each.
+## Native store
 
-## Modules
+`NativeMailboxStore` is a `@intx/mailbox` `MailboxStore` scoped to one
+`(tenantId, principalId, folder)` mailbox — the same scope
+`executeSearch` / `executeThread` already assume.
 
-| File | Role |
+The vendored mutating methods (`append`, `addFlags`, `removeFlags`,
+`remove`) are **synchronous**. An in-memory backing can satisfy that; a
+Postgres backing cannot make a write durable before return. This store
+therefore:
+
+1. Materializes the folder into memory on `openNativeMailboxStore`.
+2. Answers every sync method from that mirror immediately.
+3. Queues the matching Postgres statement onto `store.settled` — a
+   promise every write chains onto, in order, so two writes for the same
+   mailbox never race at the database.
+
+Call `await store.settled` before trusting a write has landed. The
+settled chain **always resolves** (a failed write does not wedge later
+ones). To observe a failure, await the promise the enqueue itself was
+given, not `store.settled`.
+
+The store does not poll or subscribe. To see writes from another
+instance, open a fresh one after that instance's `settled` has resolved.
+
+`createPrincipalMailboxStore(db, scope)` is the factory: `open(folder)`
+and `move(from, uid, to)`.
+
+### Folders, uid, modseq
+
+List folders: `INBOX` (default), `Sent`, `Archive`, `Trash`.
+
+Each `(tenant, principal, folder)` has a `mailbox_state` row:
+`uid_validity`, `uid_next`, `highest_modseq`. `append` assigns the next
+uid and bumps modseq. IMAP MOVE is **not** on the vendored interface —
+`moveNativeMailboxMessage` reassigns a fresh uid in the destination
+folder and bumps **its** counters, then bumps the source folder's
+modseq. Any already-open store for either folder must be reopened to see
+the result.
+
+Read/unread is `\Seen` via `addFlags` / `removeFlags`. Archive / trash /
+restore are MOVE (restore's source is `?folder=`, default Archive).
+
+### Search and threading
+
+`GET /me/inbox` runs `executeSearch` with no predicate, reverses for
+newest-first, and pages with a uid keyset (`?cursor=` is the last uid of
+the previous page). `?limit=` defaults to 50, ceiling 200 — exceeding it
+is 400, never a silent clamp.
+
+`GET /me/inbox/threads` and `GET /me/inbox/threads/:rootUid` run
+`executeThread` with the REFERENCES algorithm. Each node carries the same
+envelope fields the list returns, so a client can render a thread without
+an extra fetch per message.
+
+This package does not reimplement search or threading.
+
+## Write paths
+
+All of these append through the native store:
+
+| Path | Folder | Dedupe |
+| --- | --- | --- |
+| `writeMailboxMessage` | `args.folder` or INBOX | `messageId` within that mailbox |
+| `deliverInboxItems` | INBOX | minted `<inbox-{source}-{externalId}@mailbox.invalid>` when the item carries no `messageId` |
+| `createMailboxPersist` | each recipient's INBOX | decoded `Message-ID` within that mailbox |
+| `POST /me/inbox/send` | caller's Sent, then `deliver` | new minted id each send |
+
+Blank `tenantId` / `principalId` is a `RangeError` at the arktype
+boundary (not an FK violation deep in the insert). A built frame over
+`MAX_MAILBOX_FRAME_BYTES` is the same. Scope strings are **not** trimmed
+— rewriting an identifier would make the row unreachable by the string
+the caller believes it wrote.
+
+`raw` is the frozen MIME frame. Cached envelope columns exist so list
+and thread do not have to parse `raw` for subject / from / to /
+message-id / threading headers. `raw` stays authoritative.
+
+## Transport persist
+
+`createMailboxPersist(db, { upstream, authorizeSender, bus?, onRow? })`
+wraps the host's own persist function.
+
+- `authorizeSender(address) => { tenantId, domain } | null` is the host's
+  decision (live agent instance, etc.). `null` skips the mailbox write;
+  the frame still goes upstream.
+- Recipients outside `domain` are skipped — cross-tenant delivery is
+  impossible by construction.
+- Recipient local parts are sender-controlled. A local that matches no
+  `principal.id` or `principal.refId` in that tenant is skipped with a
+  warning; it never costs the frame's real recipients their copy.
+- Recipient list over `MAX_MAILBOX_RECIPIENTS` is a hard `RangeError`,
+  never a clamp.
+
+**Dual-write independence:**
+
+- `upstream` throwing still attempts the mailbox write, then re-throws
+  the original error. A transport that cannot reach a live session must
+  not also cost the recipient the durable copy.
+- A mailbox-write failure is logged and **never** rejects a persist
+  upstream already completed. Reporting failure for a delivery that
+  happened invites a retry that double-delivers it.
+
+A frame the MIME parser rejects still delivers — envelope degrades to
+what little can be inferred; `raw` is stored as given.
+
+## HTTP surface (behavior)
+
+| Route | Behavior |
 | --- | --- |
-| `mount.ts` | HTTP surface. Parsing, validation, status codes, SSE. No SQL. |
-| `read.ts` | List (cached columns, no `raw`) and detail (frame-decoded) projection, keyset paging, snippets on detail. |
-| `thread.ts` | The conversation under one entity ref: keyset-paged oldest-first, parents resolved by RFC 5256 References linking, plus the msg-id lookup. |
-| `mutations.ts` | Read/unread, archive, trash, restore, bulk, enrich, assign. |
-| `write.ts` | `writeMailboxMessage` / `deliverInboxItems` — the host-facing write API. |
-| `persist.ts` | The transport dual-write wrapper and the `authorizeSender` seam. |
-| `frame.ts` | Building and decoding RFC 5322 frames, multipart included. |
-| `cursor.ts` | Cursor encoding plus the view/sort/filter vocabulary and its fingerprints. |
-| `recipients.ts` | Address-list parsing and domain-scoped recipient resolution. |
-| `sender-display.ts` | The pure half of display names, plus the resolver seam. |
-| `vocabulary.ts` | The host's triage vocabulary: validation, the generated rank, the ordering fingerprint. |
-| `schema.ts` / `migrations.ts` | The two tables, and the DDL that creates them. |
-| `bus.ts` / `db.ts` / `refs.ts` | The event-bus port, the db handle type, the ref schema. |
+| `GET /me/inbox` | List folder, newest-first uid keyset. Empty page if no principal. |
+| `GET /me/inbox/threads` | REFERENCES threads for the folder. Empty if no principal. |
+| `GET /me/inbox/threads/:rootUid` | One thread. 403 / 404 as appropriate. |
+| `POST /me/inbox/send` | Build frame, append Sent, then `deliver`. |
+| `GET /me/inbox/events` | SSE `mailbox` events + heartbeat comments. |
+| `POST /me/inbox/:uid/read` | Add `\Seen`. |
+| `POST /me/inbox/:uid/unread` | Remove `\Seen`. |
+| `POST /me/inbox/:uid/archive` | MOVE INBOX → Archive. |
+| `POST /me/inbox/:uid/trash` | MOVE INBOX → Trash. |
+| `POST /me/inbox/:uid/restore` | MOVE `?folder=` (default Archive) → INBOX. |
+
+Send with `inReplyTo` looks up that msg-id across the four folders and
+builds `References` as parent chain + parent. A missing parent still
+threads on `inReplyTo` alone.
+
+List items include envelope plus `raw` as base64. Events are a nudge:
+`{ type: "mailbox", id, op? }` — refetch; do not treat the stream as a
+change log.
+
+## Events
+
+The bus keys on the **pair** `(tenantId, principalId)`, never principal
+alone (ids are unique only within a tenant).
+
+Ops this package publishes: `create`, `mark_read`, `mark_unread`,
+`archive`, `trash`, `restore`. `op` is required at the publish helper
+and optional on the wire (historical / out-of-package events).
+
+Delivery semantics, in-memory or host-supplied broker:
+
+- **Missable.** Publish is best-effort after settle; a stalled SSE
+  consumer whose queue exceeds the pending cap is disconnected, not
+  buffered.
+- **Duplicable** when there is no stable dedupe key, or when a host bus
+  redelivers. Handling a repeat `op` for the same `id` must be a no-op.
+- **Reorderable** across replicas. Do not infer "later event = later
+  state."
+
+`createInMemoryMailboxEventBus` is the zero-config default (one
+process). Multi-replica hosts supply a broker-backed bus. One throwing
+subscriber must not starve the others for that mailbox.
 
 ## Data model
 
-Two physical tables, plus this package's own migration ledger — all living in a
-dedicated `mailbox` Postgres schema in the HOST's database
-(`"mailbox"."principal_mail"`, `"mailbox"."mailbox"`), never in `public` and
-never in a database of their own. Every row in either belongs to exactly one
-`(tenant_id, principal_id)` mailbox.
+Everything this package owns lives in schema `mailbox` in the **host's**
+database — never `public`, never a database of its own. The FKs are why
+there is no separate-database mode.
 
 ```
-principal_mail   the message as delivered. IMMUTABLE.
-                 id, tenant_id, principal_id, address, direction, raw,
-                 subject, from_address, message_id, in_reply_to,
-                 message_key, refs, created_at
+principal_mail     one row per message in one folder. IMMUTABLE except
+                   flags / folder / uid / modseq on filing.
+                   raw is the frozen RFC 5322 frame.
 
-mailbox          the management layer, keyed by mail id. Mutable.
-                 read_at, archived_at, trashed_at           (universal)
-                 priority, classification, status, assignee (triage)
+mailbox_state      per (tenant, principal, folder) IMAP counters.
 ```
 
-**Why the split.** Interchange's `session_mail` is the message as delivered and
-nothing more — no `read_at`, no archive, no triage — because agents don't
-triage their inbox. The moment mail is served to a *human* all of that becomes
-necessary, so the management layer is genuinely ours to own; it just does not
-belong on the mail row, which has to keep reading 1-1 with Interchange's.
-`principal_mail` matches `session_mail` for every column the two share, and
-everything a human does to a message afterwards lives one join away. One name
-deliberately does *not* line up: `session_mail.status` is *delivery* state
-while `mailbox.status` is *triage* state — same word, different meaning, and at
-least on different tables.
+`0005_drop_pre_native_columns` dropped `"mailbox"."mailbox"` (the
+read_at / archived_at / trashed_at / priority / classification / status
+/ assignee management layer). Filing is folder + flags on the mail row.
 
-**The management row is created eagerly, with its message, in one
-transaction** — both on the `writeMailboxMessage` path and on the
-`createMailboxPersist` path. An all-NULL row means delivered-and-untouched.
-Guaranteed presence is what makes the rest of the design simple:
+Control-plane FKs (`tenant_id`, `principal_id`) cascade. PKs are
+`gen_random_uuid()::text` — Interchange uses `text` ids; this package
+does not mint lookalike prefixed ids.
 
-- Every mutation is a **plain scoped `UPDATE`** on `mailbox` — no upsert, no
-  first-touch race. A message outside the caller's scope matches no row, which
-  the routes read as 404.
-- The unread count is an **index-only scan** of the partial index
-  `mailbox_tenant_id_principal_id_unread_idx` (`WHERE read_at IS NULL AND
-  archived_at IS NULL AND trashed_at IS NULL`) — possible only because every
-  message carries a row.
-- The single transaction is load-bearing: split, a crash between the two writes
-  would commit the mail row alone, and a retry would hit the `messageKey`
-  dedupe and return null, leaving a message no mutation can reach.
+Timestamps are `timestamp without time zone` holding UTC, matching
+Interchange. Queries must not cast the column (that drops the index);
+cast the cursor instead if comparing.
 
-**One foreign key of our own.** `mailbox.id REFERENCES principal_mail(id)
-ON DELETE CASCADE` makes a message and its management state one lifecycle.
-Each purge (`purgeTenantMailbox`, `purgePrincipalMailbox`) is therefore a
-**single `DELETE` on `principal_mail`** — the management rows follow through
-the cascade, so a purge is atomic by construction, with no transaction to
-manage. Both take the caller's `db` handle, so a host can run them inside its
-own offboarding transaction; neither is scoped by view, because an offboarded
-tenant's trash is as much their data as their inbox.
+Drizzle table objects in `schema.ts` describe the columns the old
+read/write codec and `schema-ddl-parity` assert. The native store reads
+folder / uid / modseq / flags via tagged SQL on purpose, so those
+objects are not widened into a second source of truth for the native
+slice.
 
-**Hard control-plane foreign keys.** `tenant_id` and `principal_id` on both
-tables reference the host's `public.tenant` and `public.principal`, both
-`ON DELETE CASCADE` — the same posture as Interchange's own
-`session_mail.tenant_id`, extended to the principal. Consequences, stated
-rather than hidden: the control plane and the mail plane must share one
-database, the control-plane tables must exist before `runMailboxMigrations`
-runs, and there is no separate-database mode. Deleting a tenant or principal
-row carries every one of its mailbox rows out; the explicit purges exist for
-hosts that soft-delete control-plane rows, where no cascade ever fires.
-(`assignee` and `address` remain plain `text` held by value — an assignment
-must survive the assignee's principal being offboarded.)
+## Host seams (outside mount)
 
-The **migration DDL is the single owner of the constraints**: the FKs are
-declared there and deliberately not restated as drizzle `.references()` thunks
-in `schema.ts`, which declares only the columns. The one host table `schema.ts`
-still stubs is `principal` (`hostPrincipal`), read by the delivery-time
-recipient existence check — never created or migrated here.
+| Seam | Role |
+| --- | --- |
+| `db` | Host drizzle handle over Interchange tables plus `mailbox.*`. |
+| `authorizeSender` | Persist-path sender authorization. |
+| `upstream` persist | Host's own record of the frame. |
+| `onRow` / `enqueue` | Best-effort hooks after a mailbox append settles. |
+| `purgeTenantMailbox` / `purgePrincipalMailbox` | Soft-delete offboarding. One DELETE on `principal_mail`; irreversible (`raw` is the only copy this package holds). |
 
-Two layers sit deliberately in front of the FKs:
-
-- *The write boundary* (`src/scope.ts`). Every write path refuses a blank or
-  whitespace-only `tenantId`/`principalId` with a `RangeError` at the boundary,
-  where the caller still has a stack — the FK would refuse it too, but as a
-  driver error deep in the insert. `deliverInboxItems` checks the whole batch
-  before writing any of it, so the refusal is all-or-nothing. Identifiers are
-  never trimmed on the caller's behalf.
-- *The delivery filter* (`src/persist.ts`). Recipient local parts are
-  sender-controlled; unknown locals are resolved against `public.principal`
-  first and skipped with a warning, so one typo'd address never costs the real
-  recipients on the same frame their durable copy, and external mail cannot
-  mint a phantom mailbox row.
-
-**Column types are Interchange's.** Ids are `text` defaulting to
-`gen_random_uuid()::text`, not `uuid` — every Interchange table is
-`text("id").primaryKey()`, and an id should not change type at the seam.
-Timestamps are `timestamp without time zone` holding UTC, and the rule that
-follows is one the read path must keep: **the column is never cast**.
-`timestamp → timestamptz` is `STABLE`, not `IMMUTABLE`, so a cast on the column
-side drops the keyset page out of `Index Cond` into `Filter`. The *cursor* is
-cast instead, and to `::timestamp` — a `timestamptz` literal resolves through
-the session's TimeZone, so on a non-UTC host the same cursor silently seeks to
-a different row. `src/read-non-utc-session.test.ts` pins a non-UTC session for
-exactly that reason.
-
-**The raw frame is the authority on detail.** `raw bytea` holds the complete
-MIME frame; `subject` and `from_address` are caches parsed once at write time.
-List reads those caches only (no `raw`, no decode, no snippet). A frame the MIME
-parser rejects still persists — detail reads degrade to an empty body rather
-than a 500 — and improving the parser improves *existing* rows, because nothing
-was thrown away at write time.
-
-**Dedupe is partial on purpose.** The unique index on
-`(tenant_id, principal_id, message_key)` is `WHERE message_key IS NOT NULL`.
-Mail arriving without a stable key — most external mail — is left
-unconstrained rather than collapsed onto a single NULL-keyed row per mailbox.
-Keys are namespaced by path:
-
-- **Inbox ingress** (`mailboxKey.inbox`) uses a versioned length-prefixed
-  encoding `inbox2:<source.length>:<source>:<externalId>` so pairs that contain
-  `:` cannot collide, and so the space is disjoint from pre-upgrade
-  `inbox:<source>:<externalId>` keys (length-prefix under `inbox:` alone would
-  false-collide when a historical source was pure decimal). No migration is
-  performed; redelivery after upgrade may insert a second row.
-- **Transport dual-write** stamps `transport:mid:<Message-ID>:<principalId>` or
-  `transport:raw:<sha256>:<principalId>` and inserts with `onConflictDoNothing`,
-  so a retried frame does not fail on unique-violation. Management rows and bus
-  announce only for rows returned by `RETURNING`.
-- **Gate / run** keys remain under their own namespaces via `mailboxKey`.
-
-**Batch delivery is one transaction.** `deliverInboxItems` prevalidates blank
-scopes, then commits every new row in the call in a single transaction (or
-none). Deduped keys are no-ops inside the transaction. Bus publish and the
-optional host `enqueue` hook run only after commit, and only for newly inserted
-ids. Both side effects are best-effort: a throw is logged with the message id
-and never rejects the delivery.
-
-**Two write paths, two shapes of batch.** `deliverInboxItems` is the
-**notify-item path**: one external item, fanned out to every addressed
-principal, keyed by `mailboxKey.inbox(source, externalId)` — unchanged by the
-addition below. `writeMailboxMessages(db, items, opts?)` is the
-**conversation path**: an arbitrary batch of `{ scope, args }` pairs — a
-sender's own outbound copy alongside every recipient's inbound copy of the
-same turn, mixed tenants and principals allowed — committed in the same
-single-transaction-or-none shape, with per-row `onConflictDoNothing` dedupe on
-the same `messageKey` partial unique index and bus events published only
-after commit, one per row this call actually inserted. A throw from any one
-item (an invalid scope, an oversize frame, a control-plane FK the item's
-scope does not satisfy) rolls back every row the batch would otherwise have
-written, including ones already inserted earlier in the same call — same
-atomicity guarantee as `deliverInboxItems`, over a caller-shaped item instead
-of an ingress-shaped one. Each item's `args` is
-`Omit<WriteMailboxMessageArgs, "tenantId" | "principalId">` — `scope` is the
-sole source of both, so there is no second copy of the scope an item could
-disagree with. `writeMailboxMessages` returns one `{ messageKey, id }` entry
-per item, in item order — matching `deliverInboxItems`'s `DeliveredInboxItem`
-shape — with `id: null` exactly for an item whose messageKey deduped against
-an existing row, rather than a filtered array of inserted ids.
-
-**A write's Message-ID, direction, and dedupe key are now the caller's to
-set.** `WriteMailboxMessageArgs.messageId` lets a caller hand the write path
-the exact msg-id its own frame must carry (validated as a bracketed msg-id;
-`RangeError` otherwise) instead of always minting one — needed when a
-message's id has to be predictable ahead of the write, e.g. so a later
-`inReplyTo` can reference it. `direction` (default `"inbound"`) is a stored
-fact: an outbound row is the sender's own durable copy, and is created
-already-read — its `mailbox.read_at` is pinned to its own `created_at` at
-insert — so it is excluded from the unread count and the unread view without
-either needing a direction predicate of its own. `listUserMailbox` and
-`getMailboxMessage` accept an optional `direction?: "inbound" | "outbound" |
-"all"` (default `"inbound"`, preserving today's contract) so a thread reader
-can fetch a principal's own sent copies or both directions together — see
-Known limits. And `messageKey`, when the caller omits it, now defaults to
-`mailboxKey.transport(messageId, principalId, direction)`: for the default
-`"inbound"` direction this is `transport:mid:<Message-ID>:<principalId>` —
-the same shape `persist.ts`'s transport dual-write already uses, byte for
-byte, so a frame `persist.ts` already delivered and a direct inbound write
-for the same Message-ID + principal still dedupe onto the same row — while
-`"outbound"` gets a `:outbound` suffix, so a sender's own copy of a turn
-never collapses onto an inbound copy that reuses the identical
-caller-supplied `messageId` for the same principal. A retry that reuses the
-same caller-supplied `messageId` (and direction) therefore dedupes for free
-— the write returns `null` — while two writes that each mint their own
-`messageId`, or that differ in direction, never collide. A caller-supplied
-`messageKey` still overrides the default, exactly as before.
-
-**Bus publish isolates listeners.** `publishMailboxEvent` invokes each
-subscriber independently; one throwing listener does not stop the others. SSE
-connections serialize writes, bound the pending queue, and close on overflow or
-write failure rather than buffering forever.
-
-**The event names the operation that fired.** `publishMailboxEvent` takes a
-required `op` (`MailboxEventOp`: `create`, `mark_read`, `mark_unread`, `trash`,
-`archive`, `restore`, `enrich`, `assign`) and includes it on the published
-event. Every call site in this package passes one — the two delivery paths
-(`writeMailboxMessage`, `deliverInboxItems`) and the transport dual-write
-(`createMailboxPersist`) publish `create`; `mountMailbox`'s route table passes
-the mutation's own identifier, reusing `MailboxBulkAction`'s vocabulary for
-the single-message verbs so "read one" and "read fifty" report the same op.
-`op` stays *optional on `MailboxEventSchema`* even though it is required to
-publish — additive, not a reshape: a listener built against the original
-`{ type, id }` shape still validates, and a historical event replayed from
-before this field existed still passes. Requiring it on `publishMailboxEvent`
-is what keeps every call site *in this package* honest going forward; it
-cannot reach a caller outside the package, which is the other reason the
-schema field has to stay optional.
-
-`MailboxEventOp` deliberately keeps its own name and vocabulary rather than
-reusing `MailboxBulkAction`. It is a superset — `create`, `enrich`, and
-`assign` are not bulk actions, and never will be — so aliasing the two would
-claim an equivalence that does not hold. `mount.ts`'s route table is the one
-place that has to know both: it maps HTTP verbs to `MailboxBulkAction` values
-that also happen to be valid `MailboxEventOp` values, and a test in
-`bus.test.ts` keeps that overlap from drifting silently.
-
-**Triage enriches the message, not a task.** `priority`, `classification`,
-`status` and `assignee` are columns on the message's management row, not a
-spawned work item. Delegation is the `assignee` ref: the item stays in the
-delegator's mailbox. The vocabulary is the host's — `priorities` is ordered,
-most urgent first, and that order *is* the ranking `sort=priority` uses;
-`priority` and `status` are plain `text` with no `CHECK`, because a constraint
-here would freeze one product's taxonomy into every adopter's database. A value
-the host no longer lists — including `NULL` — ranks last.
-
-**Cursors are bound to the result set that minted them.** A priority cursor
-carries a canonical rendering of the host's ordering, and a mismatch is a
-`400` — a reordered vocabulary must not silently redefine what an in-flight
-rank means. A malformed cursor is always a `400`, never a `500`: the decoded
-`createdAt` is pinned to exactly the microsecond `to_char` shape this package
-mints, and the priority rank must be a safe integer, so a crafted cursor never
-reaches Postgres.
-
-**Indexes are query-shaped**, named the way Interchange names them, and every
-one leads with `(tenant_id, principal_id)` because every query is scoped to one
-mailbox. The keyset — `(tenant_id, principal_id, created_at DESC, id DESC)` —
-stays on `principal_mail`, matching the list's `ORDER BY` and its row-value
-cursor seek exactly, so the default (highest-traffic) page remains a
-single-table index scan that stops at `limit + 1` rows. The triage indexes and
-the three partial view indexes (`unread`, `archived_at`, `trashed_at`) live on
-`mailbox`. The thread read adds three more on `principal_mail`:
-`(tenant_id, principal_id, message_id)` — not unique, since a msg-id is the
-*sender's* identifier and nothing stops two delivered frames carrying the same
-one — a GIN index on `refs`, the only kind that can serve the `refs @> …`
-containment filter the ref scope is expressed as, and
-`(tenant_id, principal_id, created_at, id)` matching `readMailboxThread`'s own
-oldest-first `ORDER BY` verbatim. That last one covers the same three leading
-columns the list path's own keyset index does, in the opposite direction; a
-backward scan of the list's index already serves the thread query, but a
-dedicated index removes the dependence on the planner choosing to scan the
-other one in reverse. Whichever index a page's plan uses, a ref whose messages
-cluster at one end of the principal's own `created_at` history while a page
-seeks from the other end still costs a `Filter` proportional to how much
-*unrelated* history sits between them — no index shape fixes that; only
-clustering by ref would, and this package deliberately holds no opinion on
-physical row order. See "What the split costs, measured" below.
-
-### Thread reads
-
-`readMailboxThread(db, scope, { ref, cursor?, limit? })` answers the
-conversation under one entity ref: oldest first, keyset-paged on
-`(created_at, id)`, scoped to `(tenant_id, principal_id)` and filtered by
-jsonb containment on `refs`.
-
-**Parents are resolved by RFC 5256 References linking, never by subject.** For
-each message the candidate ancestors are its `In-Reply-To` followed by its
-`References` chain walked newest-to-oldest, and the first candidate present in
-*this* mailbox under *this* ref wins. An ancestor that is not present yields
-`parentId: null` — a message whose parent lives in another principal's mailbox,
-or under a different ref, is a root of what this reader can see, and inventing
-a node for it would be a lie about the conversation.
-
-**`parentId` chains are acyclic.** RFC 5256 step 1.B calls out that nothing
-stops a delivered frame's `In-Reply-To`/`References` from naming a msg-id that,
-directly or through further ancestors, points back at the frame itself. Before
-a page is projected, the candidate-parent graph is walked (breadth-first,
-beyond the page itself when a chain reaches further) and every edge that would
-close a loop is cut: the LATER-created message in the cycle (ties broken by
-id) becomes a root instead, deterministically — the cut depends only on the
-cycle's own membership, never on which page or cursor triggered the read.
-
-The ancestor lookup spans the whole ref-scoped set rather than the current
-page, so a chain crossing a page boundary cannot report a parent on one page
-and `null` on another. It costs one query per hop of the ancestry graph — a
-msg-id map over the ids referenced so far, served by
-`principal_mail_tenant_id_principal_id_message_id_idx` — capped defensively at
-`MAX_THREAD_ANCESTRY_NODES` so a pathological reference graph degrades a
-resolved parent to `null` rather than reading an unbounded number of rows.
-
-The whole module runs on the list path and never selects `raw`. That is what
-the cached `message_id`, `in_reply_to` and `references` columns exist for: a
-thread is read on every conversation open, and decoding one MIME frame per row
-would make the cache pointless. `readMailboxMessageByMessageId(db, scope,
-messageId)` is the same posture — a scoped lookup on the list projection,
-oldest match winning, `null` when this mailbox holds no such message.
-
-### What the split costs, measured
-
-`EXPLAIN (ANALYZE, BUFFERS)` on one principal with 60 000 inbound messages
-(including a 20 000-row `created_at` tie group) plus 30 000 belonging to
-others:
-
-| Query | Before (one table) | After (split) |
-| --- | --- | --- |
-| default `created_at` keyset page, deep cursor | 0.08 ms, 9 buffers | 0.36 ms, 172 buffers — same plan shape, no sort |
-| `sort=priority` page, deep cursor | 28 ms, 10 332 | **106 ms, 8 031** |
-| unread count | index-only scan | index-only scan on `mailbox` |
-
-The keyset path does not regress in kind — the extra buffers are the
-primary-key probes into `mailbox`, one per candidate row. The unread count,
-which regressed badly under an earlier lazy-row design, is resolved by eager
-row creation: it is once again a single index-only scan of a partial index
-that matches its predicate exactly. What remains, honestly: **`sort=priority`
-pays a join** over the management layer on top of a rank that was never
-index-servable, ~3.8x its pre-split cost.
-
-`schema.ts` and `migrations.ts` must agree statement for statement: the drizzle
-table object is a public export, so a host pointing `drizzle-kit` at it would
-otherwise recreate indexes the migrations do not have.
-`src/schema-ddl-parity.test.ts` diffs the two against a live database.
+Never import a host package. Wanting to is the signal to add a port.
 
 ## Migrations
 
-`runMailboxMigrations(db)` is idempotent and safe to call unconditionally on
-every boot of every replica.
+Own ledger `mailbox.corbits_mailbox_migrations`, advisory-locked so
+concurrent hub replicas cannot race DDL. Shipped statements are
+immutable; an edit after apply fails boot with `MigrationChecksumError`.
+`CREATE TABLE IF NOT EXISTS` matches on **name** only — after DDL,
+`assertExpectedColumnTypes` refuses a pre-existing table of the same
+name with the wrong column types (`SchemaTypeMismatchError`).
 
-- The whole run is one transaction whose first statements are
-  `SET LOCAL client_min_messages = warning` and a **transaction-scoped**
-  advisory lock. A transaction pins one pooled connection, so the lock, the
-  ledger read and the DDL are the same session, and the lock releases on commit
-  or rollback with no unlock call to lose. `CREATE TABLE IF NOT EXISTS` is not
-  itself race-safe, so the lock — not the `IF NOT EXISTS` — is what makes
-  concurrent cold starts safe.
-- Lowering `client_min_messages` is why a re-run prints nothing: every
-  statement is `IF NOT EXISTS`, and postgres.js would otherwise dump each
-  NOTICE object to the console on every replica start.
-- The ledger is this package's own table,
-  `"mailbox"."corbits_mailbox_migrations"`, never shared with the host's
-  migration bookkeeping. Each row records a **checksum of the migration's
-  rendered statements**, `NOT NULL`, so editing a shipped migration fails with
-  a named `MigrationChecksumError` on the next boot instead of leaving deployed
-  databases silently behind fresh ones. Ship a new migration instead. The
-  checksum normalization is character-for-character the sibling cores'.
-- Each migration applies inside a **savepoint** together with its ledger row,
-  so it can never be recorded as applied with only some statements run.
-- **Last, on the same transaction, `assertExpectedColumnTypes` runs**
-  (`src/schema-check.ts`). `CREATE TABLE IF NOT EXISTS` compares the table name
-  and nothing else, so against a host that already owns a `mailbox` or
-  `principal_mail` it would silently no-op and every read would decode the
-  host's columns through our codec. The expectation is derived from the drizzle
-  table objects, so it cannot drift; a rejected boot rolls the ledger row back
-  with it.
-- **A migration can also run that same check early**, via
-  `Migration.assertColumnsBeforeStatement`. `0003_mail_references` sets it: a
-  host whose `principal_mail` predates this package leaves `refs` missing (it
-  is only ever declared inline in `0001`'s `CREATE TABLE`, which no-ops against
-  a pre-existing table), and without the early check the first statement to
-  notice would be `0003`'s `CREATE INDEX ... USING gin ("refs")` — a raw
-  Postgres "column \"refs\" does not exist" instead of the named
-  `SchemaTypeMismatchError` diagnostic. The knob only changes when the runner
-  calls the check, never `Migration.statements`, so it cannot change
-  `migrationChecksum`.
+## Vendored `@intx/mailbox`
 
-**Everything lands in the `mailbox` schema, fully qualified.** Nothing resolves
-through `search_path`, so the host's own setting cannot redirect or shadow
-where the mailbox tables live. The one ordering constraint mounting imposes is
-the control plane's: the DDL's foreign keys reference `public.tenant` and
-`public.principal`, so those tables must exist before the first run.
-
-## Boundaries
-
-Owned by this package: the `mailbox` Postgres schema, its two tables, their
-indexes and migrations; the `/me/inbox*` HTTP surface, its validation and
-status codes; MIME frame construction and decoding; the durable write path and
-its idempotency; and the triage *mechanism* — the ranking, the filters, the
-delegation ref.
-
-Supplied by the host: the Hono app and the database handle (pointed at the
-database where `tenant` and `principal` live); the triage **vocabulary**; who
-the caller is (`resolvePrincipal`); whether a sender may deliver
-(`authorizeSender`) and to which tenant; display names
-(`resolveSenderDisplays`); an event bus, if one process is not enough; and the
-actual mail transport — this package neither sends nor receives SMTP.
-
-## Known limits
-
-- **The default bus is single-process.** `createInMemoryMailboxEventBus()` fans
-  out within one process only. A host running multiple replicas must supply a
-  broker-backed `MailboxEventBus`, or SSE clients will only see events raised
-  by the replica they are connected to.
-- **SSE events are non-durable nudges.** Publication is best-effort after
-  commit, each connection's queue is bounded at `MAX_PENDING_SSE_EVENTS` (100),
-  and a consumer that stops reading is disconnected rather than buffered for.
-  Events can be missed (dropped publish, overflow disconnect); duplicated,
-  but only when there is no stable dedupe key to prevent it — an inbox item
-  redelivered without one, or a broker-backed bus itself redelivering; or
-  arrive out of order (no cross-replica ordering guarantee). The client
-  contract — reconnect and refetch the list and unread count on any
-  disconnect, and never trust event arrival order over a refetch — is
-  documented in the package README.
-- **`sort=priority` pays a cross-table join** on top of a rank that was never
-  index-servable; see the measurements above.
-- **List routes default to inbound rows.** The `direction` column admits
-  outbound rows and the write path can create them; `listUserMailbox` and
-  `getMailboxMessage` default to `"inbound"` (preserving the mounted route
-  table's existing behavior) but accept `direction: "outbound" | "all"` for
-  a caller — a thread reader, not yet a mounted route — that needs a
-  principal's own sent copies. There is still no "sent" view or send route
-  on the mounted API itself.
-- **No search.** Filtering is by view, priority, classification, status and
-  assignee. There is no full-text index over subjects or bodies.
-- **Reordering the host's `priorities` invalidates in-flight priority
-  cursors** — they 400 rather than paging against a ranking that changed
-  underneath them. Appending a new band has the same effect, because it changes
-  what the trailing "unknown" rank means.
-- **`?limit=` is refused, not clamped,** above 200. A caller that asked for 500
-  and silently received 200 would page as though it had 500 rows.
-- **Bulk actions cap at 50 ids** and report per-id results; partial success is
-  the normal outcome, not an error.
-- **Frame size is hard-capped at `MAX_MAILBOX_FRAME_BYTES` (1 MiB)** on both
-  direct write (after `buildMailFrame`) and the transport dual-write path
-  (raw bytes). **Transport recipient lists hard-cap at
-  `MAX_MAILBOX_RECIPIENTS` (50)** before resolve / multi-row insert. Both refuse
-  with `RangeError` rather than clamping; the transport path still preserves
-  dual-write independence (mailbox refusal does not reject upstream success).
-
+`@intx/mailbox` has never been published. Search, thread, MIME helpers,
+and the `MailboxStore` interface are hand-copied under `vendor/` (no
+submodule, no upstream commits). The published tarball bundles them into
+`dist/` so consumers do not need those packages on npm. Kill condition:
+first npm publish of `@intx/mailbox` at a pin this tree can depend on.
+Ledger and rules: [VENDORED.md](./VENDORED.md).

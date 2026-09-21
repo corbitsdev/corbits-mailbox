@@ -98,7 +98,7 @@ const persist = createMailboxPersist(db, {
 
 Every write lands through `NativeMailboxStore.append` (uid/modseq always set). Search and threading are the vendored `@intx/mailbox` `executeSearch` / `executeThread` over that store. `mountMailbox` exposes `/me/inbox` (list, flags, archive/trash/restore, SSE, threads, send). With no resolvable principal, list returns an empty page; every other route returns 403.
 
-See [ARCHITECTURE.md](./ARCHITECTURE.md) for the data model.
+See [PRODUCT.md](./PRODUCT.md) for why, [ARCHITECTURE.md](./ARCHITECTURE.md) for the data model, and [IMPLEMENTATION.md](./IMPLEMENTATION.md) for libraries and wire format.
 
 ## Development
 
