@@ -8,71 +8,47 @@ Node >= 24 consumes built `dist/`. Bun >= 1.2 runs TypeScript source. Peers: `@i
 
 ## Quickstart
 
-Install the package and the host peers:
-
 ```bash
-bun add @corbits/mailbox @intx/log hono postgres drizzle-orm
-# npm  add @corbits/mailbox @intx/log hono postgres drizzle-orm
-# pnpm add @corbits/mailbox @intx/log hono postgres drizzle-orm
-# yarn add @corbits/mailbox @intx/log hono postgres drizzle-orm
+bun add @corbits/mailbox @intx/log @intx/hub-api @intx/db @intx/hub-sessions hono postgres drizzle-orm
 ```
 
-Peers: `@intx/log` `^0.2.2`, `hono` `^4.12`, `postgres` `^3.4`, `drizzle-orm` `^0.45`. A hub also has `@intx/hub-api`, `@intx/hub-sessions`, `@intx/db`. Postgres 13+.
-
-A **generic Interchange hub** does two things with this package. Neither is a demo user or `console.log`.
-
-**1. Give the hub a persist function that also writes the inbox.**  
-Interchange already persists outbound mail (`persistMail`: `{ senderAddress, recipients, raw }`). Wrap it so each addressed **person** also gets a mailbox row. Pass the **wrapper** into hub construction as `persistMail` — the same slot you used for the unwrapped function. Do not assign onto a `lookups` object; that bag is hub-private.
+**Run the host this package ships:** [`examples/reference-host`](./examples/reference-host). That file calls `createApp` from `@intx/hub-api`, then this:
 
 ```ts
-import { createMailboxPersist } from "@corbits/mailbox";
+const bus = createInMemoryMailboxEventBus();
+const deliveries: {
+  raw: Uint8Array;
+  from: string;
+  to: string[];
+  messageId: string;
+}[] = [];
 
-const persistMail = createMailboxPersist(mailboxDb, {
-  upstream: hubPersistMail, // what you already passed into the hub
-  authorizeSender, // live run address → { tenantId, domain } or skip
-  bus: mailboxBus,
-});
-// createApp / session setup: persistMail,
-```
-
-`authorizeSender` is host policy (Workbench: live run only). Recipients outside `domain` are skipped.
-
-**2. Mount the person's HTTP inbox** on the hub app, under the tenant routes, using the same principal the hub session middleware already set.
-
-```ts
-import { Hono } from "hono";
-import {
-  createInMemoryMailboxEventBus,
-  mountMailbox,
-  runMailboxMigrations,
-} from "@corbits/mailbox";
-
-await runMailboxMigrations(mailboxDb);
-const mailboxBus = createInMemoryMailboxEventBus();
-const mailboxApp = new Hono();
-
-mountMailbox(mailboxApp, {
-  db: mailboxDb,
-  bus: mailboxBus,
+const api = new Hono<AppEnv>();
+mountMailbox(api, {
+  db, // hub.db — one drizzle pool, mailbox schema on the same Postgres
+  bus,
   resolvePrincipal: (ctx) => {
-    const c = ctx as { get(k: "tenant" | "principal"): { id: string } };
-    return {
-      tenantId: c.get("tenant").id,
-      principalId: c.get("principal").id,
-    };
+    const user = (ctx as Context<AppEnv>).get("user");
+    if (!user) return null;
+    const [tenantId, principalId] = user.id.split(":");
+    return tenantId && principalId ? { tenantId, principalId } : null;
   },
-  senderAddressFor: (p) => `${p.principalId}@${mailDomain}`,
-  deliver: (message) => sendMime(message),
+  senderAddressFor: ({ tenantId, principalId }) =>
+    `${principalId}@${tenantId}.example`,
+  deliver: (message) => {
+    deliveries.push(message);
+  },
 });
-
-app.route("/api/tenants/:tenantId/mailbox", mailboxApp);
+app.route("/api", api);
 ```
 
-`sendMime` is the hub's real outbound MIME path (`{ raw, from, to, messageId }`). Same transport you use for other human mail, not a log.
+`db`, `app`, `AppEnv`, and `getSession` are created in that same file (`createDB` + `createApp`). `deliver` in the example **appends to `deliveries`** so tests can assert without SMTP. Production replaces that push with the hub’s real send of `message.raw`.
 
-Today Workbench does (1) by writing `lookups.persistMail` after the fact and (2) without `deliver` / `senderAddressFor`. That is host debt: [CL-8789](https://linear.app/abklabs/issue/CL-8789) (mount), [CL-8790](https://linear.app/abklabs/issue/CL-8790) (pass persistMail at construction). Solutions Builder talks to the hub; it does not mount this package.
+Inbox paths: `GET/POST /api/me/inbox…`.
 
-In-tree: `examples/reference-host` (`@intx/hub-api` `createApp` + this mount). Larger hosts: [corbitsdev/examples](https://github.com/corbitsdev/examples).
+Agent mail into a person’s inbox is `createMailboxPersist` wrapping the hub’s `persistMail`, passed **into** hub construction — not `lookups.persistMail`. Workbench still mutates lookups and still omits `deliver`: [CL-8789](https://linear.app/abklabs/issue/CL-8789), [CL-8790](https://linear.app/abklabs/issue/CL-8790).
+
+SBA uses the hub; it does not mount this package.
 
 ## How it works
 
