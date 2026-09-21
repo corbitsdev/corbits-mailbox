@@ -8,20 +8,18 @@ Node >= 24 consumes built `dist/`. Bun >= 1.2 runs TypeScript source. Peers: `@i
 
 ## Quickstart
 
+Install this package **and** the peers it expects the host to provide:
+
 ```bash
-npm add @corbits/mailbox
-pnpm add @corbits/mailbox
-yarn add @corbits/mailbox
-bun add @corbits/mailbox
+bun add @corbits/mailbox @intx/log hono postgres drizzle-orm
+# npm  add @corbits/mailbox @intx/log hono postgres drizzle-orm
+# pnpm add @corbits/mailbox @intx/log hono postgres drizzle-orm
+# yarn add @corbits/mailbox @intx/log hono postgres drizzle-orm
 ```
 
-You bring three things this library will not invent:
+`@intx/log` `^0.2.2`, `hono` `^4.12`, `postgres` `^3.4`, `drizzle-orm` `^0.45` (see `peerDependencies`). Postgres 13+ with a database URL.
 
-1. A **Postgres** database (same one as the hub — mailbox tables live in schema `mailbox`).
-2. A **Hono** app with middleware that can tell you who the HTTP caller is.
-3. A **mail transport** that can actually deliver bytes (SMTP, the hub’s mail router, etc.).
-
-Migrate once, then mount:
+Minimum that actually runs — a fixed demo principal (swap for session auth) and a `deliver` that logs instead of sending mail:
 
 ```ts
 import { Hono } from "hono";
@@ -32,47 +30,51 @@ import {
   runMailboxMigrations,
 } from "@corbits/mailbox";
 
-const { db } = createMailboxDb(process.env.DATABASE_URL!);
+const { db } = createMailboxDb(
+  process.env.DATABASE_URL ??
+    "postgres://postgres:postgres@localhost:5433/mailbox_core",
+);
 await runMailboxMigrations(db);
 
-const app = new Hono();
+const DEMO = { tenantId: "tnt_demo", principalId: "usr_demo" };
 
+const app = new Hono();
 mountMailbox(app, {
   db,
   bus: createInMemoryMailboxEventBus(),
-  // Who is this request? Return null for anonymous.
-  resolvePrincipal: (ctx) => yourAuth.principalFrom(ctx),
-  // Their From: address when they hit POST /me/inbox/send.
-  senderAddressFor: (principal) => `${principal.principalId}@your-tenant.example`,
-  // Put the RFC 5322 message on the wire. We already filed Sent.
-  deliver: (message) => yourMail.send(message.raw, message.to),
+  resolvePrincipal: () => DEMO,
+  senderAddressFor: (p) => `${p.principalId}@demo.example`,
+  deliver: async (message) => {
+    console.log("deliver", message.from, "→", message.to);
+  },
 });
-```
 
-That is the whole product. Routes are under `/me/inbox` for whoever `resolvePrincipal` returned.
+Bun.serve({ port: 3000, fetch: app.fetch });
+console.log("GET http://127.0.0.1:3000/me/inbox");
+```
 
 ```bash
-curl -H "Cookie: …" http://localhost:3000/me/inbox
+curl http://127.0.0.1:3000/me/inbox
 ```
 
-Anonymous list is an empty page. Every other route is 403 until you resolve a principal.
+That lists the demo user's inbox (empty until something writes a row). `POST /me/inbox/send` files `Sent` and calls `deliver` with `{ raw, from, to, messageId }`.
 
-To drop a message into someone’s inbox from **your** backend (not from the HTTP send route):
+From your own backend, insert a row without HTTP:
 
 ```ts
 import { writeMailboxMessage } from "@corbits/mailbox";
 
 await writeMailboxMessage(db, {
-  tenantId,
-  principalId,
-  address: "usr_alice@acme.example",
-  fromAddress: "bot@acme.example",
+  tenantId: DEMO.tenantId,
+  principalId: DEMO.principalId,
+  address: "usr_demo@demo.example",
+  fromAddress: "bot@demo.example",
   subject: "Run finished",
-  body: "…",
+  body: "The job completed.",
 });
 ```
 
-A full hub wiring lives in `examples/reference-host`.
+In-tree host: `examples/reference-host`. Richer hub-shaped samples belong in [corbitsdev/examples](https://github.com/corbitsdev/examples), not this README.
 
 ## How it works
 
