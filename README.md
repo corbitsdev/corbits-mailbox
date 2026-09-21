@@ -2,20 +2,18 @@
 
 A native Interchange mailbox for human principals: a Postgres-backed `@intx/mailbox` `MailboxStore` plus the HTTP routes a host UI needs to list, read, and file it. Backend only — this package ships no UI.
 
-## Install
+## Runtime support
 
-Requires Node 24+ and `@intx` 0.2.2 or newer.
+Node >= 24 consumes built `dist/`. `@intx` 0.2.2 or newer. Peer stack: `@intx/log`, `drizzle-orm`, `hono`, `postgres`.
+
+## Quickstart
 
 ```bash
-npm install @corbits/mailbox
+npm add @corbits/mailbox
 pnpm add @corbits/mailbox
 yarn add @corbits/mailbox
 bun add @corbits/mailbox
 ```
-
-Peer stack: `@intx/log`, `drizzle-orm`, `hono`, `postgres`.
-
-## Use
 
 ```ts
 import {
@@ -35,8 +33,6 @@ mountMailbox(app, {
 ```
 
 Routes land under `/me/inbox`, scoped to the principal `resolvePrincipal` returns.
-
-## Full example
 
 ```ts
 import {
@@ -104,9 +100,11 @@ Every write lands through `NativeMailboxStore.append` (uid/modseq always set). S
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for the data model.
 
-## Contributing
+## Development
 
 ```sh
+git clone https://github.com/corbitsdev/corbits-mailbox.git
+cd corbits-mailbox
 bun install
 docker run -d --name mailbox-pg -p 5433:5432 \
   -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=mailbox_core postgres:16
