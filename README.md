@@ -8,7 +8,7 @@ Node >= 24 consumes built `dist/`. Bun >= 1.2 runs TypeScript source. Peers: `@i
 
 ## Quickstart
 
-Install this package **and** the peers it expects the host to provide:
+Install the package and the host peers:
 
 ```bash
 bun add @corbits/mailbox @intx/log hono postgres drizzle-orm
@@ -17,64 +17,60 @@ bun add @corbits/mailbox @intx/log hono postgres drizzle-orm
 # yarn add @corbits/mailbox @intx/log hono postgres drizzle-orm
 ```
 
-`@intx/log` `^0.2.2`, `hono` `^4.12`, `postgres` `^3.4`, `drizzle-orm` `^0.45` (see `peerDependencies`). Postgres 13+ with a database URL.
+Peers: `@intx/log` `^0.2.2`, `hono` `^4.12`, `postgres` `^3.4`, `drizzle-orm` `^0.45`. Postgres 13+. A hub also already has `@intx/hub-api` / `@intx/hub-sessions` / `@intx/db`.
 
-Minimum that actually runs — a fixed demo principal (swap for session auth) and a `deliver` that logs instead of sending mail:
+There are **two** host seams. Workbench uses (1) today. (2) is how a person sends from the inbox UI.
+
+**1. Agent frames land in the person's inbox** — wrap the hub's `persistMail` so every outbound agent mail dual-writes a mailbox row. This is Workbench `apps/hub/src/mailbox-persist.ts`.
+
+```ts
+import { createMailboxPersist } from "@corbits/mailbox";
+
+lookups.persistMail = createMailboxPersist(mailboxDb, {
+  upstream: hubPersistMail, // existing Interchange persistMail
+  authorizeSender: hubAuthorizeMailboxSender, // live run → { tenantId, domain }
+  bus: mailboxBus,
+});
+```
+
+`authorizeSender` is the host's call: only a live agent instance may write. Recipients outside that tenant domain are skipped.
+
+**2. HTTP inbox for the signed-in person** — mount under the hub tenant prefix. `resolvePrincipal` reads the same tenant/principal the hub middleware already set. `senderAddressFor` is their From:. `deliver` is the **host mail router** (SMTP, sidecar `routeMail`, whatever the hub already uses to send MIME) — not a log line.
 
 ```ts
 import { Hono } from "hono";
 import {
   createInMemoryMailboxEventBus,
-  createMailboxDb,
   mountMailbox,
   runMailboxMigrations,
 } from "@corbits/mailbox";
 
-const { db } = createMailboxDb(
-  process.env.DATABASE_URL ??
-    "postgres://postgres:postgres@localhost:5433/mailbox_core",
-);
-await runMailboxMigrations(db);
+await runMailboxMigrations(mailboxDb);
+const mailboxBus = createInMemoryMailboxEventBus();
+const mailboxApp = new Hono();
 
-const DEMO = { tenantId: "tnt_demo", principalId: "usr_demo" };
-
-const app = new Hono();
-mountMailbox(app, {
-  db,
-  bus: createInMemoryMailboxEventBus(),
-  resolvePrincipal: () => DEMO,
-  senderAddressFor: (p) => `${p.principalId}@demo.example`,
-  deliver: async (message) => {
-    console.log("deliver", message.from, "→", message.to);
+mountMailbox(mailboxApp, {
+  db: mailboxDb,
+  bus: mailboxBus,
+  resolvePrincipal: (ctx) => {
+    const c = ctx as { get(k: "tenant" | "principal"): { id: string } };
+    return {
+      tenantId: c.get("tenant").id,
+      principalId: c.get("principal").id,
+    };
   },
+  senderAddressFor: (p) => `${p.principalId}@${mailDomain}`,
+  deliver: (message) => hubSendMime(message),
 });
 
-Bun.serve({ port: 3000, fetch: app.fetch });
-console.log("GET http://127.0.0.1:3000/me/inbox");
+app.route("/api/tenants/:tenantId/mailbox", mailboxApp);
 ```
 
-```bash
-curl http://127.0.0.1:3000/me/inbox
-```
+`hubSendMime` is **your** existing outbound path: `{ raw: Uint8Array, from, to, messageId }`. Workbench does **not** pass `deliver` / `senderAddressFor` yet and still sends `vocabulary` — that catch-up is [CL-8789](https://linear.app/abklabs/issue/CL-8789). Until the hub wires `deliver`, `POST .../mailbox/me/inbox/send` files Sent and then has nowhere to put the bytes.
 
-That lists the demo user's inbox (empty until something writes a row). `POST /me/inbox/send` files `Sent` and calls `deliver` with `{ raw, from, to, messageId }`.
+Solutions Builder does not mount this package; it talks to the hub.
 
-From your own backend, insert a row without HTTP:
-
-```ts
-import { writeMailboxMessage } from "@corbits/mailbox";
-
-await writeMailboxMessage(db, {
-  tenantId: DEMO.tenantId,
-  principalId: DEMO.principalId,
-  address: "usr_demo@demo.example",
-  fromAddress: "bot@demo.example",
-  subject: "Run finished",
-  body: "The job completed.",
-});
-```
-
-In-tree host: `examples/reference-host`. Richer hub-shaped samples belong in [corbitsdev/examples](https://github.com/corbitsdev/examples), not this README.
+In-tree composition proof: `examples/reference-host` (`createApp` from `@intx/hub-api` + this mount). Hub-scale samples belong in [corbitsdev/examples](https://github.com/corbitsdev/examples).
 
 ## How it works
 
