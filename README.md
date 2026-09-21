@@ -21,16 +21,17 @@ Peers: `@intx/log` `^0.2.2`, `hono` `^4.12`, `postgres` `^3.4`, `drizzle-orm` `^
 
 There are **two** host seams. Workbench uses (1) today. (2) is how a person sends from the inbox UI.
 
-**1. Agent frames land in the person's inbox** — wrap the hub's `persistMail` so every outbound agent mail dual-writes a mailbox row. This is Workbench `apps/hub/src/mailbox-persist.ts`.
+**1. Agent frames land in the person's inbox** — wrap the function the hub already uses to persist outbound mail (`persistMail` in Interchange session lookups). Workbench does this in `apps/hub/src/mailbox-persist.ts`. There is no `lookups` export from this package.
 
 ```ts
 import { createMailboxPersist } from "@corbits/mailbox";
 
-lookups.persistMail = createMailboxPersist(mailboxDb, {
-  upstream: hubPersistMail, // existing Interchange persistMail
+const persistMail = createMailboxPersist(mailboxDb, {
+  upstream: hubPersistMail, // the persistMail you already pass into the hub
   authorizeSender: hubAuthorizeMailboxSender, // live run → { tenantId, domain }
   bus: mailboxBus,
 });
+// Pass `persistMail` into the hub in the same place you used to pass hubPersistMail.
 ```
 
 `authorizeSender` is the host's call: only a live agent instance may write. Recipients outside that tenant domain are skipped.
