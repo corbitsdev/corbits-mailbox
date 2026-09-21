@@ -17,26 +17,27 @@ bun add @corbits/mailbox @intx/log hono postgres drizzle-orm
 # yarn add @corbits/mailbox @intx/log hono postgres drizzle-orm
 ```
 
-Peers: `@intx/log` `^0.2.2`, `hono` `^4.12`, `postgres` `^3.4`, `drizzle-orm` `^0.45`. Postgres 13+. A hub also already has `@intx/hub-api` / `@intx/hub-sessions` / `@intx/db`.
+Peers: `@intx/log` `^0.2.2`, `hono` `^4.12`, `postgres` `^3.4`, `drizzle-orm` `^0.45`. A hub also has `@intx/hub-api`, `@intx/hub-sessions`, `@intx/db`. Postgres 13+.
 
-There are **two** host seams. Workbench uses (1) today. (2) is how a person sends from the inbox UI.
+A **generic Interchange hub** does two things with this package. Neither is a demo user or `console.log`.
 
-**1. Agent frames land in the person's inbox** — wrap the function the hub already uses to persist outbound mail (`persistMail` in Interchange session lookups). Workbench does this in `apps/hub/src/mailbox-persist.ts`. There is no `lookups` export from this package.
+**1. Give the hub a persist function that also writes the inbox.**  
+Interchange already persists outbound mail (`persistMail`: `{ senderAddress, recipients, raw }`). Wrap it so each addressed **person** also gets a mailbox row. Pass the **wrapper** into hub construction as `persistMail` — the same slot you used for the unwrapped function. Do not assign onto a `lookups` object; that bag is hub-private.
 
 ```ts
 import { createMailboxPersist } from "@corbits/mailbox";
 
 const persistMail = createMailboxPersist(mailboxDb, {
-  upstream: hubPersistMail, // the persistMail you already pass into the hub
-  authorizeSender: hubAuthorizeMailboxSender, // live run → { tenantId, domain }
+  upstream: hubPersistMail, // what you already passed into the hub
+  authorizeSender, // live run address → { tenantId, domain } or skip
   bus: mailboxBus,
 });
-// Pass `persistMail` into the hub in the same place you used to pass hubPersistMail.
+// createApp / session setup: persistMail,
 ```
 
-`authorizeSender` is the host's call: only a live agent instance may write. Recipients outside that tenant domain are skipped.
+`authorizeSender` is host policy (Workbench: live run only). Recipients outside `domain` are skipped.
 
-**2. HTTP inbox for the signed-in person** — mount under the hub tenant prefix. `resolvePrincipal` reads the same tenant/principal the hub middleware already set. `senderAddressFor` is their From:. `deliver` is the **host mail router** (SMTP, sidecar `routeMail`, whatever the hub already uses to send MIME) — not a log line.
+**2. Mount the person's HTTP inbox** on the hub app, under the tenant routes, using the same principal the hub session middleware already set.
 
 ```ts
 import { Hono } from "hono";
@@ -61,17 +62,17 @@ mountMailbox(mailboxApp, {
     };
   },
   senderAddressFor: (p) => `${p.principalId}@${mailDomain}`,
-  deliver: (message) => hubSendMime(message),
+  deliver: (message) => sendMime(message),
 });
 
 app.route("/api/tenants/:tenantId/mailbox", mailboxApp);
 ```
 
-`hubSendMime` is **your** existing outbound path: `{ raw: Uint8Array, from, to, messageId }`. Workbench does **not** pass `deliver` / `senderAddressFor` yet and still sends `vocabulary` — that catch-up is [CL-8789](https://linear.app/abklabs/issue/CL-8789). Until the hub wires `deliver`, `POST .../mailbox/me/inbox/send` files Sent and then has nowhere to put the bytes.
+`sendMime` is the hub's real outbound MIME path (`{ raw, from, to, messageId }`). Same transport you use for other human mail, not a log.
 
-Solutions Builder does not mount this package; it talks to the hub.
+Today Workbench does (1) by writing `lookups.persistMail` after the fact and (2) without `deliver` / `senderAddressFor`. That is host debt: [CL-8789](https://linear.app/abklabs/issue/CL-8789) (mount), [CL-8790](https://linear.app/abklabs/issue/CL-8790) (pass persistMail at construction). Solutions Builder talks to the hub; it does not mount this package.
 
-In-tree composition proof: `examples/reference-host` (`createApp` from `@intx/hub-api` + this mount). Hub-scale samples belong in [corbitsdev/examples](https://github.com/corbitsdev/examples).
+In-tree: `examples/reference-host` (`@intx/hub-api` `createApp` + this mount). Larger hosts: [corbitsdev/examples](https://github.com/corbitsdev/examples).
 
 ## How it works
 
