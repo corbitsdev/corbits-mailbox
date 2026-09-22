@@ -1,8 +1,7 @@
 // reference-host — a bare Interchange host (`createApp` from the published
 // `@intx/hub-api`) with @corbits/mailbox mounted the way the package's own
-// README Quickstart documents it: `installMailbox` + `wrapPersistMail`, each
-// taking the host's own dependencies as parameters instead of closing over
-// them inline.
+// README Quickstart documents it: `installMailbox`, taking the host's own
+// dependencies as parameters instead of closing over them inline.
 //
 // The host is the real thing: hub routes, the hub request logger and the hub
 // session middleware are all live, and the mailbox principal is resolved out of
@@ -28,12 +27,9 @@ import {
   mountMailbox,
   createInMemoryMailboxEventBus,
   createMailboxDb,
-  createMailboxPersist,
   type MailboxDb,
   type MailboxEventBus,
   type MountMailboxOpts,
-  type MailboxPersistArgs,
-  type AuthorizeMailboxSender,
 } from "@corbits/mailbox";
 
 export const DATABASE_URL =
@@ -92,33 +88,6 @@ function installMailbox(
   app.route("/api", api);
 
   return { db, bus };
-}
-
-/**
- * `wrapPersistMail`, in the same shape the README Quickstart documents it:
- * the host's own pre-existing agent-mail persist path (`upstream`) gets a
- * durable inbox row layered on top, once, at host construction. This
- * reference host runs no agent sessions (see `sessionService` below, which
- * refuses every launch verb), so it never provisions a live agent instance
- * for `authorizeSender` to recognize and has no upstream persist path of its
- * own to wrap — `upstream` mirrors the same explicit refusal `sessionService`
- * uses rather than fabricating a pipeline this host does not have. It is
- * still wired at construction time so the example proves the seam composes,
- * matching every other mount this file demonstrates.
- */
-function wrapPersistMail<R>(
-  db: MailboxDb,
-  bus: MailboxEventBus,
-  opts: {
-    upstream: (args: MailboxPersistArgs) => Promise<R>;
-    authorizeSender: AuthorizeMailboxSender;
-  },
-): (args: MailboxPersistArgs) => Promise<R> {
-  return createMailboxPersist(db, {
-    upstream: opts.upstream,
-    authorizeSender: opts.authorizeSender,
-    bus,
-  });
 }
 
 export type ReferenceHost = {
@@ -226,14 +195,6 @@ export async function createReferenceHost(): Promise<ReferenceHost> {
     deliver: (message) => {
       deliveries.push(message);
     },
-  });
-
-  // Demonstrates the seam without a real agent-mail pipeline behind it — see
-  // `wrapPersistMail`'s doc comment above for why `upstream` and
-  // `authorizeSender` both refuse.
-  wrapPersistMail(db, bus, {
-    upstream: refuse("agent-originated mail"),
-    authorizeSender: () => null,
   });
 
   // Boot order a real host follows: the control plane (here the hub's own
