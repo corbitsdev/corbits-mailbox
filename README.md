@@ -17,14 +17,14 @@ bun add @corbits/mailbox @intx/log hono postgres drizzle-orm
 
 `mountMailbox(app, opts)` adds the inbox routes to your app. Every field of `opts` is a host responsibility:
 
-| `opts` | Type | What the host provides |
-| --- | --- | --- |
-| `db` | `MailboxDb` | Mail lives there (schema `mailbox`). `createMailboxDb` opens a handle; a hub that already has one passes it as `db` instead. |
-| `resolvePrincipal` | `(ctx: unknown) => ResolvedPrincipal \| null` | Who this HTTP request is. Return `{ tenantId, principalId }` or `null` for anonymous requests. |
-| `senderAddressFor` | `(principal: ResolvedPrincipal) => string` | That person's From: address, as resolved from the host's own directory. |
-| `deliver` | `(message: OutgoingMailboxMessage) => void` | The host's mail transport. Called once per send with `{ raw, from, to, messageId }` after the message has been filed in Postgres. This package builds MIME and files `Sent`; transmission is the host's job. |
-| `bus` | `MailboxEventBus` (optional) | SSE fan-out only. Omit it for a single-process host; the default in-process bus applies. Pass a shared bus when several host processes must fan the same inbox events. |
-| `heartbeatIntervalMs` | `number` (optional) | SSE keep-alive period. Defaults to 25s. |
+| `opts`                | Type                                          | What the host provides                                                                                                                                                                                       |
+| --------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `db`                  | `MailboxDb`                                   | Mail lives there (schema `mailbox`). `createMailboxDb` opens a handle; a hub that already has one passes it as `db` instead.                                                                                 |
+| `resolvePrincipal`    | `(ctx: unknown) => ResolvedPrincipal \| null` | Who this HTTP request is. Return `{ tenantId, principalId }` or `null` for anonymous requests.                                                                                                               |
+| `senderAddressFor`    | `(principal: ResolvedPrincipal) => string`    | That person's From: address, as resolved from the host's own directory.                                                                                                                                      |
+| `deliver`             | `(message: OutgoingMailboxMessage) => void`   | The host's mail transport. Called once per send with `{ raw, from, to, messageId }` after the message has been filed in Postgres. This package builds MIME and files `Sent`; transmission is the host's job. |
+| `bus`                 | `MailboxEventBus`                             | SSE fan-out only; mail itself is Postgres. `createInMemoryMailboxEventBus()` for a single-process host; a shared bus when several host processes must fan the same inbox events.                             |
+| `heartbeatIntervalMs` | `number` (optional)                           | SSE keep-alive period. Defaults to 25s.                                                                                                                                                                      |
 
 Wire it as one function your app calls at boot with its own `databaseUrl` and the two things only the host can answer — `senderAddressFor` and `deliver` — as typed parameters, not example bodies:
 

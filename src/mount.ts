@@ -8,7 +8,6 @@ import type { Thread } from "@intx/types/runtime";
 import type { MailboxDb } from "./db.js";
 import type { NativeMailboxStore } from "./native-store.js";
 import {
-  createInMemoryMailboxEventBus,
   publishMailboxEvent,
   type MailboxEvent,
   type MailboxEventBus,
@@ -31,12 +30,7 @@ export type OutgoingMailboxMessage = {
 
 export type MountMailboxOpts = {
   db: MailboxDb;
-  /**
-   * SSE live-update bus only. Mail is Postgres. Defaults to an in-process
-   * bus (one hub process). Pass a shared bus if several hub processes must
-   * fan the same inbox events.
-   */
-  bus?: MailboxEventBus;
+  bus: MailboxEventBus;
   resolvePrincipal: (
     ctx: unknown,
   ) => Promise<ResolvedPrincipal | null> | ResolvedPrincipal | null;
@@ -208,8 +202,7 @@ export function mountMailbox<E extends Env>(
   app: Hono<E>,
   opts: MountMailboxOpts,
 ): Hono<E> {
-  const { db, resolvePrincipal, senderAddressFor, deliver } = opts;
-  const bus = opts.bus ?? createInMemoryMailboxEventBus();
+  const { db, bus, resolvePrincipal, senderAddressFor, deliver } = opts;
   const heartbeatIntervalMs =
     opts.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
   if (!Number.isFinite(heartbeatIntervalMs) || heartbeatIntervalMs <= 0) {
