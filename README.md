@@ -19,40 +19,51 @@ bun add @corbits/mailbox @intx/log hono postgres drizzle-orm
 
 | `opts` | Type | What the host provides |
 | --- | --- | --- |
-| `db` | `MailboxDb` | The host's existing drizzle/Postgres handle. Mail is stored there (schema `mailbox`). |
+| `db` | `MailboxDb` | Mail lives there (schema `mailbox`). `createMailboxDb` opens a handle; a hub that already has one passes it as `db` instead. |
 | `resolvePrincipal` | `(ctx: unknown) => ResolvedPrincipal \| null` | Who this HTTP request is. Return `{ tenantId, principalId }` or `null` for anonymous requests. |
 | `senderAddressFor` | `(principal: ResolvedPrincipal) => string` | That person's From: address, as resolved from the host's own directory. |
 | `deliver` | `(message: OutgoingMailboxMessage) => void` | The host's mail transport. Called once per send with `{ raw, from, to, messageId }` after the message has been filed in Postgres. This package builds MIME and files `Sent`; transmission is the host's job. |
 | `bus` | `MailboxEventBus` (optional) | SSE fan-out only. Omit it for a single-process host; the default in-process bus applies. Pass a shared bus when several host processes must fan the same inbox events. |
 | `heartbeatIntervalMs` | `number` (optional) | SSE keep-alive period. Defaults to 25s. |
 
-Run the migrations once at host boot, before mounting:
+The program below is complete: it opens a handle with `createMailboxDb`, runs the migrations, and mounts the inbox on a fresh Hono app. A hub with several processes passes a shared `bus`; otherwise the default in-process bus applies.
 
 ```ts
-import { runMailboxMigrations, mountMailbox } from "@corbits/mailbox";
+import { Hono } from "hono";
+import {
+  createMailboxDb,
+  mountMailbox,
+  runMailboxMigrations,
+} from "@corbits/mailbox";
+
+const DATABASE_URL = "postgres://localhost/mailbox";
+const { db } = createMailboxDb(DATABASE_URL);
 
 await runMailboxMigrations(db);
 
+const app = new Hono();
 mountMailbox(app, {
   db,
-  resolvePrincipal,
-  senderAddressFor,
-  deliver,
-  // bus omitted: the default in-process bus fits a single-process host.
+  resolvePrincipal: (ctx) => {
+    const c = ctx as {
+      get(k: "tenant" | "principal"): { id: string } | undefined;
+    };
+    const tenant = c.get("tenant");
+    const principal = c.get("principal");
+    if (!tenant || !principal) return null;
+    return { tenantId: tenant.id, principalId: principal.id };
+  },
+  senderAddressFor: ({ principalId, tenantId }) =>
+    `${principalId}@${tenantId}.example`,
+  deliver: (message) => {
+    console.log(`filed ${message.messageId} for ${message.to.join(", ")}`);
+  },
 });
+
+export default app;
 ```
 
-`resolvePrincipal` reads whatever identity the host middleware already placed on the request context and maps it to `{ tenantId, principalId }`:
-
-```ts
-resolvePrincipal: (ctx) => {
-  const c = ctx as { get(k: "tenant" | "principal"): { id: string } | undefined };
-  const tenant = c.get("tenant");
-  const principal = c.get("principal");
-  if (!tenant || !principal) return null;
-  return { tenantId: tenant.id, principalId: principal.id };
-};
-```
+The inline `resolvePrincipal` reads whatever identity the host middleware already placed on the request context and maps it to `{ tenantId, principalId }`. `senderAddressFor` answers that person's From: address from the host's own directory; `deliver` transmits what the package already filed in `Sent`.
 
 Agent-originated mail reaches a person's inbox through `createMailboxPersist`, which wraps the host's own persistence function and is passed in at hub construction.
 
