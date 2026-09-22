@@ -10,6 +10,9 @@ Node >= 24 consumes built `dist/`. Bun >= 1.2 runs TypeScript source. Peers: `@i
 
 ```bash
 bun add @corbits/mailbox @intx/log hono postgres drizzle-orm
+# or: npm install @corbits/mailbox @intx/log hono postgres drizzle-orm
+# or: pnpm add @corbits/mailbox @intx/log hono postgres drizzle-orm
+# or: yarn add @corbits/mailbox @intx/log hono postgres drizzle-orm
 ```
 
 This is not an app. A hub mounts it. The only **complete** program here is [`examples/reference-host`](./examples/reference-host) (`createApp` + this mount, Postgres, acceptance tests).
@@ -23,6 +26,23 @@ This is not an app. A hub mounts it. The only **complete** program here is [`exa
 | `senderAddressFor` | That person’s From: address as **your directory** stores it (not a string you invent in the mount). |
 | `deliver` | After Send has been filed in Postgres, **transmit** `{ raw, from, to, messageId }`. This package does not send SMTP. |
 | `bus` | Optional. SSE only. Default is fine for one hub process. |
+
+Run the migrations once at host boot, before mounting (same order as
+[`examples/reference-host/src/index.ts`](./examples/reference-host/src/index.ts)):
+
+```ts
+import { runMailboxMigrations, mountMailbox } from "@corbits/mailbox";
+
+await runMailboxMigrations(db);
+
+mountMailbox(app, {
+  db,
+  resolvePrincipal,
+  senderAddressFor,
+  deliver,
+  // bus omitted: the default in-process bus is fine for one hub process.
+});
+```
 
 **`resolvePrincipal` in a real hub** (Workbench already does this — tenant and principal are already on the request):
 
@@ -48,7 +68,7 @@ Routes the mount adds: `/me/inbox…` (host usually nests them under `/api`).
 
 Writes go through a native `MailboxStore` (uid/modseq always set). Search and threads are vendored `@intx/mailbox` over that store. `POST /me/inbox/send` only builds the message and files `Sent` — `deliver` is how it leaves the machine.
 
-See [ARCHITECTURE.md](./ARCHITECTURE.md), [PRODUCT.md](./PRODUCT.md), and [IMPLEMENTATION.md](./IMPLEMENTATION.md) if those files are in the tree.
+See [ARCHITECTURE.md](./ARCHITECTURE.md).
 
 ## Development
 
