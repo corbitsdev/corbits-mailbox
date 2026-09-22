@@ -26,14 +26,12 @@ mountMailbox(api, {
   },
   senderAddressFor: ({ tenantId, principalId }) =>
     `${principalId}@${tenantId}.example`,
-  deliver: (message) => {
-    deliveries.push(message);
-  },
+  deliver: (message) => sendRawMail(message),
 });
 app.route("/api", api);
 ```
 
-`db`, `app`, `AppEnv`, `deliveries`, and `getSession` are in [`examples/reference-host`](./examples/reference-host). Mail is Postgres. `bus` is optional: default is an in-process **SSE** fan-out (not the store). Pass `bus` only if several hub processes must share live inbox events.
+`db` and `app` come from `createApp` / `createDB` in that file. Mail **rows** are Postgres. `deliver` is not storage — the library already wrote Sent. `sendRawMail` is the hub’s outbound transport (SMTP, SES, sidecar `routeMail`). The example host implements it as a test spy so acceptance tests can assert the send happened without opening SMTP. Production must actually send `message.raw`.
 
 Inbox paths: `GET/POST /api/me/inbox…`.
 
