@@ -1,5 +1,8 @@
 // reference-host — a bare Interchange host (`createApp` from the published
-// `@intx/hub-api`) with @corbits/mailbox mounted on it.
+// `@intx/hub-api`) with @corbits/mailbox mounted the way the package's own
+// README Quickstart documents it: `installMailbox` + `wrapPersistMail`, each
+// taking the host's own dependencies as parameters instead of closing over
+// them inline.
 //
 // The host is the real thing: hub routes, the hub request logger and the hub
 // session middleware are all live, and the mailbox principal is resolved out of
@@ -15,17 +18,22 @@ import type { Context } from "hono";
 import { createApp, type AppEnv } from "@intx/hub-api";
 import { createDB } from "@intx/db";
 import {
-  createEventCollectorRegistry,
+  createSidecarCredentialResolver,
   createSidecarRouter,
+  createEventCollectorRegistry,
   type SessionService,
-  type SidecarAuthenticator,
 } from "@intx/hub-sessions";
 import {
   runMailboxMigrations,
   mountMailbox,
   createInMemoryMailboxEventBus,
+  createMailboxDb,
+  createMailboxPersist,
   type MailboxDb,
   type MailboxEventBus,
+  type MountMailboxOpts,
+  type MailboxPersistArgs,
+  type AuthorizeMailboxSender,
 } from "@corbits/mailbox";
 
 export const DATABASE_URL =
@@ -48,6 +56,71 @@ function toDbConfig(raw: string) {
   };
 }
 
+/**
+ * `installMailbox`, in the exact shape the README Quickstart documents it:
+ * the host's own `databaseUrl`, `resolvePrincipal`, `senderAddressFor` and
+ * `deliver` arrive as typed parameters, `mountMailbox` goes on a sub-app the
+ * host routes under `/api`, and the mailbox's own db/bus handles come back
+ * out for the host (and this example's tests) to drive directly.
+ */
+function installMailbox(
+  app: Hono<AppEnv>,
+  opts: {
+    databaseUrl: string;
+    resolvePrincipal: MountMailboxOpts["resolvePrincipal"];
+    senderAddressFor: MountMailboxOpts["senderAddressFor"];
+    deliver: MountMailboxOpts["deliver"];
+  },
+): { db: MailboxDb; bus: MailboxEventBus } {
+  const { db } = createMailboxDb(opts.databaseUrl);
+  // In-process fan-out for this single host process.
+  const bus = createInMemoryMailboxEventBus();
+
+  const api = new Hono<AppEnv>();
+  mountMailbox(api, {
+    db,
+    bus,
+    resolvePrincipal: opts.resolvePrincipal,
+    senderAddressFor: opts.senderAddressFor,
+    deliver: opts.deliver,
+  });
+  // The convention: mounted @corbits/* modules serve under `/api`, matching
+  // Interchange's own `app.route("/api/me", …)` / `app.route("/api/tenants", …)`.
+  // The core registers its routes root-relative (`/me/inbox*`), so the host
+  // nests them in a sub-app and routes that sub-app at `/api`. No `/v1`
+  // segment and no vendor prefix — the served paths are `/api/me/inbox*`.
+  app.route("/api", api);
+
+  return { db, bus };
+}
+
+/**
+ * `wrapPersistMail`, in the same shape the README Quickstart documents it:
+ * the host's own pre-existing agent-mail persist path (`upstream`) gets a
+ * durable inbox row layered on top, once, at host construction. This
+ * reference host runs no agent sessions (see `sessionService` below, which
+ * refuses every launch verb), so it never provisions a live agent instance
+ * for `authorizeSender` to recognize and has no upstream persist path of its
+ * own to wrap — `upstream` mirrors the same explicit refusal `sessionService`
+ * uses rather than fabricating a pipeline this host does not have. It is
+ * still wired at construction time so the example proves the seam composes,
+ * matching every other mount this file demonstrates.
+ */
+function wrapPersistMail<R>(
+  db: MailboxDb,
+  bus: MailboxEventBus,
+  opts: {
+    upstream: (args: MailboxPersistArgs) => Promise<R>;
+    authorizeSender: AuthorizeMailboxSender;
+  },
+): (args: MailboxPersistArgs) => Promise<R> {
+  return createMailboxPersist(db, {
+    upstream: opts.upstream,
+    authorizeSender: opts.authorizeSender,
+    bus,
+  });
+}
+
 export type ReferenceHost = {
   db: MailboxDb;
   /**
@@ -68,16 +141,10 @@ export type ReferenceHost = {
 };
 
 export async function createReferenceHost(): Promise<ReferenceHost> {
-  // One pool. The mailbox mounts on the handle the host already has from
-  // `createDB` — the seam takes any drizzle postgres-js instance, so there is
-  // no second connection to the same database.
+  // The hub's own control-plane handle (tenant/principal/sidecar tables).
+  // The mailbox gets its own connection via `installMailbox` below, exactly
+  // as a real host's `installMailbox(app, { databaseUrl, … })` call does.
   const hub = createDB(toDbConfig(DATABASE_URL));
-  const db: MailboxDb = hub.db;
-  // Boot order a real host follows: the control plane (here the hub's own
-  // tables) must exist before the mailbox migrations can FK to it. Resetting
-  // state for re-runnable scenarios is the TEST harness's job, not the host's
-  // — see `test/acceptance.test.ts`.
-  await runMailboxMigrations(db);
 
   let session: Session = { tenantId: "acme", principalId: "user-1" };
 
@@ -104,23 +171,21 @@ export async function createReferenceHost(): Promise<ReferenceHost> {
     };
   };
 
-  // A bare Interchange host: real sidecar router, real event-collector
+  // A bare Interchange host: a real sidecar router (built the published way,
+  // off `createSidecarCredentialResolver`) and a real event-collector
   // registry. The host runs no agent sessions, so its SessionService refuses
   // every launch verb rather than pretending to serve it, and it opts out of
   // the asset/git surface by passing null for both.
-  const authenticateSidecar: SidecarAuthenticator = async ({ sidecarId }) => ({
-    kind: "sidecar",
-    sidecarId,
-  });
   const refuse = (verb: string) => (): never => {
     throw new Error(`reference-host runs no agent sessions: ${verb}`);
   };
+  const sidecarCredentials = createSidecarCredentialResolver({ db: hub.db });
+  const sidecarRouter = createSidecarRouter({
+    authenticateSidecar: async ({ token }) => sidecarCredentials.resolve(token),
+    validateSidecarIdentity: sidecarCredentials.isCurrent,
+  });
   const sessionService: SessionService = {
     stageWorkflowStep: refuse("stageWorkflowStep"),
-    deployInstanceAtHead: refuse("deployInstanceAtHead"),
-    deploySingleStepAtHead: refuse("deploySingleStepAtHead"),
-    deployWorkflowDefinition: refuse("deployWorkflowDefinition"),
-    sendUserMessage: refuse("sendUserMessage"),
     endSession: refuse("endSession"),
   };
 
@@ -128,7 +193,7 @@ export async function createReferenceHost(): Promise<ReferenceHost> {
     getSession,
     authHandler: () => new Response("", { status: 404 }),
     db: hub.db,
-    sidecarRouter: createSidecarRouter({ authenticateSidecar }),
+    sidecarRouter,
     sessionService,
     eventCollectors: createEventCollectorRegistry({ db: hub.db }),
     assetService: null,
@@ -149,17 +214,9 @@ export async function createReferenceHost(): Promise<ReferenceHost> {
     return tenantId && principalId ? { tenantId, principalId } : null;
   };
 
-  const bus = createInMemoryMailboxEventBus();
   const deliveries: ReferenceHost["deliveries"] = [];
-  // The convention: mounted @corbits/* modules serve under `/api`, matching
-  // Interchange's own `app.route("/api/me", …)` / `app.route("/api/tenants", …)`.
-  // The core registers its routes root-relative (`/me/inbox*`), so the host
-  // nests them in a sub-app and routes that sub-app at `/api`. No `/v1`
-  // segment and no vendor prefix — the served paths are `/api/me/inbox*`.
-  const api = new Hono<AppEnv>();
-  mountMailbox(api, {
-    db,
-    bus,
+  const { db, bus } = installMailbox(app, {
+    databaseUrl: DATABASE_URL,
     resolvePrincipal,
     // Matches `getSession`'s own `email` derivation above: this host encodes
     // the mailbox address as `<principalId>@<tenantId>.example` throughout.
@@ -170,7 +227,20 @@ export async function createReferenceHost(): Promise<ReferenceHost> {
       deliveries.push(message);
     },
   });
-  app.route("/api", api);
+
+  // Demonstrates the seam without a real agent-mail pipeline behind it — see
+  // `wrapPersistMail`'s doc comment above for why `upstream` and
+  // `authorizeSender` both refuse.
+  wrapPersistMail(db, bus, {
+    upstream: refuse("agent-originated mail"),
+    authorizeSender: () => null,
+  });
+
+  // Boot order a real host follows: the control plane (here the hub's own
+  // tables) must exist before the mailbox migrations can FK to it. Resetting
+  // state for re-runnable scenarios is the TEST harness's job, not the host's
+  // — see `test/acceptance.test.ts`.
+  await runMailboxMigrations(db);
 
   return {
     db,
