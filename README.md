@@ -31,6 +31,7 @@ The program below is complete: it opens a handle with `createMailboxDb`, runs th
 ```ts
 import { Hono } from "hono";
 import {
+  createInMemoryMailboxEventBus,
   createMailboxDb,
   mountMailbox,
   runMailboxMigrations,
@@ -41,9 +42,14 @@ const { db } = createMailboxDb(DATABASE_URL);
 
 await runMailboxMigrations(db);
 
+// In-process fan-out for a single hub instance; pass a shared bus instead
+// once more than one process needs to see the same SSE events.
+const bus = createInMemoryMailboxEventBus();
+
 const app = new Hono();
 mountMailbox(app, {
   db,
+  bus,
   resolvePrincipal: (ctx) => {
     const c = ctx as {
       get(k: "tenant" | "principal"): { id: string } | undefined;
@@ -65,9 +71,51 @@ export default app;
 
 The inline `resolvePrincipal` reads whatever identity the host middleware already placed on the request context and maps it to `{ tenantId, principalId }`. `senderAddressFor` answers that person's From: address from the host's own directory; `deliver` transmits what the package already filed in `Sent`.
 
-Agent-originated mail reaches a person's inbox through `createMailboxPersist`, which wraps the host's own persistence function and is passed in at hub construction.
-
 Routes the mount adds: `/me/inbox…` (hosts typically nest them under `/api`).
+
+### Agent-originated mail
+
+`mountMailbox` covers a person's own inbox. A message that originates elsewhere — an agent replying through the host's own transport — reaches that inbox by wrapping the host's existing persist function with `createMailboxPersist`, once, at host construction:
+
+```ts
+import postgres from "postgres";
+import {
+  createMailboxPersist,
+  type AuthorizeMailboxSender,
+  type MailboxPersistArgs,
+} from "@corbits/mailbox";
+
+const directory = postgres(DATABASE_URL);
+
+// Only a sender address the host recognizes gets a mailbox row; anything
+// else is skipped rather than filed under a tenant it doesn't belong to.
+const authorizeSender: AuthorizeMailboxSender = async (senderAddress) => {
+  const [row] = await directory<{ tenantId: string; domain: string }[]>`
+    select tenant_id as "tenantId", domain
+    from sender_directory
+    where address = ${senderAddress}
+  `;
+  return row ?? null;
+};
+
+// The host's own transport record for this frame — already written today,
+// independent of the mailbox. `createMailboxPersist` calls it unconditionally
+// and re-throws whatever it throws, after the mailbox write is attempted.
+async function persistToTransportLog(args: MailboxPersistArgs): Promise<void> {
+  await directory`
+    insert into transport_log (sender_address, recipients, raw)
+    values (${args.senderAddress}, ${args.recipients}, ${args.raw})
+  `;
+}
+
+const persistMail = createMailboxPersist(db, {
+  upstream: persistToTransportLog,
+  authorizeSender,
+  bus,
+});
+```
+
+Call the resulting `persistMail` wherever the host currently delegates an outbound frame; it does both writes.
 
 ## How it works
 
