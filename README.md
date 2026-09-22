@@ -16,6 +16,7 @@ bun add @corbits/mailbox @intx/log @intx/hub-api @intx/db @intx/hub-sessions hon
 
 ```ts
 const bus = createInMemoryMailboxEventBus();
+// SSE only (inbox live updates). Mail itself is Postgres, not this bus.
 const deliveries: {
   raw: Uint8Array;
   from: string;
