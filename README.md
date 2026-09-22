@@ -26,7 +26,7 @@ bun add @corbits/mailbox @intx/log hono postgres drizzle-orm
 | `bus` | `MailboxEventBus` (optional) | SSE fan-out only. Omit it for a single-process host; the default in-process bus applies. Pass a shared bus when several host processes must fan the same inbox events. |
 | `heartbeatIntervalMs` | `number` (optional) | SSE keep-alive period. Defaults to 25s. |
 
-The program below is complete: it opens a handle with `createMailboxDb`, runs the migrations, and mounts the inbox on a fresh Hono app. A hub with several processes passes a shared `bus`; otherwise the default in-process bus applies.
+Wire it as one function your app calls at boot with its own `databaseUrl` and the two things only the host can answer — `senderAddressFor` and `deliver` — as typed parameters, not example bodies:
 
 ```ts
 import { Hono } from "hono";
@@ -34,88 +34,86 @@ import {
   createInMemoryMailboxEventBus,
   createMailboxDb,
   mountMailbox,
-  runMailboxMigrations,
+  type MailboxDb,
+  type MailboxEventBus,
+  type MountMailboxOpts,
 } from "@corbits/mailbox";
 
-const DATABASE_URL = "postgres://localhost/mailbox";
-const { db } = createMailboxDb(DATABASE_URL);
-
-await runMailboxMigrations(db);
-
-// In-process fan-out for a single hub instance; pass a shared bus instead
-// once more than one process needs to see the same SSE events.
-const bus = createInMemoryMailboxEventBus();
-
-const app = new Hono();
-mountMailbox(app, {
-  db,
-  bus,
-  resolvePrincipal: (ctx) => {
-    const c = ctx as {
-      get(k: "tenant" | "principal"): { id: string } | undefined;
-    };
-    const tenant = c.get("tenant");
-    const principal = c.get("principal");
-    if (!tenant || !principal) return null;
-    return { tenantId: tenant.id, principalId: principal.id };
+export function installMailbox(
+  app: Hono,
+  opts: {
+    databaseUrl: string;
+    resolvePrincipal?: MountMailboxOpts["resolvePrincipal"];
+    senderAddressFor: MountMailboxOpts["senderAddressFor"];
+    deliver: MountMailboxOpts["deliver"];
   },
-  senderAddressFor: ({ principalId, tenantId }) =>
-    `${principalId}@${tenantId}.example`,
-  deliver: (message) => {
-    console.log(`filed ${message.messageId} for ${message.to.join(", ")}`);
-  },
-});
+): { db: MailboxDb; bus: MailboxEventBus } {
+  const { db } = createMailboxDb(opts.databaseUrl);
+  // In-process fan-out for a single hub instance; pass a shared bus instead
+  // once more than one process needs to see the same SSE events.
+  const bus = createInMemoryMailboxEventBus();
 
-export default app;
+  const mailboxApp = new Hono();
+  mountMailbox(mailboxApp, {
+    db,
+    bus,
+    resolvePrincipal:
+      opts.resolvePrincipal ??
+      ((ctx) => {
+        const c = ctx as {
+          get(k: "tenant" | "principal"): { id: string } | undefined;
+        };
+        const tenant = c.get("tenant");
+        const principal = c.get("principal");
+        return tenant && principal
+          ? { tenantId: tenant.id, principalId: principal.id }
+          : null;
+      }),
+    senderAddressFor: opts.senderAddressFor,
+    deliver: opts.deliver,
+  });
+  // Mounted under the tenant it belongs to, alongside a host's other
+  // session-authenticated routes.
+  app.route("/api/tenants/:tenantId/mailbox", mailboxApp);
+
+  return { db, bus };
+}
 ```
 
-The inline `resolvePrincipal` reads whatever identity the host middleware already placed on the request context and maps it to `{ tenantId, principalId }`. `senderAddressFor` answers that person's From: address from the host's own directory; `deliver` transmits what the package already filed in `Sent`.
+`resolvePrincipal` defaults to reading whatever identity the host's own auth/tenant middleware already placed on the request context; pass your own to read it differently. `senderAddressFor` is a lookup into the host's own directory — a hub with `principal`/`tenant` tables answers with that person's address, lowercased, at their tenant's mail domain. `deliver` is the host's real mail transport — a hub with a request pipeline of its own hands the built frame back into it (so a message addressed to a running agent reaches it through the same route stack as everything else), rather than putting a byte on a wire itself here.
 
-Routes the mount adds: `/me/inbox…` (hosts typically nest them under `/api`).
+Routes the mount adds: `/me/inbox…`.
 
 ### Agent-originated mail
 
 `mountMailbox` covers a person's own inbox. A message that originates elsewhere — an agent replying through the host's own transport — reaches that inbox by wrapping the host's existing persist function with `createMailboxPersist`, once, at host construction:
 
 ```ts
-import postgres from "postgres";
 import {
   createMailboxPersist,
   type AuthorizeMailboxSender,
+  type MailboxDb,
+  type MailboxEventBus,
   type MailboxPersistArgs,
 } from "@corbits/mailbox";
 
-const directory = postgres(DATABASE_URL);
-
-// Only a sender address the host recognizes gets a mailbox row; anything
-// else is skipped rather than filed under a tenant it doesn't belong to.
-const authorizeSender: AuthorizeMailboxSender = async (senderAddress) => {
-  const [row] = await directory<{ tenantId: string; domain: string }[]>`
-    select tenant_id as "tenantId", domain
-    from sender_directory
-    where address = ${senderAddress}
-  `;
-  return row ?? null;
-};
-
-// The host's own transport record for this frame — already written today,
-// independent of the mailbox. `createMailboxPersist` calls it unconditionally
-// and re-throws whatever it throws, after the mailbox write is attempted.
-async function persistToTransportLog(args: MailboxPersistArgs): Promise<void> {
-  await directory`
-    insert into transport_log (sender_address, recipients, raw)
-    values (${args.senderAddress}, ${args.recipients}, ${args.raw})
-  `;
+export function wrapPersistMail<R>(
+  db: MailboxDb,
+  bus: MailboxEventBus,
+  opts: {
+    upstream: (args: MailboxPersistArgs) => Promise<R>;
+    authorizeSender: AuthorizeMailboxSender;
+  },
+): (args: MailboxPersistArgs) => Promise<R> {
+  return createMailboxPersist(db, {
+    upstream: opts.upstream,
+    authorizeSender: opts.authorizeSender,
+    bus,
+  });
 }
-
-const persistMail = createMailboxPersist(db, {
-  upstream: persistToTransportLog,
-  authorizeSender,
-  bus,
-});
 ```
 
-Call the resulting `persistMail` wherever the host currently delegates an outbound frame; it does both writes.
+`authorizeSender` is the host's own check that a sender address is one it recognizes right now — a hub answers by looking up the tenant a mailbox-routable address (a person, or a live agent run) currently resolves to, and refusing anything else. `upstream` is the host's own pre-existing mail-persist path — the write it already made before this package existed; `createMailboxPersist` calls it unconditionally and layers the durable inbox write on top, so a transport failure never costs a recipient the copy that makes the message readable later. Call the wrapped `persistMail` wherever the host currently delegates an outbound frame; it does both writes.
 
 ## How it works
 
