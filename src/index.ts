@@ -29,8 +29,8 @@ export { createMailboxDb } from "./db.js";
 export type { MailboxDb } from "./db.js";
 
 // The native `MailboxStore` over `mailbox.principal_mail` /
-// `mailbox.mailbox_state` — the vendored `executeSearch`/`executeThread` from
-// `@intx/mailbox` run over it unmodified.
+// `mailbox.mailbox_state` — `@intx/mailbox`'s `executeSearch`/`executeThread`
+// run over it unmodified.
 export {
   createPrincipalMailboxStore,
   openNativeMailboxStore,

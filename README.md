@@ -4,15 +4,15 @@ Give a **person** in an Interchange hub an inbox: list, read, flag, send, and li
 
 ## Runtime support
 
-Node >= 24 consumes built `dist/`. Bun >= 1.2 runs TypeScript source. Peers: `@intx/log`, `drizzle-orm`, `hono`, `postgres`.
+Node >= 24 consumes built `dist/`. Bun >= 1.2 runs TypeScript source. Peers: `@intx/log`, `@intx/mailbox`, `@intx/mime`, `@intx/types`, `drizzle-orm`, `hono`, `postgres`.
 
 ## Quickstart
 
 ```bash
-bun add @corbits/mailbox @intx/log hono postgres drizzle-orm
-# or: npm install @corbits/mailbox @intx/log hono postgres drizzle-orm
-# or: pnpm add @corbits/mailbox @intx/log hono postgres drizzle-orm
-# or: yarn add @corbits/mailbox @intx/log hono postgres drizzle-orm
+bun add @corbits/mailbox @intx/log @intx/mailbox @intx/mime @intx/types hono postgres drizzle-orm
+# or: npm install @corbits/mailbox @intx/log @intx/mailbox @intx/mime @intx/types hono postgres drizzle-orm
+# or: pnpm add @corbits/mailbox @intx/log @intx/mailbox @intx/mime @intx/types hono postgres drizzle-orm
+# or: yarn add @corbits/mailbox @intx/log @intx/mailbox @intx/mime @intx/types hono postgres drizzle-orm
 ```
 
 `mountMailbox(app, opts)` adds the inbox routes to your app. Every field of `opts` is a host responsibility:
@@ -117,7 +117,7 @@ export function wrapPersistMail<R>(
 
 ## How it works
 
-Writes go through a native `MailboxStore` (uid/modseq always set). Search and threads are vendored `@intx/mailbox` over that store. `POST /me/inbox/send` builds the RFC 5322 message and files a copy in `Sent`, then calls the host's `deliver` exactly once to transmit it.
+Writes go through a native `MailboxStore` (uid/modseq always set). Search and threads are `@intx/mailbox` run over that store. `POST /me/inbox/send` builds the RFC 5322 message and files a copy in `Sent`, then calls the host's `deliver` exactly once to transmit it.
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md).
 
