@@ -15,19 +15,9 @@ bun add @corbits/mailbox @intx/log @intx/hub-api @intx/db @intx/hub-sessions hon
 **Run the host this package ships:** [`examples/reference-host`](./examples/reference-host). That file calls `createApp` from `@intx/hub-api`, then this:
 
 ```ts
-const bus = createInMemoryMailboxEventBus();
-// SSE only (inbox live updates). Mail itself is Postgres, not this bus.
-const deliveries: {
-  raw: Uint8Array;
-  from: string;
-  to: string[];
-  messageId: string;
-}[] = [];
-
 const api = new Hono<AppEnv>();
 mountMailbox(api, {
-  db, // hub.db — one drizzle pool, mailbox schema on the same Postgres
-  bus,
+  db, // hub.db — Postgres. Mail is not in-memory.
   resolvePrincipal: (ctx) => {
     const user = (ctx as Context<AppEnv>).get("user");
     if (!user) return null;
@@ -43,7 +33,7 @@ mountMailbox(api, {
 app.route("/api", api);
 ```
 
-`db`, `app`, `AppEnv`, and `getSession` are created in that same file (`createDB` + `createApp`). `deliver` in the example **appends to `deliveries`** so tests can assert without SMTP. Production replaces that push with the hub’s real send of `message.raw`.
+`db`, `app`, `AppEnv`, `deliveries`, and `getSession` are in [`examples/reference-host`](./examples/reference-host). Mail is Postgres. `bus` is optional: default is an in-process **SSE** fan-out (not the store). Pass `bus` only if several hub processes must share live inbox events.
 
 Inbox paths: `GET/POST /api/me/inbox…`.
 
