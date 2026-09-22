@@ -132,7 +132,7 @@ describe("native MailboxStore over the principal mailbox tables", () => {
     expect(secondMove).toBe(2);
   });
 
-  it("runs the vendored executeSearch and executeThread over the native store", async () => {
+  it("runs @intx/mailbox's executeSearch and executeThread over the native store", async () => {
     const inbox = await openNativeMailboxStore(db, {
       tenantId: TENANT_ID,
       principalId: PRINCIPAL_ID,

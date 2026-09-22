@@ -122,7 +122,7 @@ const ID_PARAM = {
 };
 
 /**
- * One item of `GET /me/inbox`: the vendored `executeSearch`'s ref, plus the
+ * One item of `GET /me/inbox`: `@intx/mailbox`'s `executeSearch`'s ref, plus the
  * envelope and raw bytes read for it.
  */
 type MailboxListItem = {
@@ -143,7 +143,7 @@ type MailboxListItem = {
 // The five single-message mutations that move or flag a message. `op` is the
 // event op published on success.
 /**
- * One node of `GET /me/inbox/threads(/:rootUid)`: the vendored
+ * One node of `GET /me/inbox/threads(/:rootUid)`: `@intx/mailbox`'s
  * `executeThread`'s ref (recursively, as `children`) plus the same envelope
  * fields `GET /me/inbox` returns for that ref, so a client can render a
  * thread without an extra fetch per message.
@@ -189,8 +189,8 @@ const MOVE_VERBS = [
  *
  * This library exists ONLY to give human principals a native Interchange
  * mailbox — list, read/unread, archive/trash/restore, and a live SSE stream.
- * Every route is a thin wrapper over `NativeMailboxStore` and the vendored
- * `@intx/mailbox` `executeSearch`.
+ * Every route is a thin wrapper over `NativeMailboxStore` and
+ * `@intx/mailbox`'s `executeSearch`.
  *
  * "No-member asymmetry" is intentional, spec'd behavior: when
  * `resolvePrincipal` yields no principal, list returns an EMPTY result (200)
@@ -311,7 +311,7 @@ export function mountMailbox<E extends Env>(
       tags: TAGS,
       summary: "The caller's inbox as threads",
       description:
-        "The vendored `executeThread` (REFERENCES algorithm) run over the " +
+        "`@intx/mailbox`'s `executeThread` (REFERENCES algorithm) run over the " +
         "folder's native store — roots plus children, each ref carrying the " +
         "same envelope fields `GET /me/inbox` returns. With no resolvable " +
         "principalId this returns an empty list, not a 403.",

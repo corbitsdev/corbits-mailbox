@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "type": "module",
   "license": "LGPL-2.1-only",
-  "description": "A native Interchange mailbox for human principals, mountable onto any Interchange host. Requires @intx 0.2.2 or newer.",
+  "description": "A native Interchange mailbox for human principals, mountable onto any Interchange host. Requires @intx 0.4.0 or newer.",
   "keywords": [
     "corbits",
     "interchange",
@@ -27,11 +27,10 @@
     "node": ">=24"
   },
   "corbits": {
-    "minimumIntxVersion": "0.2.2"
+    "minimumIntxVersion": "0.4.0"
   },
   "workspaces": [
-    "examples/*",
-    "vendor/*"
+    "examples/*"
   ],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -68,6 +67,9 @@
   },
   "peerDependencies": {
     "@intx/log": "^0.4.0",
+    "@intx/mailbox": "^0.4.0",
+    "@intx/mime": "^0.4.0",
+    "@intx/types": "^0.4.0",
     "drizzle-orm": "^0.45.2",
     "hono": "^4.12.0",
     "postgres": "^3.4.0"
@@ -80,12 +82,10 @@
     "@types/bun": "1.1.14",
     "@types/json-schema": "7.0.15",
     "@types/node": "22.10.5",
-    "@types/semver": "^7.7.1",
     "drizzle-orm": "0.45.2",
     "hono": "4.12.32",
     "openapi-types": "12.1.3",
     "postgres": "3.4.9",
-    "semver": "^7.7.2",
     "typescript": "5.7.2"
   },
   "overrides": {

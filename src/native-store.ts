@@ -14,12 +14,13 @@ function pgTextArrayLiteral(items: readonly string[]): string {
 }
 
 /**
- * A `MailboxStore` (see `vendor/intx-mailbox/src/mailbox.ts`) backed by the
+ * A `MailboxStore` (see `@intx/mailbox`'s `mailbox.ts`) backed by the
  * `mailbox.principal_mail` / `mailbox.mailbox_state` tables migration
  * `0004_native_mailbox_store` added, instead of an in-process array. One
  * instance is scoped to a single (tenant, principal, folder) mailbox, which is
- * the same scope the vendored `executeSearch`/`executeThread` pure functions
- * already assume (`mailboxName` names the one mailbox `store.messages` holds).
+ * the same scope `@intx/mailbox`'s `executeSearch`/`executeThread` pure
+ * functions already assume (`mailboxName` names the one mailbox
+ * `store.messages` holds).
  *
  * Deliberately reads via plain tagged `sql`, not the `schema.ts` drizzle table
  * objects: those objects are pinned by `schema-check.ts` and
@@ -27,7 +28,7 @@ function pgTextArrayLiteral(items: readonly string[]): string {
  * on, and this slice must not widen what those assert.
  *
  * `MailboxStore`'s mutating methods (`append`/`addFlags`/`removeFlags`/
- * `remove`) are synchronous in the vendored interface — an in-memory backing
+ * `remove`) are synchronous in `@intx/mailbox`'s interface — an in-memory backing
  * can satisfy that trivially, a Postgres-backed one cannot make the write
  * durable before returning. This backing keeps a fully materialized in-memory
  * mirror (loaded once by `openNativeMailboxStore`) so every synchronous method
@@ -319,7 +320,7 @@ export async function openNativeMailboxStore(
 
 /**
  * Move a message from one folder to another for the same (tenant, principal).
- * Not part of the vendored `MailboxStore` interface — IMAP MOVE reassigns a
+ * Not part of `@intx/mailbox`'s `MailboxStore` interface — IMAP MOVE reassigns a
  * fresh UID in the destination mailbox and bumps ITS counters, which needs
  * both folders' `mailbox_state` rows, so this operates directly on the
  * database rather than through two `NativeMailboxStore` instances (each of
