@@ -1,6 +1,6 @@
 # @corbits/mailbox
 
-Give a **person** in an Interchange hub an inbox: list, read, flag, send, SSE. You mount it on a Hono app you already have. Postgres holds the mail. This package ships **no UI**.
+Give a **person** in an Interchange hub an inbox: list, read, flag, send, and live updates over SSE. You mount it on a Hono app you already have. Postgres holds the mail. This package ships **no UI**.
 
 ## Runtime support
 
@@ -15,20 +15,18 @@ bun add @corbits/mailbox @intx/log hono postgres drizzle-orm
 # or: yarn add @corbits/mailbox @intx/log hono postgres drizzle-orm
 ```
 
-This is not an app. A hub mounts it. The only **complete** program here is [`examples/reference-host`](./examples/reference-host) (`createApp` + this mount, Postgres, acceptance tests).
+`mountMailbox(app, opts)` adds the inbox routes to your app. Every field of `opts` is a host responsibility:
 
-`mountMailbox(app, opts)` — every field is a **host** function except `db`:
+| `opts` | Type | What the host provides |
+| --- | --- | --- |
+| `db` | `MailboxDb` | The host's existing drizzle/Postgres handle. Mail is stored there (schema `mailbox`). |
+| `resolvePrincipal` | `(ctx: unknown) => ResolvedPrincipal \| null` | Who this HTTP request is. Return `{ tenantId, principalId }` or `null` for anonymous requests. |
+| `senderAddressFor` | `(principal: ResolvedPrincipal) => string` | That person's From: address, as resolved from the host's own directory. |
+| `deliver` | `(message: OutgoingMailboxMessage) => void` | The host's mail transport. Called once per send with `{ raw, from, to, messageId }` after the message has been filed in Postgres. This package builds MIME and files `Sent`; transmission is the host's job. |
+| `bus` | `MailboxEventBus` (optional) | SSE fan-out only. Omit it for a single-process host; the default in-process bus applies. Pass a shared bus when several host processes must fan the same inbox events. |
+| `heartbeatIntervalMs` | `number` (optional) | SSE keep-alive period. Defaults to 25s. |
 
-| `opts` | What you pass |
-| --- | --- |
-| `db` | The hub’s existing drizzle/Postgres handle. Mail is stored there (schema `mailbox`). |
-| `resolvePrincipal` | Who this HTTP request is. Return `{ tenantId, principalId }` or `null`. |
-| `senderAddressFor` | That person’s From: address as **your directory** stores it (not a string you invent in the mount). |
-| `deliver` | After Send has been filed in Postgres, **transmit** `{ raw, from, to, messageId }`. This package does not send SMTP. |
-| `bus` | Optional. SSE only. Default is fine for one hub process. |
-
-Run the migrations once at host boot, before mounting (same order as
-[`examples/reference-host/src/index.ts`](./examples/reference-host/src/index.ts)):
+Run the migrations once at host boot, before mounting:
 
 ```ts
 import { runMailboxMigrations, mountMailbox } from "@corbits/mailbox";
@@ -40,11 +38,11 @@ mountMailbox(app, {
   resolvePrincipal,
   senderAddressFor,
   deliver,
-  // bus omitted: the default in-process bus is fine for one hub process.
+  // bus omitted: the default in-process bus fits a single-process host.
 });
 ```
 
-**`resolvePrincipal` in a real hub** (Workbench already does this — tenant and principal are already on the request):
+`resolvePrincipal` reads whatever identity the host middleware already placed on the request context and maps it to `{ tenantId, principalId }`:
 
 ```ts
 resolvePrincipal: (ctx) => {
@@ -56,17 +54,13 @@ resolvePrincipal: (ctx) => {
 };
 ```
 
-Do **not** copy `user.id.split(":")`. That is only the reference-host test encoding (`tenantId:principalId` stuffed into one Better Auth user id). Production IDs are two fields on the hub context.
+Agent-originated mail reaches a person's inbox through `createMailboxPersist`, which wraps the host's own persistence function and is passed in at hub construction.
 
-**`deliver`:** you pass a function **you already have** to send MIME. There is no `sendRawMail` export. The example host keeps an array so tests can assert “send was called” without SMTP. Workbench does not pass `deliver` yet ([CL-8789](https://linear.app/abklabs/issue/CL-8789)).
-
-**Agent → person’s inbox** is `createMailboxPersist` wrapping the hub’s `persistMail`, passed in at hub construction ([CL-8790](https://linear.app/abklabs/issue/CL-8790) — don’t assign `lookups.persistMail`). SBA uses the hub; it does not mount this package.
-
-Routes the mount adds: `/me/inbox…` (host usually nests them under `/api`).
+Routes the mount adds: `/me/inbox…` (hosts typically nest them under `/api`).
 
 ## How it works
 
-Writes go through a native `MailboxStore` (uid/modseq always set). Search and threads are vendored `@intx/mailbox` over that store. `POST /me/inbox/send` only builds the message and files `Sent` — `deliver` is how it leaves the machine.
+Writes go through a native `MailboxStore` (uid/modseq always set). Search and threads are vendored `@intx/mailbox` over that store. `POST /me/inbox/send` builds the RFC 5322 message and files a copy in `Sent`, then calls the host's `deliver` exactly once to transmit it.
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md).
 
