@@ -1,136 +1,142 @@
 # @corbits/mailbox
 
-**[`@corbits/mailbox`](./package.json)** has one job: give a human principal
-a native Interchange mailbox — a real `@intx/mailbox` `MailboxStore` backed by
-Postgres, plus the thin HTTP routes a host's UI needs to list, read, and file
-it. Backend only; this package ships no UI. Everything the earlier,
-pre-native version of this package did — triage (priority/classification/
-status/assignee), delegation, host-defined vocabularies, its own
-threading/search, `/me/threads*` — is gone. The vendored `@intx/mailbox`
-`executeSearch`/`executeThread` are the search and thread primitives now, run
-directly over the native store.
+Give a **person** in an Interchange hub an inbox: list, read, flag, send, and live updates over SSE. You mount it on a Hono app you already have. Postgres holds the mail. This package ships **no UI**.
 
-Requires `@intx` 0.2.2 or newer and Node 24 or newer.
+## Runtime support
 
-See [ARCHITECTURE.md](./ARCHITECTURE.md) for the data model.
+Node >= 24 consumes built `dist/`. Bun >= 1.2 runs TypeScript source. Peers: `@intx/log`, `drizzle-orm`, `hono`, `postgres`.
 
-## Mount
+## Quickstart
+
+```bash
+bun add @corbits/mailbox @intx/log hono postgres drizzle-orm
+# or: npm install @corbits/mailbox @intx/log hono postgres drizzle-orm
+# or: pnpm add @corbits/mailbox @intx/log hono postgres drizzle-orm
+# or: yarn add @corbits/mailbox @intx/log hono postgres drizzle-orm
+```
+
+`mountMailbox(app, opts)` adds the inbox routes to your app. Every field of `opts` is a host responsibility:
+
+| `opts`                | Type                                          | What the host provides                                                                                                                                                                                       |
+| --------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `db`                  | `MailboxDb`                                   | Mail lives there (schema `mailbox`). `createMailboxDb` opens a handle; a hub that already has one passes it as `db` instead.                                                                                 |
+| `resolvePrincipal`    | `(ctx: unknown) => ResolvedPrincipal \| null` | Who this HTTP request is. Return `{ tenantId, principalId }` or `null` for anonymous requests.                                                                                                               |
+| `senderAddressFor`    | `(principal: ResolvedPrincipal) => string`    | That person's From: address, as resolved from the host's own directory.                                                                                                                                      |
+| `deliver`             | `(message: OutgoingMailboxMessage) => void`   | The host's mail transport. Called once per send with `{ raw, from, to, messageId }` after the message has been filed in Postgres. This package builds MIME and files `Sent`; transmission is the host's job. |
+| `bus`                 | `MailboxEventBus`                             | SSE fan-out only; mail itself is Postgres. `createInMemoryMailboxEventBus()` for a single-process host; a shared bus when several host processes must fan the same inbox events.                             |
+| `heartbeatIntervalMs` | `number` (optional)                           | SSE keep-alive period. Defaults to 25s.                                                                                                                                                                      |
+
+Wire it as one function your app calls at boot with its own `databaseUrl` and the two things only the host can answer — `senderAddressFor` and `deliver` — as typed parameters, not example bodies:
 
 ```ts
-import { mountMailbox, createInMemoryMailboxEventBus } from "@corbits/mailbox";
+import { Hono } from "hono";
+import {
+  createInMemoryMailboxEventBus,
+  createMailboxDb,
+  mountMailbox,
+  type MailboxDb,
+  type MailboxEventBus,
+  type MountMailboxOpts,
+} from "@corbits/mailbox";
 
-mountMailbox(app, {
-  db,
-  bus: createInMemoryMailboxEventBus(),
-  resolvePrincipal: (ctx) => resolveCallerFromRequest(ctx),
-  senderAddressFor: (principal) => resolveCallerAddress(principal),
-  deliver: (message) => hostMailTransport.send(message),
-});
+export function installMailbox(
+  app: Hono,
+  opts: {
+    databaseUrl: string;
+    resolvePrincipal?: MountMailboxOpts["resolvePrincipal"];
+    senderAddressFor: MountMailboxOpts["senderAddressFor"];
+    deliver: MountMailboxOpts["deliver"];
+  },
+): { db: MailboxDb; bus: MailboxEventBus } {
+  const { db } = createMailboxDb(opts.databaseUrl);
+  // In-process fan-out for a single hub instance; pass a shared bus instead
+  // once more than one process needs to see the same SSE events.
+  const bus = createInMemoryMailboxEventBus();
+
+  const mailboxApp = new Hono();
+  mountMailbox(mailboxApp, {
+    db,
+    bus,
+    resolvePrincipal:
+      opts.resolvePrincipal ??
+      ((ctx) => {
+        const c = ctx as {
+          get(k: "tenant" | "principal"): { id: string } | undefined;
+        };
+        const tenant = c.get("tenant");
+        const principal = c.get("principal");
+        return tenant && principal
+          ? { tenantId: tenant.id, principalId: principal.id }
+          : null;
+      }),
+    senderAddressFor: opts.senderAddressFor,
+    deliver: opts.deliver,
+  });
+  // Mounted under the tenant it belongs to, alongside a host's other
+  // session-authenticated routes.
+  app.route("/api/tenants/:tenantId/mailbox", mailboxApp);
+
+  return { db, bus };
+}
 ```
 
-## Routes
+`resolvePrincipal` defaults to reading whatever identity the host's own auth/tenant middleware already placed on the request context; pass your own to read it differently. `senderAddressFor` is a lookup into the host's own directory — a hub with `principal`/`tenant` tables answers with that person's address, lowercased, at their tenant's mail domain. `deliver` is the host's real mail transport — a hub with a request pipeline of its own hands the built frame back into it (so a message addressed to a running agent reaches it through the same route stack as everything else), rather than putting a byte on a wire itself here.
 
-All under `/me/inbox`, scoped to the principal `resolvePrincipal` resolves for
-the request. With no resolvable principal, list returns an empty page (200);
-every other route returns 403.
+Routes the mount adds: `/me/inbox…`.
 
-| | |
-| --- | --- |
-| `GET /me/inbox` | Newest first, keyset-paginated by uid. `?folder=` (`INBOX` default, `Sent`, `Archive`, or `Trash`), `?limit=`, `?cursor=`. Each item carries its `uid`, `flags`, parsed `envelope`, and base64 `raw` — the vendored `executeSearch` over the folder's native store, with envelope + raw fetched per ref. |
-| `POST /me/inbox/:uid/read` | `addFlags(uid, ["\Seen"])` |
-| `POST /me/inbox/:uid/unread` | `removeFlags(uid, ["\Seen"])` |
-| `POST /me/inbox/:uid/archive` | `moveNativeMailboxMessage` INBOX → Archive |
-| `POST /me/inbox/:uid/trash` | `moveNativeMailboxMessage` INBOX → Trash |
-| `POST /me/inbox/:uid/restore` | `moveNativeMailboxMessage` (`?folder=`, default Archive) → INBOX |
-| `GET /me/inbox/events` | SSE stream of `mailbox` events (`create`/`mark_read`/`mark_unread`/`archive`/`trash`/`restore`) for the caller's mailbox, plus a heartbeat every 25s. |
-| `GET /me/inbox/threads` | The vendored `executeThread` (REFERENCES) over the folder's native store — roots + children, each ref carrying the same envelope fields as `GET /me/inbox`. `?folder=`. |
-| `GET /me/inbox/threads/:rootUid` | The single native thread rooted at `rootUid`, same per-ref envelope fields. `?folder=`. |
-| `POST /me/inbox/send` | Body `{ to, subject?, body, inReplyTo? }`; builds an RFC 5322 message, appends it to the caller's `Sent` folder, and returns `{ messageId, uid }`. |
+### Agent-originated mail
 
-`POST /me/inbox/send` only builds the message and files the caller's own
-`Sent` copy — the host's `deliver` mount dep owns actually getting the
-message to its recipients.
-
-## Writing into a mailbox
-
-Every write path — host code, ingress adapters, and the transport dual-write
-seam — lands through `NativeMailboxStore.append`, so uid/modseq are always
-set. There is no other write path left.
+`mountMailbox` covers a person's own inbox. A message that originates elsewhere — an agent replying through the host's own transport — reaches that inbox by wrapping the host's existing persist function with `createMailboxPersist`, once, at host construction:
 
 ```ts
-import { writeMailboxMessage, deliverInboxItems } from "@corbits/mailbox";
+import {
+  createMailboxPersist,
+  type AuthorizeMailboxSender,
+  type MailboxDb,
+  type MailboxEventBus,
+  type MailboxPersistArgs,
+} from "@corbits/mailbox";
 
-// One message, appended into the principal's INBOX. Deduped on `messageId`
-// within that mailbox — a caller-supplied or minted one.
-await writeMailboxMessage(db, {
-  tenantId,
-  principalId,
-  address: "usr_alice@acme.example",
-  fromAddress: "bot@acme.example",
-  subject: "Run finished",
-  body: "...",
-}, bus);
-
-// Ingress adapters (mail connectors, webhooks): one item per external
-// (source, externalId), deduped on a messageId minted from that pair.
-await deliverInboxItems(db, [
-  { tenantId, principalId, address, fromAddress, subject, body, source: "gmail", externalId: "msg-1" },
-], { bus, enqueue: ({ id, item }) => hostTriage(id, item) });
+export function wrapPersistMail<R>(
+  db: MailboxDb,
+  bus: MailboxEventBus,
+  opts: {
+    upstream: (args: MailboxPersistArgs) => Promise<R>;
+    authorizeSender: AuthorizeMailboxSender;
+  },
+): (args: MailboxPersistArgs) => Promise<R> {
+  return createMailboxPersist(db, {
+    upstream: opts.upstream,
+    authorizeSender: opts.authorizeSender,
+    bus,
+  });
+}
 ```
 
-## Dual-write persist
+`authorizeSender` is the host's own check that a sender address is one it recognizes right now — a hub answers by looking up the tenant a mailbox-routable address (a person, or a live agent run) currently resolves to, and refusing anything else. `upstream` is the host's own pre-existing mail-persist path — the write it already made before this package existed; `createMailboxPersist` calls it unconditionally and layers the durable inbox write on top, so a transport failure never costs a recipient the copy that makes the message readable later. Call the wrapped `persistMail` wherever the host currently delegates an outbound frame; it does both writes.
 
-```ts
-import { createMailboxPersist } from "@corbits/mailbox";
+## How it works
 
-const persist = createMailboxPersist(db, {
-  upstream: hostMailTransport.persist,
-  authorizeSender: (address) => resolveActiveInstance(address),
-  bus,
-});
-```
+Writes go through a native `MailboxStore` (uid/modseq always set). Search and threads are vendored `@intx/mailbox` over that store. `POST /me/inbox/send` builds the RFC 5322 message and files a copy in `Sent`, then calls the host's `deliver` exactly once to transmit it.
 
-`upstream` throwing still attempts the mailbox append (and the upstream error
-re-throws unchanged); a mailbox-append failure is logged and never rejects a
-persist upstream already completed. One append per resolved recipient, into
-their INBOX, deduped on the frame's Message-ID within that mailbox.
+See [ARCHITECTURE.md](./ARCHITECTURE.md).
 
-## Install
+## Development
 
-Not published to npm yet. Until a registry publish, `bun add @corbits/mailbox`
-404s. Git is the install path.
-
-```sh
-# from git (prepare hook builds dist/ on the way in)
-bun add github:corbitsdev/corbits-mailbox
-```
-
-## Layout
-
-| | |
-| --- | --- |
-| `src/` | The published package. Owns `principal_mail` (the mail plane) and `mailbox_state` (per-folder IMAP counters) — the two tables `NativeMailboxStore` reads and writes. |
-| `examples/reference-host` | Mounts it on a real `@intx/hub-api` app against a live Postgres and asserts the acceptance scenarios end to end. |
-
-## Working on it
-
-```sh
+```bash
+git clone https://github.com/corbitsdev/corbits-mailbox.git
+cd corbits-mailbox
 bun install
 docker run -d --name mailbox-pg -p 5433:5432 \
   -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=mailbox_core postgres:16
 
-bun run test    # unit + integration
-bun run build   # dist/ (JS + .d.ts)
-bun test --cwd examples/reference-host      # acceptance scenarios
+bun run typecheck
+bun run test
+bun run build
+bun run test:acceptance
 ```
 
-Tests and the example expect `postgres://postgres:postgres@localhost:5433/mailbox_core`;
-override with `MAILBOX_TEST_DATABASE_URL` / `MAILBOX_DATABASE_URL`.
-
-## Conventions
-
-Strict TypeScript, arktype at boundaries, drizzle for data access. Dependencies come
-from public `@intx/*` on npm only.
+Tests expect `postgres://postgres:postgres@localhost:5433/mailbox_core` (override with `MAILBOX_TEST_DATABASE_URL` / `MAILBOX_DATABASE_URL`). See [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 ## License
 
