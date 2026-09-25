@@ -24,7 +24,6 @@ jobs:
 
     env:
       MAILBOX_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5433/mailbox_core
-      MAILBOX_DATABASE_URL: postgres://postgres:postgres@localhost:5433/mailbox_core
 
     steps:
       - uses: actions/checkout@v4
@@ -44,7 +43,7 @@ jobs:
         run: bun run typecheck
 
       - name: unit + integration tests
-        run: bun test src
+        run: bun test src tests
 
       # A consumer on plain Node must be able to install and import the
       # tarball; Node cannot strip types, so a src-pointing manifest would die
