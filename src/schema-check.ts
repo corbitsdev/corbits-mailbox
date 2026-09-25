@@ -4,14 +4,13 @@ import type { MailboxDb } from "./db.js";
 import { principalMail } from "./schema.js";
 
 /**
- * Every DDL statement in `MIGRATIONS` is `CREATE TABLE IF NOT EXISTS`, which is
+ * Every table in `migrations/*.sql` is created only if absent, which is
  * exactly the right thing when this package is remounted onto a database it
  * already owns — and exactly the wrong thing when the host already has a table
- * of that name that this package did NOT create. `IF NOT EXISTS` compares the
- * NAME and nothing else: it silently no-ops, the migration is recorded as
- * applied, and from then on every read in this package decodes the host's
- * columns through our codec. The typecheck is green, the queries run, and the
- * data is wrong.
+ * of that name that this package did NOT create. The check compares the NAME
+ * and nothing else: it silently no-ops, and from then on every read in this
+ * package decodes the host's columns through our codec. The typecheck is
+ * green, the queries run, and the data is wrong.
  *
  * `mailbox` and `principal_mail` are both generic enough names for a host to
  * plausibly already own one, which is what makes this package's exposure real
@@ -87,8 +86,8 @@ export function expectedColumnTypes(): ExpectedColumn[] {
  * Throws `SchemaTypeMismatchError` naming every column whose live type differs
  * from the one this package's codec assumes, including a column that is missing
  * outright. Runs on the migration's own transaction so it sees exactly the
- * schema that transaction just produced — and so a rejected boot rolls the
- * ledger row back with it, leaving nothing recorded as applied.
+ * schema that transaction just produced — and so a rejected boot rolls back
+ * everything the run applied.
  */
 export async function assertExpectedColumnTypes(
   db: Pick<MailboxDb, "execute">,

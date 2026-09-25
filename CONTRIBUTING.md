@@ -47,11 +47,12 @@ port instead.
 
 ## Migrations
 
-Shipped migrations are immutable. Each ledger row carries a checksum of the migration's
-statements, so editing one that has already been applied fails loudly on the next boot
-rather than letting fresh and existing databases diverge. Add a new migration instead.
+Every file in `migrations/` replays on each run, so each must be idempotent: DDL is
+`IF NOT EXISTS`, and a backfill runs in a `DO` block only in the replay that adds its
+column or table. Add a new file for a schema change; `tests/upgrade-from-0.1.0.test.ts`
+proves a 0.1.0 database upgrades with no row changed and replays as a no-op.
 
-`schema.ts` and `migrations.ts` must agree statement for statement — the runtime
+`schema.ts` and `migrations/*.sql` must agree statement for statement — the runtime
 queries read through the drizzle table object, and `src/migrations.test.ts`
 diffs the two against a live database. Change one, change the other, in the same commit.
 

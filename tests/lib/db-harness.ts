@@ -1,6 +1,7 @@
 import { drizzle } from "drizzle-orm/postgres-js";
 import { Hono } from "hono";
 import postgres from "postgres";
+import type { DBConfig } from "@intx/db";
 import type { TenantEnv, TenantRow } from "@intx/hub-api";
 import {
   createMailboxRoutes,
@@ -33,21 +34,33 @@ async function admin<T>(
   }
 }
 
-/** A fresh database with the host control plane and every mailbox migration applied. */
-export async function createTestDb(): Promise<TestDb> {
+export type EmptyTestDb = TestDb & { config: DBConfig };
+
+/** A fresh database with only the host control plane, before any mailbox migration. */
+export async function createEmptyTestDb(): Promise<EmptyTestDb> {
   const name = `mailbox_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
   await admin((sql) => sql.unsafe(`CREATE DATABASE "${name}"`));
   const url = new URL(TEST_DATABASE_URL);
   url.pathname = `/${name}`;
   const client = postgres(url.toString(), { onnotice: () => {} });
   const db = drizzle(client);
-  const config = dbConfigFromUrl(url.toString());
   const close = async () => {
     await client.end();
     await admin((sql) => sql.unsafe(`DROP DATABASE "${name}" WITH (FORCE)`));
   };
   try {
     await createHostControlPlane(db);
+  } catch (err) {
+    await close();
+    throw err;
+  }
+  return { db, close, config: dbConfigFromUrl(url.toString()) };
+}
+
+/** A fresh database with the host control plane and every mailbox migration applied. */
+export async function createTestDb(): Promise<TestDb> {
+  const { db, close, config } = await createEmptyTestDb();
+  try {
     await runMailboxMigrations(config, { schema: "public" });
   } catch (err) {
     await close();

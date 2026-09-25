@@ -219,6 +219,11 @@ always called out under their own heading.
   `tenant` and `principal`; the mailbox FKs point there. The mailbox tables
   stay in the `mailbox` schema. `createMailboxDb` is no longer exported; hosts
   pass the handle they already have (e.g. `@intx/db`'s `createDB`).
+- **Migrations ship as idempotent `migrations/*.sql` files, replayed on every
+  run; the checksum ledger and `MigrationChecksumError` are gone.** A database
+  migrated by 0.1.0 upgrades on its next `runMailboxMigrations` call with no
+  manual step and no row changed: the new files are no-ops against it, and
+  `0007_drop_migrations_ledger.sql` drops `"mailbox"."corbits_mailbox_migrations"`.
 - **`mountMailbox` is replaced by `createMailboxRoutes(deps): Hono<TenantEnv>`.**
   The host mounts the returned sub-app with `app.route`. `deps.requireGrant`
   (`@intx/hub-api`'s `RequireGrant`, now a peer) gates reads on `mailbox:*`
