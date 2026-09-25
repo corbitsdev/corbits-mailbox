@@ -22,10 +22,9 @@ function pgTextArrayLiteral(items: readonly string[]): string {
  * functions already assume (`mailboxName` names the one mailbox
  * `store.messages` holds).
  *
- * Deliberately reads via plain tagged `sql`, not the `schema.ts` drizzle table
- * objects: those objects are pinned by `schema-check.ts` and
- * `migrations.test.ts` to the columns the OLD read/write paths depend
- * on, and this slice must not widen what those assert.
+ * Reads via plain tagged `sql`, not the `schema.ts` drizzle table objects:
+ * `schema-check.ts` asserts those objects against the live columns at boot,
+ * so they stay limited to what that check needs.
  *
  * `MailboxStore`'s mutating methods (`append`/`addFlags`/`removeFlags`/
  * `remove`) are synchronous in `@intx/mailbox`'s interface — an in-memory backing
