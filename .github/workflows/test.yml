@@ -42,8 +42,11 @@ jobs:
       - name: typecheck
         run: bun run typecheck
 
-      - name: unit + integration tests
-        run: bun test src tests
+      - name: unit tests
+        run: bun run test
+
+      - name: e2e tests
+        run: bun run test:e2e
 
       # A consumer on plain Node must be able to install and import the
       # tarball; Node cannot strip types, so a src-pointing manifest would die

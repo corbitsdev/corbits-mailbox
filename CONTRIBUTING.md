@@ -14,10 +14,11 @@ docker run -d --name mailbox-pg -p 5433:5432 \
 
 bun run typecheck
 bun run test
+bun run test:e2e
 bun run build
 ```
 
-The end-to-end suites in `tests/` create and drop a database each, so the test role
+Some end-to-end suites in `e2e/` create and drop a database each, so the test role
 needs `CREATEDB`.
 
 ## How it works
@@ -58,15 +59,13 @@ port instead.
 
 ## Tests
 
-- **Tests live next to the code**: `src/<module>.test.ts` beside `src/<module>.ts`,
-  by design. Only end-to-end tests live elsewhere — the acceptance scenarios in
-  `corbitsdev/examples` are the one exception, because they test the
-  mounted whole, not a module.
+- **Unit tests are for load-bearing logic only** — the frame parser, the recipient
+  parser, the scope and size guards, and migration idempotency and backfills. They live
+  next to the code as `src/<module>.test.ts` and never ship.
+- **Everything else is end-to-end** in `e2e/`, against a real Postgres and the mounted
+  routes; shared harness code lives in `e2e/helpers.ts`.
 - **Red first.** A bug fix starts with a test that fails for the reason you believe, and
   you should watch it fail. A test that was green before the fix proved nothing.
-- **Coverage floor is 80% of lines and functions**, set by `coverageThreshold` in the
-  package's `bunfig.toml` and applied by Bun **per file** — one badly covered new file
-  fails the run even when the average looks fine. It is a floor, not a target.
 - Assert **behavior a consumer can observe** — a status code, a returned shape, a row in
   the database — over internal call shapes.
 
@@ -74,11 +73,11 @@ port instead.
 
 Every file in `migrations/` replays on each run, so each must be idempotent: DDL is
 `IF NOT EXISTS`, and a backfill runs in a `DO` block only in the replay that adds its
-column or table. Add a new file for a schema change; `tests/upgrade-from-0.1.0.test.ts`
+column or table. Add a new file for a schema change; `e2e/upgrade-from-0.1.0.test.ts`
 proves a 0.1.0 database upgrades with no row changed and replays as a no-op.
 
 `schema.ts` and `migrations/*.sql` must agree statement for statement — the runtime
-queries read through the drizzle table object, and `src/migrations.test.ts`
+queries read through the drizzle table object, and `e2e/migrations.test.ts`
 diffs the two against a live database. Change one, change the other, in the same commit.
 
 ## Agent-originated mail
@@ -96,6 +95,13 @@ outbound frame; it does both writes.
 
 - Keep commits focused, and keep the diff to the change you are describing.
 - Explain *why* in the commit message; the code already says what.
-- CI must be green: typecheck, unit + integration, build,
+- CI must be green: typecheck, unit, e2e, build,
   and a Node consumer smoke test that installs the packed tarball.
 - Contributions are accepted under the repository's LGPL-2.1-only licence.
+
+## Commit messages
+
+Commit subjects and PR titles follow [Conventional Commits](https://www.conventionalcommits.org): `feat`, `fix`, `refactor`, `test`, `docs`, `build`, `ci`, `perf`, and `chore(release): x.y.z` for releases.
+Add `!` only for public API breaks: removed or renamed exports, changed signatures, newly required params. Peer and dependency range changes are `build(deps):` with no `!`.
+Keep subjects imperative, lowercase after the colon, 72 characters or less, and free of ticket IDs.
+Every PR links its issue with a `Closes <issue id>` line in the PR body.

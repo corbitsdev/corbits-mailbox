@@ -9,13 +9,13 @@ import {
   type MailboxPersistArgs,
   type SenderAuthorization,
   type PersistedMailboxRow,
-} from "./persist.js";
-import { createInMemoryMailboxEventBus } from "./bus.js";
-import { buildMailFrame } from "./frame.js";
-import { principalMail } from "./schema.js";
-import { withTestDb, seedScope } from "./test-helpers.js";
-import type { MailboxDb } from "./db.js";
-import { MAX_MAILBOX_FRAME_BYTES, assertMailboxFrameBytes } from "./write.js";
+} from "../src/persist.js";
+import { createInMemoryMailboxEventBus } from "../src/bus.js";
+import { buildMailFrame } from "../src/frame.js";
+import { principalMail } from "../src/schema.js";
+import { withTestDb, seedScope } from "./helpers.js";
+import type { MailboxDb } from "../src/db.js";
+import { MAX_MAILBOX_FRAME_BYTES } from "../src/write.js";
 
 let db: MailboxDb;
 
@@ -521,16 +521,6 @@ describe("transport insert idempotency", () => {
 });
 
 describe("frame size and recipient hard caps", () => {
-  test("assertMailboxFrameBytes accepts at-cap and throws RangeError one byte over", () => {
-    // Dual-write swallows the RangeError inside attemptMailboxWrite; the pure
-    // assert is the unit contract the transport path shares with direct write.
-    const atCap = new Uint8Array(MAX_MAILBOX_FRAME_BYTES);
-    expect(() => assertMailboxFrameBytes(atCap)).not.toThrow();
-    const over = new Uint8Array(MAX_MAILBOX_FRAME_BYTES + 1);
-    expect(() => assertMailboxFrameBytes(over)).toThrow(RangeError);
-    expect(() => assertMailboxFrameBytes(over)).toThrow(/mailbox frame exceeds/);
-  });
-
   test("raw at the frame byte cap inserts; one byte over refuses and leaves zero rows", async () => {
     const { upstream, calls, result } = recordingUpstream();
     const persist = createMailboxPersist(db, {

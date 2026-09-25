@@ -6,8 +6,13 @@ import {
   purgePrincipalMailbox,
   writeMailboxMessage,
 } from "../src/index.js";
-import { seedScope } from "../src/test-helpers.js";
-import { as, createTestApp, createTestDb, type TestDb } from "./lib/db-harness.js";
+import {
+  seedScope,
+  as,
+  createTestApp,
+  createTestDb,
+  type TestDb,
+} from "./helpers.js";
 
 let testDb: TestDb | undefined;
 let app: Hono<TenantEnv>;
