@@ -212,8 +212,7 @@ follows is one the read path must keep: **the column is never cast**.
 side drops the keyset page out of `Index Cond` into `Filter`. The *cursor* is
 cast instead, and to `::timestamp` — a `timestamptz` literal resolves through
 the session's TimeZone, so on a non-UTC host the same cursor silently seeks to
-a different row. `src/read-non-utc-session.test.ts` pins a non-UTC session for
-exactly that reason.
+a different row.
 
 **The raw frame is the authority on detail.** `raw bytea` holds the complete
 MIME frame; `subject` and `from_address` are caches parsed once at write time.
@@ -322,8 +321,7 @@ reusing `MailboxBulkAction`. It is a superset — `create`, `enrich`, and
 `assign` are not bulk actions, and never will be — so aliasing the two would
 claim an equivalence that does not hold. `mount.ts`'s route table is the one
 place that has to know both: it maps HTTP verbs to `MailboxBulkAction` values
-that also happen to be valid `MailboxEventOp` values, and a test in
-`bus.test.ts` keeps that overlap from drifting silently.
+that also happen to be valid `MailboxEventOp` values.
 
 **Triage enriches the message, not a task.** `priority`, `classification`,
 `status` and `assignee` are columns on the message's management row, not a
@@ -428,7 +426,7 @@ index-servable, ~3.8x its pre-split cost.
 `schema.ts` and `migrations/*.sql` must agree statement for statement: the
 runtime queries read through the drizzle table object, so a drift between the
 two would query columns or rely on indexes the migrations never created.
-`src/migrations.test.ts` diffs the two against a live database.
+`e2e/migrations.test.ts` diffs the two against a live database.
 
 ## Migrations
 
@@ -459,11 +457,12 @@ each table; passing a different `schema` later does not move them.
 - 0.1.0 kept a checksum ledger, `"mailbox"."corbits_mailbox_migrations"`.
   `0007_drop_migrations_ledger.sql` drops it; a 0.1.0 database upgrades on its
   next boot with no manual step and no row changed
-  (`tests/upgrade-from-0.1.0.test.ts`).
+  (`e2e/upgrade-from-0.1.0.test.ts`).
 - A database from before 0.1.0 (run from source) upgrades too: the guarded
   backfills in 0002–0004 fill the columns they add from the rows already
   there, 0004 takes each message's folder and `\Seen` from the pre-native
-  `"mailbox"."mailbox"` table, and 0005 then drops that table.
+  `"mailbox"."mailbox"` table, and 0005 then drops that table
+  (`e2e/upgrade-from-pre-0.1.0.test.ts`).
 - The runner rewrites every `"public".` followed by a quoted identifier, so a
   migration file may use `"public".` only to qualify a host-table FK.
 
