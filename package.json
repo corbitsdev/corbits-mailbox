@@ -29,9 +29,6 @@
   "corbits": {
     "minimumIntxVersion": "0.4.0"
   },
-  "workspaces": [
-    "examples/*"
-  ],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -54,8 +51,7 @@
     "prepack": "bun run build",
     "prepare": "node scripts/prepare.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "bun test src",
-    "test:acceptance": "bun run build && bun install --force && bun test --cwd examples/reference-host"
+    "test": "bun test src"
   },
   "dependencies": {
     "@hono/standard-validator": "0.2.3",

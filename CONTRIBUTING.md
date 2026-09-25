@@ -15,15 +15,12 @@ concurrency are asserted against a live server, because that is the only place t
 true. Database-touching tests clean up after themselves and must not assume they are
 alone — concurrency behavior is part of the contract here.
 
-## The reference host is the acceptance suite, not a demo
+## Acceptance scenarios live in corbitsdev/examples
 
-`examples/reference-host` mounts the package on a real `@intx/hub-api` app against a
-live Postgres and asserts the end-to-end scenarios against the built `dist/` — the same
-artifact a consumer installs. Build before running it, or you are asserting against a
-stale compile.
-
-If you change the mount seam, the write path, or anything about how a host wires this
-up, the reference host is where that change has to be shown working.
+The end-to-end acceptance scenarios that mount this package on a real
+`@intx/hub-api` app against a live Postgres live in the `corbitsdev/examples`
+repository, not here. If you change the mount seam, the write path, or anything
+about how a host wires this up, show that change working there.
 
 ## Dependencies
 
@@ -34,8 +31,8 @@ port instead.
 ## Tests
 
 - **Tests live next to the code**: `src/<module>.test.ts` beside `src/<module>.ts`,
-  by design. Only end-to-end tests live elsewhere — the acceptance suite in
-  `examples/reference-host/test/` is the one exception, because it tests the
+  by design. Only end-to-end tests live elsewhere — the acceptance scenarios in
+  `corbitsdev/examples` are the one exception, because they test the
   mounted whole, not a module.
 - **Red first.** A bug fix starts with a test that fails for the reason you believe, and
   you should watch it fail. A test that was green before the fix proved nothing.
@@ -59,6 +56,6 @@ live database. Change one, change the other, in the same commit.
 
 - Keep commits focused, and keep the diff to the change you are describing.
 - Explain *why* in the commit message; the code already says what.
-- CI must be green: typecheck, unit + integration, build, reference-host
-  acceptance, and a Node consumer smoke test that installs the packed tarball.
+- CI must be green: typecheck, unit + integration, build,
+  and a Node consumer smoke test that installs the packed tarball.
 - Contributions are accepted under the repository's LGPL-2.1-only licence.

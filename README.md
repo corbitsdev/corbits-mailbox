@@ -133,7 +133,6 @@ docker run -d --name mailbox-pg -p 5433:5432 \
 bun run typecheck
 bun run test
 bun run build
-bun run test:acceptance
 ```
 
 Tests expect `postgres://postgres:postgres@localhost:5433/mailbox_core` (override with `MAILBOX_TEST_DATABASE_URL` / `MAILBOX_DATABASE_URL`). See [CONTRIBUTING.md](./CONTRIBUTING.md).

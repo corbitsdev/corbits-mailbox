@@ -34,25 +34,17 @@ jobs:
 
       - run: bun install --frozen-lockfile
 
-      # Emits dist/, which is what the reference host and the typecheck
-      # resolve @corbits/mailbox through — so everything downstream proves
+      # Emits dist/, which is what the typecheck and the Node consumer smoke
+      # test resolve @corbits/mailbox through — so everything downstream proves
       # the published artifact, not just the sources.
       - name: build
         run: bun run build
-
-      # bun copies `file:` dependencies at install time, before dist/ exists;
-      # a forced reinstall refreshes the copy with the built output.
-      - name: refresh reference-host dependency copy
-        run: bun install --force
 
       - name: typecheck
         run: bun run typecheck
 
       - name: unit + integration tests
         run: bun test src
-
-      - name: reference-host acceptance
-        run: bun test --cwd examples/reference-host
 
       # A consumer on plain Node must be able to install and import the
       # tarball; Node cannot strip types, so a src-pointing manifest would die
