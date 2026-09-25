@@ -9,244 +9,50 @@ always called out under their own heading.
 
 ## [Unreleased]
 
-### Added
+## [0.2.0] — 2026-09-25
 
-- **`createMailboxPersist` accepts `resolveRefs` at insert time.** The new
-  `resolveRefs(args)` option — `args` is the persist args plus the resolved
-  `senderAuthorization` and the `decoded` frame (or `null`) — is called once
-  per frame, before the transaction opens, and its result (validated with
-  `MailboxRefArraySchema`, capped at `MAX_MAILBOX_REFS`) is stored on every
-  recipient row inside that same transaction, so the post-commit bus event
-  already carries refs. A throwing `resolveRefs` follows the existing
-  dual-write contract: logged, upstream unaffected, no mailbox row for that
-  frame.
-- New `writeMailboxMessages(db, items, opts?)` writes an arbitrary batch
-  of `{ scope, args }` pairs — e.g. a sender's outbound copy alongside
-  every recipient's inbound copy of the same conversation turn — in ONE
-  transaction: every row is scope-checked, field-checked, encoded, and
-  frame-asserted before the transaction opens, all new rows commit
-  together or none do, and a throw from any single item (an invalid
-  scope, an oversize frame, an unknown control-plane principal) rolls
-  back the whole batch. Per-row dedupe still runs through
-  `onConflictDoNothing` on the existing `messageKey` partial unique
-  index, so a retried batch dedupes row-by-row without failing. Each
-  item's `args` omits `tenantId`/`principalId` (`Omit<WriteMailboxMessageArgs,
-  "tenantId" | "principalId">`) — `scope` is the sole source of both, so
-  there is no second copy of the scope that could disagree with it. Bus
-  events publish only after commit, one per written row. This is the
-  **conversation path**; `deliverInboxItems` remains the **notify-item
-  path** for ingress adapters and is unchanged.
-- `listUserMailbox` and `getMailboxMessage` accept an optional
-  `direction?: "inbound" | "outbound" | "all"` (default `"inbound"`), so a
-  thread reader can fetch a principal's own sent copies (`"outbound"`) or
-  both directions together (`"all"`) alongside the existing inbox-only
-  default.
-- **Thread reads over `References`, and lookup by `Message-ID`.**
-  `readMailboxThread(db, scope, { ref, cursor?, limit? })` returns the
-  principal's messages carrying a `refs` entry equal to `ref`, oldest
-  first, keyset-paged on `(created_at, id)`. Each message projects `id`,
-  `messageId`, `inReplyTo`, `references`, `fromAddress`, `subject`,
-  `createdAt`, its read/archived state, and `parentId` — resolved by
-  **RFC 5256 References linking** (`In-Reply-To` first, then the
-  `References` chain newest-to-oldest) across the whole ref-scoped set,
-  never by subject grouping. **`parentId` chains are acyclic** — RFC 5256
-  step 1.B calls out that a delivered frame's `In-Reply-To`/`References`
-  can name a msg-id that, directly or through further ancestors, points
-  back at the frame itself; a cycle among the resolved candidate parents
-  is detected and cut (the LATER-created message in the cycle, ties broken
-  by id, becomes a root) before a page is projected, so a client's
-  ancestry walk always terminates. A parent that is not in this mailbox
-  under this ref yields `parentId: null` rather than a fabricated node,
-  and the ancestor lookup spans the whole ref-scoped set rather than the
-  current page, so a chain crossing a page boundary keeps a stable
-  `parentId`. Cursors are bound to the ref that minted them; paging one
-  into another ref is a `RangeError`, as is a malformed cursor or a limit
-  outside `1..200`. `readMailboxMessageByMessageId(db, scope, messageId)`
-  looks one message up by its `Message-ID`, scoped to
-  `(tenantId, principalId)`, oldest match winning since nothing makes a
-  msg-id unique.
-  `principal_mail` gains a cached `references` column, populated on the
-  write and transport-persist paths; migration `0003_mail_references`
-  adds it, backfills it from each existing row's `raw` — unfolding the
-  `References:` continuation lines RFC 2822 line limits force, with the
-  same `bytea`-level header slicing and NUL stripping `0002` uses — and
-  creates the three indexes the reads need:
-  `(tenant_id, principal_id, message_id)`, a GIN index on `refs`, and
-  `(tenant_id, principal_id, created_at, id)` matching `readMailboxThread`'s
-  own oldest-first `ORDER BY` (the list path's index over the same three
-  columns, in the opposite direction, already served this query via a
-  backward scan; this one lets the thread path's plan match its `ORDER BY`
-  directly). Both surfaces run on the list projection and never load `raw`.
-  A host whose own `principal_mail` predates this package (and so is
-  missing `refs` — see `ARCHITECTURE.md`'s "Migrations" section) now fails
-  `0003` with the named `SchemaTypeMismatchError` diagnostic rather than a
-  raw Postgres "column \"refs\" does not exist" at the `CREATE INDEX`
-  statement that needs it.
-  Exported alongside them: `MailboxThreadMessageSchema`,
-  `MailboxThreadResponseSchema`, `canonicalMailboxThreadRef`,
-  `encodeMailboxThreadCursor`, `decodeMailboxThreadCursor`,
-  `DEFAULT_MAILBOX_THREAD_LIMIT`, `MAX_MAILBOX_THREAD_LIMIT`, and the
-  `MailboxThreadScope` / `MailboxThreadArgs` / `MailboxThreadMessage` /
-  `MailboxThreadPage` / `MailboxThreadCursor` types.
+The package is now an Interchange hub module: a route factory the host mounts,
+grant-gated routes, and SQL migrations shaped like Interchange's own. The
+exports in `src/index.ts` are the public API as of this release.
 
-- **Threading headers on the frame and in the list projection.**
-  `buildMailFrame` accepts `references` — the thread's ancestry, oldest
-  first — and emits it as a folded `References:` header; `In-Reply-To`
-  stays the single immediate parent. Every threading value must be a
-  bracketed msg-id (`<local@domain>`); anything else is a `RangeError` at
-  the builder, because a frame is frozen at rest and an unthreadable
-  header written today is unthreadable forever. `decodeMailFrame` now
-  returns `messageId`, `inReplyTo` (both `string | null`) and
-  `references` (`string[]`, oldest first) parsed alongside the header map.
-  `principal_mail` gains `message_id` and `in_reply_to` as cached
-  columns, populated on the `writeMailboxMessage`, `deliverInboxItems`
-  and `createMailboxPersist` paths, and `MailboxMessage` gains an
-  optional `inReplyTo` — so a client threads an inbox page from the list
-  projection alone, which never loads `raw`. `WriteMailboxMessageArgs`
-  and `InboxItem` accept `inReplyTo` and `references`. Migration
-  `0002_mail_threading_headers` adds both columns and backfills them from
-  each existing row's `raw`, so threading does not silently begin at the
-  upgrade. The backfill slices the header section out of `raw` at the
-  `bytea` level and strips any NUL byte from that slice before decoding
-  it, so a legacy frame with a NUL anywhere in its bytes (a binary
-  attachment, most commonly) cannot abort the migration. `assertMsgId`
-  accepts a quoted-string local part (`<"john doe"@example.com>`,
-  RFC 5322 `obs-id-left`) in addition to a dot-atom one. The cached
-  `in_reply_to` is normalized once on the way in — trimmed and
-  newline-flattened the same way `buildMailFrame` normalizes the header —
-  so the list and detail projections of the same message agree; on the
-  transport dual-write path (`createMailboxPersist`), `in_reply_to` caches
-  the first bracketed msg-id found in a decoded `In-Reply-To:` header, or
-  `null`, matching what the 0002 backfill derives from the same header
-  text rather than caching an unbracketed or multi-id header verbatim.
+### Breaking
 
-- **Live events name the operation that fired.** `MailboxEvent` gains an
-  optional `op` (`MailboxEventOp`: `create`, `mark_read`, `mark_unread`,
-  `trash`, `archive`, `restore`, `enrich`, `assign`) alongside the existing
-  `id` — a listener can react to a specific kind of change without
-  re-fetching and diffing the whole message. `op` is additive on the wire:
-  it is optional on `MailboxEventSchema`, so an existing listener reading
-  only `id` is unaffected, and a historical event replayed from before this
-  field existed still validates. `publishMailboxEvent` requires `op` — every
-  call site in this package always knew the operation, and the parameter now
-  enforces that a future call site can't silently regress to an op-less
-  event. `MAILBOX_EVENT_OPS` and `MailboxEventOp` are now exported.
-- **Delivery semantics are documented.** Events can be missed (best-effort
-  publish, bounded SSE queue with overflow disconnect); duplicated, but only
-  when there is no stable dedupe key to prevent it — an undeduped inbox
-  redelivery, or a broker-backed bus a host supplies redelivering itself; or
-  arrive out of order (no cross-replica ordering guarantee) — see the
-  README's SSE client contract and `MailboxEventBus`'s doc comment.
-
-### Security
-
-- Require `drizzle-orm` `>= 0.45.2` (peer and dev pins, plus a root
-  override) past [GHSA-gpj5-g38j-94v9](https://github.com/advisories/GHSA-gpj5-g38j-94v9)
-  — identifier SQL injection in `drizzle-orm` `<= 0.45.1`. Nested
-  `@intx/*` deps that still declare `^0.45.1` resolve to `0.45.2` via the
-  override.
+- `mountMailbox(app, opts)` is gone. Mount `createMailboxRoutes(deps)` with
+  `app.route`. `MountMailboxOpts` is now `CreateMailboxRoutesDeps`, and
+  `deps.requireGrant` is required: reads check `mailbox:*` `read`, send checks
+  `create`, and the flag and move verbs check `manage`.
+- The `resolvePrincipal` option is gone. The principal is the `tenant` and
+  `principal` the host's tenant middleware sets on the context. Every route
+  returns 403 when the context carries none, including the list routes, which
+  used to return an empty 200.
+- `runMailboxMigrations(db)` is now `runMailboxMigrations(dbConfig, { schema })`,
+  taking the same arguments as `@intx/db`'s `runMigrations`. `schema` is the
+  host schema that holds `tenant` and `principal`. `createMailboxDb` is no longer
+  exported.
+- `MigrationChecksumError` is gone. Every `migrations/*.sql` file is idempotent
+  and replays on each run under an advisory lock, so there is no ledger;
+  `0007_drop_migrations_ledger.sql` drops 0.1.0's
+  `"mailbox"."corbits_mailbox_migrations"`.
+- The barrel no longer exports the schema objects (`principalMail`,
+  `mailboxPgSchema`) or the schema-check internals (`expectedColumnTypes`,
+  `assertExpectedColumnTypes` and others).
+- `@intx/db`, `@intx/hub-api` and `hono-openapi` (with its own peers) are now
+  peer dependencies alongside the other `@intx/*` packages, all at `^0.4.0`.
 
 ### Changed
 
-- `build` runs `tsc` directly; the `prepare` git-install hook and its
-  `scripts/` helpers are removed. Install from npm.
-- **Caller-supplied Message-ID, direction, and message key on writes.**
-  `WriteMailboxMessageArgs` gains `messageId?: string` — when supplied it
-  must be a bracketed msg-id (validated with `assertMsgId`) and becomes
-  the built frame's own `Message-ID:` header and the cached
-  `principal_mail.message_id`; omitted, one is still minted exactly as
-  before. It also gains `direction?: "inbound" | "outbound"` (default
-  `"inbound"`). Omitting `messageKey` no longer leaves the row unkeyed: it
-  now defaults to `mailboxKey.transport(messageId, principalId, direction)`.
-  For the default `"inbound"` direction this is
-  `transport:mid:<Message-ID>:<principalId>` — the exact shape
-  `persist.ts`'s transport dual-write already uses, byte for byte — so a
-  frame `persist.ts` already delivered and a direct inbound write for the
-  same Message-ID + principal dedupe onto the same row, as before, and
-  retrying a write with the same caller-supplied `messageId` dedupes
-  without the caller minting its own key. `"outbound"` gets a
-  `:outbound` suffix instead, so a sender's own copy of a turn never
-  collides with an inbound copy that reuses the identical caller-supplied
-  `messageId` for the same principal — two independent (differently
-  keyed) writes still never collide either way. A caller-supplied
-  `messageKey` still overrides the default. A *colliding* caller
-  `messageId` (same effective key) is a no-op: the write returns `null`
-  rather than a second row.
-  An outbound row is also created already-read — its `mailbox.read_at` is
-  pinned to its own `created_at` at insert — so it never counts toward
-  `countUnreadActiveMailbox` or appears in the unread view without either
-  needing a direction predicate of its own; `listUserMailbox` and
-  `getMailboxMessage` still default to `"inbound"` only, unaffected by
-  this.
-  `writeMailboxMessages` returns `Array<{ messageKey: string; id: string |
-  null }>`, one entry per item, in item order — matching
-  `deliverInboxItems`'s `DeliveredInboxItem` shape — rather than a
-  filtered array of inserted ids; `id` is `null` exactly when that item's
-  messageKey deduped against an existing row.
-- **Inbox list no longer loads or decodes full MIME frames.** List selects every
-  `principal_mail` column except `raw`, and projects `subject` / `from` from the
-  denormalized caches only — no list `snippet`, and list `date` / `messageId` /
-  `to` come from row fields rather than the frame. Message detail still loads
-  `raw` and remains frame-authoritative for body, snippet, and header-derived
-  fields. Clients that need a stable identity across list and detail should key
-  on message `id`.
-- **Bus publish isolates per-listener failures.** One throwing listener no longer
-  prevents other listeners (or SSE clients) from receiving the event. SSE drain
-  serializes writes and closes the stream on overflow or write failure.
-- **Transport dual-write inserts are idempotent under retry.** Package-owned
-  `messageKey` values (`transport:mid:…` / `transport:raw:…`) use
-  `onConflictDoNothing`; management rows and bus announce only for rows returned
-  by `RETURNING`.
-- **Inbox idempotency keys are injective and versioned.**
-  `mailboxKey.inbox(source, externalId)` encodes as
-  `inbox2:<source.length>:<source>:<externalId>`, disjoint from pre-upgrade
-  `inbox:` keys so a historical pure-decimal source cannot false-dedupe. No
-  migration; redelivery after upgrade may insert a second row.
-- **`deliverInboxItems` is one atomic batch transaction.** Mid-batch failure
-  rolls back every new row from that call. Bus publish and optional host
-  `enqueue` run only after commit for newly inserted ids; enqueue throws are
-  logged and swallowed (same posture as bus publish).
-### Breaking
+- `build` runs `tsc` directly, and the `prepare` install hook is gone. Install
+  from npm; the published tarball is built at pack time.
 
-- **`hono-openapi` is a peer, and the remaining dependency is a caret range.**
-  Route descriptions merge into the host's own OpenAPI document instead of a
-  second copy of `hono-openapi`. `arktype` is `^2.2.3`; the unused
-  `@intx/crypto`, the `drizzle-orm` override, the git-install `prepare` build
-  and the `isAgentAddress` compatibility shim are gone.
-- **`runMailboxMigrations(config, { schema })` replaces `runMailboxMigrations(db)`.**
-  It takes the same `DBConfig` (`@intx/db`, now a peer) and `schema` the host
-  passes Interchange's `runMigrations`. `schema` is the host schema holding
-  `tenant` and `principal`; the mailbox FKs point there. The mailbox tables
-  stay in the `mailbox` schema. `createMailboxDb` is no longer exported; hosts
-  pass the handle they already have (e.g. `@intx/db`'s `createDB`).
-- **Migrations ship as idempotent `migrations/*.sql` files, replayed on every
-  run; the checksum ledger and `MigrationChecksumError` are gone.** A database
-  migrated by 0.1.0 upgrades on its next `runMailboxMigrations` call with no
-  manual step and no row changed: the new files are no-ops against it, and
-  `0007_drop_migrations_ledger.sql` drops `"mailbox"."corbits_mailbox_migrations"`.
-- **`mountMailbox` is replaced by `createMailboxRoutes(deps): Hono<TenantEnv>`.**
-  The host mounts the returned sub-app with `app.route`. `deps.requireGrant`
-  (`@intx/hub-api`'s `RequireGrant`, now a peer) gates reads on `mailbox:*`
-  `read`, send on `create`, and the flag and move verbs on `manage`.
-  `resolvePrincipal` is removed: the routes read the `tenant` and `principal`
-  the host's tenant middleware sets on the context, the same principal
-  `requireGrant` authorizes. `MountMailboxOpts` is now
-  `CreateMailboxRoutesDeps`.
-- **The barrel no longer exports schema objects or internal constants.**
-  `principalMail`, `mailboxPgSchema`, `expectedColumnTypes`,
-  `assertExpectedColumnTypes`, `MESSAGE_ID_FALLBACK_DOMAIN`, and
-  `MAX_PENDING_SSE_EVENTS`, and the `PrincipalMailRow`/`PrincipalMailInsert`
-  row types are gone from `@corbits/mailbox`.
-  `runMailboxMigrations` still asserts column types on every boot.
-- **Hard caps on frame size and transport recipient fan-out.** Frames above
-  `MAX_MAILBOX_FRAME_BYTES` (1 MiB) and transport recipient lists longer than
-  `MAX_MAILBOX_RECIPIENTS` (50) are refused with `RangeError` before durable
-  insert. Direct write and `createMailboxPersist` both enforce the frame-byte
-  cap; the recipient cap applies on the transport path only (raw address-list
-  length, not post-resolve principal count — hosts must chunk larger fan-out).
-  Inputs that previously inserted now throw on the direct-write path; on the
-  transport dual-write path the same refusal is logged and swallowed so
-  upstream success is unchanged.
+### Upgrading data
+
+- A 0.1.0 database upgrades on its next boot with no manual step and no row
+  changed.
+- A database from before 0.1.0 upgrades too. Migration 0004 copies each
+  message's folder (Trash, then Archive, else INBOX) and `\Seen` flag from the
+  pre-native `"mailbox"."mailbox"` table, and 0005 then runs
+  `DROP TABLE "mailbox"."mailbox"`. Its triage columns (`priority`,
+  `classification`, `status`, `assignee`) go with it, as they did in 0.1.0.
 
 ## [0.1.0] — 2026-07-27
 
@@ -367,5 +173,6 @@ What remains: `sort=priority`, 28 ms -> 106 ms — it was already a sequential
 scan plus a top-N sort, the rank was never index-servable, and is now that plus
 a join over the management layer.
 
-[Unreleased]: https://github.com/corbitsdev/corbits-mailbox/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/corbitsdev/corbits-mailbox/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/corbitsdev/corbits-mailbox/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/corbitsdev/corbits-mailbox/releases/tag/v0.1.0
