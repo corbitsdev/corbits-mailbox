@@ -1,9 +1,8 @@
 import { drizzle } from "drizzle-orm/postgres-js";
 import { Hono } from "hono";
 import postgres from "postgres";
-import type { TenantEnv } from "@intx/hub-api";
+import type { TenantEnv, TenantRow } from "@intx/hub-api";
 import {
-  createInMemoryMailboxEventBus,
   createMailboxRoutes,
   runMailboxMigrations,
   type CreateMailboxRoutesDeps,
@@ -57,36 +56,54 @@ export async function createTestDb(): Promise<TestDb> {
   return { db, close };
 }
 
-export const TEST_TENANT = {
-  id: "t1",
-  name: "t1",
-  slug: "t1",
-  domain: "t1.example",
-  parentId: null,
-  config: null,
-  createdAt: new Date(0),
-  updatedAt: new Date(0),
-};
-
-/** Request header naming the principal the test host authenticates the request as. */
+/** Request headers naming the tenant and principal the test host authenticates the request as. */
+export const TENANT_HEADER = "x-test-tenant";
 export const PRINCIPAL_HEADER = "x-test-principal";
 
+export function testTenant(id: string): TenantRow {
+  return {
+    id,
+    name: id,
+    slug: id,
+    domain: `${id}.example`,
+    parentId: null,
+    config: null,
+    createdAt: new Date(0),
+    updatedAt: new Date(0),
+  };
+}
+
+/** Headers for a request made as `principalId` in `tenantId`. */
+export function as(tenantId: string, principalId: string): Headers {
+  return new Headers({ [TENANT_HEADER]: tenantId, [PRINCIPAL_HEADER]: principalId });
+}
+
+/** `as`, for a JSON request body. */
+export function jsonAs(tenantId: string, principalId: string): Headers {
+  const headers = as(tenantId, principalId);
+  headers.set("content-type", "application/json");
+  return headers;
+}
+
 /**
- * A host app that plays the tenant middleware: every request runs as
- * `TEST_TENANT` and the principal named by `PRINCIPAL_HEADER`, and the
- * mailbox routes are mounted under `/mailbox`.
+ * A host app that plays the tenant middleware: every request runs as the
+ * tenant and principal named by `TENANT_HEADER` and `PRINCIPAL_HEADER`, and
+ * the mailbox routes are mounted under `/mailbox`.
  */
 export function createTestApp(
-  deps: Pick<CreateMailboxRoutesDeps, "db" | "senderAddressFor" | "deliver">,
+  deps: Pick<CreateMailboxRoutesDeps, "db" | "bus" | "senderAddressFor" | "deliver">,
 ): Hono<TenantEnv> {
   const app = new Hono<TenantEnv>();
   app.use(async (c, next) => {
+    const tenantId = c.req.header(TENANT_HEADER);
     const principalId = c.req.header(PRINCIPAL_HEADER);
-    if (principalId === undefined) return c.json({ error: "unauthenticated" }, 401);
-    c.set("tenant", TEST_TENANT);
+    if (tenantId === undefined || principalId === undefined) {
+      return c.json({ error: "unauthenticated" }, 401);
+    }
+    c.set("tenant", testTenant(tenantId));
     c.set("principal", {
       id: principalId,
-      tenantId: TEST_TENANT.id,
+      tenantId,
       kind: "user",
       refId: principalId,
       status: "active",
@@ -99,7 +116,7 @@ export function createTestApp(
     "/mailbox",
     createMailboxRoutes({
       db: deps.db,
-      bus: createInMemoryMailboxEventBus(),
+      bus: deps.bus,
       requireGrant: allowAllGrants,
       senderAddressFor: deps.senderAddressFor,
       deliver: deps.deliver,
