@@ -11,7 +11,8 @@ A **library, not a service**. It creates no HTTP server, opens no connection
 pool by default, owns no configuration, and starts no background work. A host
 calls two functions:
 
-- `runMailboxMigrations(db)` — once at boot, before serving.
+- `runMailboxMigrations(config, { schema })` — once at boot, before serving,
+  with the same arguments the host passes Interchange's `runMigrations`.
 - `createMailboxRoutes(deps)` — returns a `Hono<TenantEnv>` sub-app serving
   `/me/inbox*`, which the host mounts with `app.route`.
 
@@ -48,9 +49,9 @@ is reached for.
 
 What it does **not** require: no session library, no logger
 configuration, no UI. What it *does* require of the database is an
-Interchange-shaped control plane: `public.tenant` and `public.principal` in the
-same database, in place before `runMailboxMigrations` runs, because the mailbox
-tables foreign-key to both. Nothing changed in Interchange to make that work —
+Interchange-shaped control plane: `tenant` and `principal` in the host schema
+of the same database, in place before `runMailboxMigrations` runs, because the
+mailbox tables foreign-key to both. Nothing changed in Interchange to make that work —
 the coupling lives entirely on this side.
 
 One further seam lives outside `createMailboxRoutes`, on the write side:
@@ -171,7 +172,7 @@ own offboarding transaction; neither is scoped by view, because an offboarded
 tenant's trash is as much their data as their inbox.
 
 **Hard control-plane foreign keys.** `tenant_id` and `principal_id` on both
-tables reference the host's `public.tenant` and `public.principal`, both
+tables reference the host schema's `tenant` and `principal`, both
 `ON DELETE CASCADE` — the same posture as Interchange's own
 `session_mail.tenant_id`, extended to the principal. Consequences, stated
 rather than hidden: the control plane and the mail plane must share one
@@ -431,8 +432,14 @@ two would query columns or rely on indexes the migrations never created.
 
 ## Migrations
 
-`runMailboxMigrations(db)` is idempotent and safe to call unconditionally on
-every boot of every replica.
+`runMailboxMigrations(config, { schema })` is idempotent and safe to call
+unconditionally on every boot of every replica. It opens one connection from
+`config` and closes it when done. `schema` names the host schema holding
+`tenant` and `principal`; the FKs are pointed there at execution time, while
+ledger checksums hash the statements as shipped, so the same migration has the
+same checksum whatever the host schema. The FKs are fixed by the run that
+first applies each migration; passing a different `schema` later does not move
+them.
 
 - The whole run is one transaction whose first statements are
   `SET LOCAL client_min_messages = warning` and a **transaction-scoped**
@@ -474,8 +481,8 @@ every boot of every replica.
 **Everything lands in the `mailbox` schema, fully qualified.** Nothing resolves
 through `search_path`, so the host's own setting cannot redirect or shadow
 where the mailbox tables live. The one ordering constraint mounting imposes is
-the control plane's: the DDL's foreign keys reference `public.tenant` and
-`public.principal`, so those tables must exist before the first run.
+the control plane's: the DDL's foreign keys reference the host schema's
+`tenant` and `principal`, so those tables must exist before the first run.
 
 ## Boundaries
 

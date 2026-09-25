@@ -9,7 +9,7 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import { sql } from "drizzle-orm";
 import { getTableConfig } from "drizzle-orm/pg-core";
 import { principalMail } from "./schema.js";
-import { runMailboxMigrations } from "./migrations.js";
+import { applyMailboxMigrations } from "./migrations.js";
 import { createHostControlPlane, TEST_DATABASE_URL } from "./test-helpers.js";
 
 // The tables live in this package's own `mailbox` schema, so what is compared
@@ -22,7 +22,7 @@ const client = postgres(TEST_DATABASE_URL, { onnotice: () => {} });
 beforeAll(async () => {
   const db = drizzle(client);
   await createHostControlPlane(db);
-  await runMailboxMigrations(db);
+  await applyMailboxMigrations(db, "public");
 });
 
 afterAll(async () => {
@@ -111,7 +111,7 @@ async function liveIndexes(table: string): Promise<IndexDescriptor[]> {
 // hold to this parity.
 const TABLES = [{ name: "principal_mail", declared: principalMail }] as const;
 
-describe("schema.ts vs. the DDL runMailboxMigrations actually creates", () => {
+describe("schema.ts vs. the DDL applyMailboxMigrations actually creates", () => {
   for (const { name, declared } of TABLES) {
     it(`${name}: declares exactly the indexes the live table has, in the same column order`, async () => {
       expect(declaredIndexes(declared)).toEqual(await liveIndexes(name));

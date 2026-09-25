@@ -13,7 +13,6 @@ export { runMailboxMigrations, MigrationChecksumError } from "./migrations.js";
 
 export { SchemaTypeMismatchError } from "./schema-check.js";
 
-export { createMailboxDb } from "./db.js";
 export type { MailboxDb } from "./db.js";
 
 // The native `MailboxStore` over `mailbox.principal_mail` /
