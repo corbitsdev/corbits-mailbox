@@ -12,8 +12,6 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import { sql } from "drizzle-orm";
 import { getTableConfig } from "drizzle-orm/pg-core";
 import {
-  MIGRATIONS,
-  MigrationChecksumError,
   applyMailboxMigrations,
   runMailboxMigrations,
 } from "./migrations.js";
@@ -138,8 +136,7 @@ describe("runMailboxMigrations", () => {
         "uid",
       ]);
 
-      // The pre-native management layer ("mailbox"."mailbox") was dropped in
-      // 0005 — the mail plane is now the only table this schema owns.
+      // The pre-native management layer ("mailbox"."mailbox") is gone.
       const stateTable = await db.execute<{ exists: boolean }>(
         sql`SELECT EXISTS (SELECT 1 FROM information_schema.tables
             WHERE table_schema = 'mailbox' AND table_name = 'mailbox') AS exists`,
@@ -205,6 +202,58 @@ describe("runMailboxMigrations", () => {
     });
   });
 
+  test("0004 carries folder and \\Seen out of a pre-0.1.0 mailbox table", async () => {
+    await fromEmpty(async ({ db }) => {
+      // Rebuild the pre-0.1.0 shape: no IMAP columns, no counters, and the
+      // management table that held read/archive/trash state.
+      await applyMailboxMigrations(db, "public");
+      await db.execute(sql`DROP TABLE "mailbox"."mailbox_state"`);
+      await db.execute(
+        sql`ALTER TABLE "mailbox"."principal_mail"
+            DROP COLUMN "folder", DROP COLUMN "uid",
+            DROP COLUMN "modseq", DROP COLUMN "flags"`,
+      );
+      await db.execute(sql`CREATE TABLE "mailbox"."mailbox" (
+        "id" text PRIMARY KEY,
+        "read_at" timestamp,
+        "archived_at" timestamp,
+        "trashed_at" timestamp
+      )`);
+      await seedScope(db, "acme", "user-1");
+      const raw = Buffer.from(
+        "From: bot@acme.example\r\nSubject: legacy\r\n\r\nBody\r\n",
+      );
+      for (const id of ["read", "archived", "trashed", "both", "untouched"]) {
+        await db.execute(sql`
+          INSERT INTO "mailbox"."principal_mail"
+            ("id","tenant_id","principal_id","address","direction","raw")
+          VALUES (${id},'acme','user-1','user-1@acme.example','inbound',${raw})
+        `);
+      }
+      await db.execute(sql`
+        INSERT INTO "mailbox"."mailbox" ("id","read_at","archived_at","trashed_at")
+        VALUES ('read', now(), NULL, NULL),
+               ('archived', NULL, now(), NULL),
+               ('trashed', now(), NULL, now()),
+               ('both', NULL, now(), now()),
+               ('untouched', NULL, NULL, NULL)
+      `);
+
+      await applyMailboxMigrations(db, "public");
+
+      const rows = await db.execute<{ id: string; folder: string; flags: string[] }>(
+        sql`SELECT "id", "folder", "flags" FROM "mailbox"."principal_mail" ORDER BY "id"`,
+      );
+      expect([...rows]).toEqual([
+        { id: "archived", folder: "Archive", flags: [] },
+        { id: "both", folder: "Trash", flags: [] },
+        { id: "read", folder: "INBOX", flags: ["\\Seen"] },
+        { id: "trashed", folder: "Trash", flags: ["\\Seen"] },
+        { id: "untouched", folder: "INBOX", flags: [] },
+      ]);
+    });
+  });
+
   test("0002 backfills the threading headers from legacy rows' raw", async () => {
     // The state every already-deployed host is in at upgrade: rows written
     // before the cached columns existed, so `raw` carries the headers and the
@@ -216,10 +265,6 @@ describe("runMailboxMigrations", () => {
       await db.execute(
         sql`ALTER TABLE "mailbox"."principal_mail"
             DROP COLUMN "message_id", DROP COLUMN "in_reply_to"`,
-      );
-      await db.execute(
-        sql`DELETE FROM "mailbox"."corbits_mailbox_migrations"
-            WHERE "id" = '0002_mail_threading_headers'`,
       );
       await seedScope(db, "acme", "user-1");
 
@@ -279,7 +324,7 @@ describe("runMailboxMigrations", () => {
   test("0002 survives a legacy frame with a NUL byte in its body", async () => {
     // Postgres `text` cannot hold 0x00 in any encoding — a single legacy
     // frame with a NUL anywhere in `raw` used to abort the whole UPDATE (and
-    // with it the ledger insert), which meant every subsequent boot failed
+    // with it the boot), which meant every subsequent boot failed
     // forever. This is RED against the pre-fix backfill (LATIN1-decoding the
     // entire `raw`, NUL included) and GREEN once only the NUL-stripped header
     // slice reaches `convert_from`.
@@ -288,10 +333,6 @@ describe("runMailboxMigrations", () => {
       await db.execute(
         sql`ALTER TABLE "mailbox"."principal_mail"
             DROP COLUMN "message_id", DROP COLUMN "in_reply_to"`,
-      );
-      await db.execute(
-        sql`DELETE FROM "mailbox"."corbits_mailbox_migrations"
-            WHERE "id" = '0002_mail_threading_headers'`,
       );
       await seedScope(db, "acme", "user-1");
 
@@ -321,18 +362,6 @@ describe("runMailboxMigrations", () => {
 
       await applyMailboxMigrations(db, "public");
 
-      const ledger = await db.execute<{ id: string }>(
-        sql`SELECT "id" FROM "mailbox"."corbits_mailbox_migrations" ORDER BY "id"`,
-      );
-      expect(ledger.map((r) => r.id)).toEqual([
-        "0001_principal_mailbox",
-        "0002_mail_threading_headers",
-        "0003_mail_references",
-        "0004_native_mailbox_store",
-        "0005_drop_pre_native_columns",
-        "0006_mail_to_addresses",
-      ]);
-
       const rows = await db.execute<{
         message_key: string;
         message_id: string | null;
@@ -357,10 +386,6 @@ describe("runMailboxMigrations", () => {
       await applyMailboxMigrations(db, "public");
       await db.execute(
         sql`ALTER TABLE "mailbox"."principal_mail" DROP COLUMN "references"`,
-      );
-      await db.execute(
-        sql`DELETE FROM "mailbox"."corbits_mailbox_migrations"
-            WHERE "id" = '0003_mail_references'`,
       );
       await seedScope(db, "acme", "user-1");
 
@@ -429,10 +454,6 @@ describe("runMailboxMigrations", () => {
         sql`ALTER TABLE "mailbox"."principal_mail"
             DROP COLUMN "message_id", DROP COLUMN "in_reply_to"`,
       );
-      await db.execute(
-        sql`DELETE FROM "mailbox"."corbits_mailbox_migrations"
-            WHERE "id" = '0002_mail_threading_headers'`,
-      );
       await seedScope(db, "acme", "user-1");
       const enc = new TextEncoder();
       const cases = [
@@ -481,96 +502,34 @@ describe("runMailboxMigrations", () => {
     });
   });
 
-  test("is idempotent: running twice does not error and applies once", async () => {
+  test("replays every file: a second run changes nothing and keeps no ledger", async () => {
     await fromEmpty(async ({ db }) => {
       await applyMailboxMigrations(db, "public");
       await applyMailboxMigrations(db, "public");
-
-      const rows = await db.execute<{ id: string; count: string }>(
-        sql`SELECT "id", count(*)::text AS count
-            FROM "mailbox"."corbits_mailbox_migrations" GROUP BY "id" ORDER BY "id"`,
+      const [row] = await db.execute<{ ledger: string | null }>(
+        sql`SELECT to_regclass('"mailbox"."corbits_mailbox_migrations"')::text AS ledger`,
       );
-      expect(rows.map((r) => [r.id, r.count])).toEqual([
-        ["0001_principal_mailbox", "1"],
-        ["0002_mail_threading_headers", "1"],
-        ["0003_mail_references", "1"],
-        ["0004_native_mailbox_store", "1"],
-        ["0005_drop_pre_native_columns", "1"],
-        ["0006_mail_to_addresses", "1"],
-      ]);
+      expect(row?.ledger).toBeNull();
     });
   });
 
-  test("records a checksum per applied migration", async () => {
-    await fromEmpty(async ({ db }) => {
+  test("a replay takes no table lock that would block mail reads or writes", async () => {
+    await fromEmpty(async ({ client, db }) => {
       await applyMailboxMigrations(db, "public");
-      const rows = await db.execute<{ id: string; checksum: string | null }>(
-        sql`SELECT "id", "checksum" FROM "mailbox"."corbits_mailbox_migrations"`,
-      );
-      expect(rows.length).toBe(MIGRATIONS.length);
-      for (const row of rows) {
-        expect(row.checksum).toMatch(/^[0-9a-f]{64}$/);
-      }
-    });
-  });
-
-  test("refuses to boot when a shipped migration was edited after it applied", async () => {
-    await fromEmpty(async ({ db }) => {
-      await applyMailboxMigrations(db, "public");
-      // Stand in for someone editing MIGRATIONS[0].statements in place: the
-      // ledger now disagrees with the code, which is exactly the divergence
-      // that used to be invisible — old environments skip the edit forever
-      // while fresh ones get the new DDL.
-      await db.execute(
-        sql`UPDATE "mailbox"."corbits_mailbox_migrations"
-            SET "checksum" = 'deadbeef' WHERE "id" = '0001_principal_mailbox'`,
-      );
-      // A NAMED error, matching both sibling cores: a host catching this to
-      // tell "someone edited a migration" apart from "the database is down"
-      // should not have to regex-match a message string.
-      await expect(applyMailboxMigrations(db, "public")).rejects.toThrow(
-        MigrationChecksumError,
-      );
-      await expect(applyMailboxMigrations(db, "public")).rejects.toThrow(
-        /has changed since it was applied/,
-      );
-    });
-  });
-
-  test("has no nullable-checksum escape hatch in the ledger", async () => {
-    await fromEmpty(async ({ db }) => {
-      // The adopt-silently branch for "ledgers written before checksums
-      // existed" is gone: 0.1.0 is the first public release, so no such ledger
-      // can exist, and while the column was nullable the runner would accept
-      // exactly one edit to a shipped migration without complaint. NOT NULL is
-      // what makes the documented immutability guarantee unconditional.
-      await applyMailboxMigrations(db, "public");
-      // Drizzle wraps driver errors, so the NOT NULL violation is on `.cause`,
-      // not on the message `toThrow` would match.
-      const failure = await db
-        .execute(
-          sql`UPDATE "mailbox"."corbits_mailbox_migrations" SET "checksum" = NULL`,
-        )
-        .then(
-          () => null,
-          (error: unknown) => error,
-        );
-      expect(failure).not.toBeNull();
-      expect(String((failure as { cause?: unknown }).cause)).toMatch(
-        /null value in column "checksum"/,
-      );
-    });
-  });
-
-  test("creates its own ledger table distinct from any host table", async () => {
-    await fromEmpty(async ({ db }) => {
-      await applyMailboxMigrations(db, "public");
-      const rows = await db.execute<{ exists: boolean }>(
-        sql`SELECT EXISTS (SELECT 1 FROM information_schema.tables
-            WHERE table_schema = 'mailbox'
-            AND table_name = 'corbits_mailbox_migrations') AS exists`,
-      );
-      expect(rows[0]?.exists).toBe(true);
+      await client.begin(async (tx) => {
+        // Held open, so any lock the replay requests on principal_mail waits.
+        await tx`LOCK TABLE "mailbox"."principal_mail", "mailbox"."mailbox_state" IN ROW EXCLUSIVE MODE`;
+        const replay = postgres(TEST_DATABASE_URL, {
+          max: 1,
+          onnotice: () => {},
+          connection: { lock_timeout: 2000 },
+        });
+        try {
+          await applyMailboxMigrations(drizzle(replay), "public");
+        } finally {
+          await replay.end();
+        }
+      });
     });
   });
 
@@ -621,11 +580,9 @@ describe("runMailboxMigrations", () => {
       await applyMailboxMigrations(drizzle(client), "public");
       const found = await admin.unsafe(
         `SELECT to_regclass('mailbox.principal_mail') AS t,
-                to_regclass('mailbox.corbits_mailbox_migrations') AS l,
                 to_regclass('mbx_elsewhere.principal_mail') AS stray`,
       );
       expect(found[0]!.t).not.toBeNull();
-      expect(found[0]!.l).not.toBeNull();
       expect(found[0]!.stray).toBeNull();
     } finally {
       await client.end();
@@ -647,8 +604,7 @@ describe("runMailboxMigrations", () => {
 describe("applyMailboxMigrations under concurrent cold start", () => {
   // `CREATE TABLE IF NOT EXISTS` is NOT race-safe: the existence check and the
   // pg_type insert are not atomic, so without an advisory lock the losers crash
-  // with 23505 on (typname, typnamespace). Pre-creating the ledger only moves
-  // the collision to the principal_mailbox DDL.
+  // with 23505 on (typname, typnamespace).
   test("four instances booting at once all succeed", async () => {
     await dropMailboxSchema();
     const runners = Array.from({ length: 4 }, () => handle());
@@ -662,17 +618,10 @@ describe("applyMailboxMigrations under concurrent cold start", () => {
     );
     expect(failures).toEqual([]);
 
-    const ledger = await admin.unsafe(
-      `SELECT id FROM mailbox.corbits_mailbox_migrations ORDER BY id`,
+    const [found] = await admin.unsafe(
+      `SELECT to_regclass('mailbox.mailbox_state') AS t`,
     );
-    expect(ledger.map((r) => r.id)).toEqual([
-      "0001_principal_mailbox",
-      "0002_mail_threading_headers",
-      "0003_mail_references",
-      "0004_native_mailbox_store",
-      "0005_drop_pre_native_columns",
-      "0006_mail_to_addresses",
-    ]);
+    expect(found!.t).not.toBeNull();
   });
 
   test("a second wave against an already-migrated schema is a no-op for all", async () => {
@@ -790,19 +739,15 @@ describe("expectedColumnTypes", () => {
 });
 
 // `CREATE TABLE IF NOT EXISTS` matches on the table NAME only. A host that
-// already owns a `principal_mail` would get a silent no-op, a ledger row, and
-// every read decoding ITS columns through OUR codec. Each case plants such a
-// table and asserts the boot is rejected without leaving a ledger row that
-// would make the next boot skip the check.
+// already owns a `principal_mail` would get a silent no-op and every read
+// decoding ITS columns through OUR codec. Each case plants such a table and
+// asserts the boot is rejected with nothing it ran left applied.
 describe("boot against a host table this package did not create", () => {
-  /** The ledger row count, or 0 when the ledger table itself does not exist. */
-  async function ledgerRows(): Promise<number> {
-    const [ledger] = await admin<{ exists: boolean }[]>`
-      SELECT to_regclass('"mailbox"."corbits_mailbox_migrations"') IS NOT NULL AS exists`;
-    if (!ledger!.exists) return 0;
-    const [row] = await admin<{ n: number }[]>`
-      SELECT count(*)::int AS n FROM "mailbox"."corbits_mailbox_migrations"`;
-    return row!.n;
+  /** Whether the rejected boot left the table it creates behind. */
+  async function stateTableExists(): Promise<boolean> {
+    const [row] = await admin<{ exists: boolean }[]>`
+      SELECT to_regclass('"mailbox"."mailbox_state"') IS NOT NULL AS exists`;
+    return row!.exists;
   }
 
   /** Throws if the boot SUCCEEDS, rather than yielding an `undefined`. */
@@ -845,9 +790,8 @@ describe("boot against a host table this package did not create", () => {
         "principal_mail.created_at is timestamp with time zone, " +
           "expected timestamp without time zone",
       ]);
-      // Rejected inside the migration's transaction, so the ledger row rolled
-      // back; otherwise the next boot would skip the check.
-      expect(await ledgerRows()).toBe(0);
+      // Rejected inside the migrations' transaction, so everything rolled back.
+      expect(await stateTableExists()).toBe(false);
     });
   });
 
@@ -862,7 +806,7 @@ describe("boot against a host table this package did not create", () => {
       expect((failure as SchemaTypeMismatchError).mismatches).toEqual([
         "principal_mail.subject is missing (expected text)",
       ]);
-      expect(await ledgerRows()).toBe(0);
+      expect(await stateTableExists()).toBe(false);
     });
   });
 
@@ -877,7 +821,7 @@ describe("boot against a host table this package did not create", () => {
       await expect(applyMailboxMigrations(db, "public")).rejects.toThrow(
         SchemaTypeMismatchError,
       );
-      expect(await ledgerRows()).toBe(0);
+      expect(await stateTableExists()).toBe(false);
     });
   });
 });

@@ -9,7 +9,7 @@ export type {
   OutgoingMailboxMessage,
 } from "./mount.js";
 
-export { runMailboxMigrations, MigrationChecksumError } from "./migrations.js";
+export { runMailboxMigrations } from "./migrations.js";
 
 export { SchemaTypeMismatchError } from "./schema-check.js";
 
