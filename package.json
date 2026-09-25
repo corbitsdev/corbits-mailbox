@@ -1,6 +1,9 @@
 {
   "name": "@corbits/mailbox",
   "version": "1.0.0",
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "license": "LGPL-2.1-only",
   "description": "A native Interchange mailbox for human principals, mountable onto any Interchange host. Requires @intx 0.4.0 or newer.",
@@ -39,11 +42,8 @@
   },
   "files": [
     "dist",
-    "src",
-    "!src/**/*.test.ts",
-    "!src/test-helpers.ts",
-    "LICENSE",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "sideEffects": false,
   "scripts": {

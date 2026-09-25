@@ -4,9 +4,14 @@
     "types": [
       "node"
     ],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "allowImportingTsExtensions": false,
+    "composite": false,
     "noEmit": false,
     "declaration": true,
-    "declarationMap": true,
+    "declarationMap": false,
+    "sourceMap": false,
     "outDir": "dist",
     "rootDir": "src"
   },
