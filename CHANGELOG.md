@@ -214,6 +214,14 @@ always called out under their own heading.
 
 ### Breaking
 
+- **`mountMailbox` is replaced by `createMailboxRoutes(deps): Hono<TenantEnv>`.**
+  The host mounts the returned sub-app with `app.route`. `deps.requireGrant`
+  (`@intx/hub-api`'s `RequireGrant`, now a peer) gates reads on `mailbox:*`
+  `read`, send on `create`, and the flag and move verbs on `manage`.
+  `resolvePrincipal` is removed: the routes read the `tenant` and `principal`
+  the host's tenant middleware sets on the context, the same principal
+  `requireGrant` authorizes. `MountMailboxOpts` is now
+  `CreateMailboxRoutesDeps`.
 - **The barrel no longer exports schema objects or internal constants.**
   `principalMail`, `mailboxPgSchema`, `expectedColumnTypes`,
   `assertExpectedColumnTypes`, `MESSAGE_ID_FALLBACK_DOMAIN`, and
