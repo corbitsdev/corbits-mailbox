@@ -24,7 +24,7 @@ function pgTextArrayLiteral(items: readonly string[]): string {
  *
  * Deliberately reads via plain tagged `sql`, not the `schema.ts` drizzle table
  * objects: those objects are pinned by `schema-check.ts` and
- * `schema-ddl-parity.test.ts` to the columns the OLD read/write paths depend
+ * `migrations.test.ts` to the columns the OLD read/write paths depend
  * on, and this slice must not widen what those assert.
  *
  * `MailboxStore`'s mutating methods (`append`/`addFlags`/`removeFlags`/

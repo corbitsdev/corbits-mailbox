@@ -139,7 +139,7 @@ export const principalMail = mailboxPgSchema.table(
   // a host that points `drizzle-kit push`/`generate` at it recreates exactly
   // what is declared here — an index declared here but dropped by a migration
   // (or declared with a different column order) silently reintroduces itself
-  // into that host's schema. `schema-ddl-parity.test.ts` diffs the two,
+  // into that host's schema. `migrations.test.ts` diffs the two,
   // for BOTH tables.
   (t) => [
     // (tenant_id, principal_id, created_at DESC, id DESC) — matches the list query's
