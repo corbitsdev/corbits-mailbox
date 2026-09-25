@@ -3,8 +3,33 @@
 A small, deliberately boring codebase: strict TypeScript, arktype at the boundaries,
 drizzle for data access, no magic.
 
-Setup and the commands are in the [README](./README.md#working-on-it). `bun run
-typecheck` must be clean — it is its own CI step, and `any` is not a way past it. The
+## Setup
+
+```bash
+git clone https://github.com/corbitsdev/corbits-mailbox.git
+cd corbits-mailbox
+bun install
+docker run -d --name mailbox-pg -p 5433:5432 \
+  -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=mailbox_core postgres:16
+
+bun run typecheck
+bun run test
+bun run build
+```
+
+The end-to-end suites in `tests/` create and drop a database each, so the test role
+needs `CREATEDB`.
+
+## How it works
+
+Writes go through a native `MailboxStore` (uid and modseq always set). Search and
+threads are `@intx/mailbox` run over that store. `POST /me/inbox/send` builds the
+RFC 5322 message, files a copy in `Sent`, then calls the host's `deliver` exactly once.
+See [ARCHITECTURE.md](./ARCHITECTURE.md).
+
+## Code
+
+`bun run typecheck` must be clean — it is its own CI step, and `any` is not a way past it. The
 few escapes in the tree each carry a comment explaining why the type system leaves no
 alternative; new ones need the same.
 
