@@ -73,7 +73,7 @@ describe("buildMailFrame headers", () => {
       "<second-message-of-the-thread@example.com>",
       "<third-message-of-the-thread@example.com>",
     ];
-    const raw = frame({ references: chain, inReplyTo: chain[2] });
+    const raw = frame({ references: chain, inReplyTo: chain[2]! });
     const text = new TextDecoder().decode(raw);
     // Folded: continuation lines begin with the single space RFC 2822 requires.
     expect(text).toContain("\r\n <");
