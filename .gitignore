@@ -1,8 +1,8 @@
 node_modules/
 dist/
-.env
-.env.local
 *.tsbuildinfo
-coverage/
-.DS_Store
 *.tgz
+coverage/
+.env
+.env.*
+.DS_Store
