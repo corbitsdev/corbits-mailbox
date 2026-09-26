@@ -1,13 +1,40 @@
-import { createMailboxDb, type MailboxDb } from "./db.js";
-import { runMailboxMigrations } from "./migrations.js";
+import { drizzle } from "drizzle-orm/postgres-js";
+import postgres from "postgres";
+import type { MailboxDb } from "./db.js";
+import { applyMailboxMigrations } from "./migrations.js";
 import { sql } from "drizzle-orm";
 import { Hono } from "hono";
+import type { DBConfig } from "@intx/db";
 import type { RequireGrant, TenantEnv } from "@intx/hub-api";
 import type { ResolvedPrincipal } from "./mount.js";
 
 export const TEST_DATABASE_URL =
   process.env.MAILBOX_TEST_DATABASE_URL ??
   "postgres://postgres:postgres@localhost:5433/mailbox_core";
+
+/**
+ * Opens a standalone handle. `close` drains the pool — without it a suite
+ * keeps an open socket and never exits.
+ */
+export function createMailboxDb(connectionString: string): {
+  db: MailboxDb;
+  close: () => Promise<void>;
+} {
+  const client = postgres(connectionString);
+  return { db: drizzle(client), close: () => client.end() };
+}
+
+/** `url` as the `DBConfig` Interchange's migration runners take. */
+export function dbConfigFromUrl(url: string): DBConfig {
+  const parsed = new URL(url);
+  return {
+    host: parsed.hostname,
+    port: Number(parsed.port || 5432),
+    user: decodeURIComponent(parsed.username),
+    password: decodeURIComponent(parsed.password),
+    database: parsed.pathname.slice(1),
+  };
+}
 
 /**
  * The minimum control plane the FKs require: the host's `tenant` and
@@ -67,7 +94,7 @@ export async function withTestDb(): Promise<MailboxDb> {
     // The control plane must exist before the mailbox migrations can FK to it
     // — same order a real host boots in.
     await createHostControlPlane(db);
-    await runMailboxMigrations(db);
+    await applyMailboxMigrations(db, "public");
     return db;
   })();
   const db = await shared;

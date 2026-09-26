@@ -214,6 +214,12 @@ always called out under their own heading.
 
 ### Breaking
 
+- **`runMailboxMigrations(config, { schema })` replaces `runMailboxMigrations(db)`.**
+  It takes the same `DBConfig` (`@intx/db`, now a peer) and `schema` the host
+  passes Interchange's `runMigrations`. `schema` is the host schema holding
+  `tenant` and `principal`; the mailbox FKs point there. The mailbox tables
+  stay in the `mailbox` schema. `createMailboxDb` is no longer exported; hosts
+  pass the handle they already have (e.g. `@intx/db`'s `createDB`).
 - **`mountMailbox` is replaced by `createMailboxRoutes(deps): Hono<TenantEnv>`.**
   The host mounts the returned sub-app with `app.route`. `deps.requireGrant`
   (`@intx/hub-api`'s `RequireGrant`, now a peer) gates reads on `mailbox:*`

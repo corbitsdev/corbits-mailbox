@@ -12,6 +12,7 @@ import {
 import {
   allowAllGrants,
   createHostControlPlane,
+  dbConfigFromUrl,
   TEST_DATABASE_URL,
 } from "../../src/test-helpers.js";
 
@@ -41,13 +42,14 @@ export async function createTestDb(): Promise<TestDb> {
   url.pathname = `/${name}`;
   const client = postgres(url.toString(), { onnotice: () => {} });
   const db = drizzle(client);
+  const config = dbConfigFromUrl(url.toString());
   const close = async () => {
     await client.end();
     await admin((sql) => sql.unsafe(`DROP DATABASE "${name}" WITH (FORCE)`));
   };
   try {
     await createHostControlPlane(db);
-    await runMailboxMigrations(db);
+    await runMailboxMigrations(config, { schema: "public" });
   } catch (err) {
     await close();
     throw err;
