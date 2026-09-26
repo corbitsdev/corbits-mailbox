@@ -26,8 +26,6 @@ function headers(raw: Uint8Array) {
 }
 
 describe("buildMailFrame headers", () => {
-  // Nothing used to assert a single header value this function produces,
-  // which is how a doubly-bracketed Message-ID shipped unnoticed.
   test("emits every header it promises, verbatim", () => {
     const h = headers(frame());
     expect(h.get("from")).toBe("bot@example.com");
@@ -45,9 +43,8 @@ describe("buildMailFrame headers", () => {
   });
 
   test("a Message-ID from @intx/mime survives the frame unchanged", () => {
-    // Regression: generateMessageId already returns `<uuid@domain>`. The frame
-    // builder used to wrap it a second time, writing `<<uuid@domain>>` into
-    // every `raw` — frozen and corrupt at rest, and unthreadable by any MTA.
+    // generateMessageId already returns `<uuid@domain>`; wrapping it again
+    // would write `<<uuid@domain>>`, which no MTA can thread.
     const generated = generateMessageId("bot@example.com");
     expect(generated).toMatch(MESSAGE_ID);
     expect(headers(frame({ messageId: generated })).get("message-id")).toBe(
