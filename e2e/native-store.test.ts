@@ -3,7 +3,6 @@ import { executeSearch, executeThread } from "@intx/mailbox";
 import type { StoredEnvelope } from "@intx/mailbox";
 import {
   createPrincipalMailboxStore,
-  moveNativeMailboxMessage,
   openNativeMailboxStore,
 } from "../src/native-store.js";
 import { seedScope, withTestDb } from "./helpers.js";

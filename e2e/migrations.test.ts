@@ -273,7 +273,7 @@ describe("schema.ts vs. the DDL applyMailboxMigrations actually creates", () => 
     const columns = columnList!
       .split(", ")
       .map((column) => {
-        const desc = / DESC$/.test(column);
+        const desc = column.endsWith(" DESC");
         const bare = column.replace(/ (DESC|ASC)$/, "").replace(/ NULLS.*$/, "");
         return `${bare} ${desc ? "desc" : "asc"}`;
       })
