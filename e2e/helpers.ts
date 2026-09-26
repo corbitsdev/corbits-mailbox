@@ -16,7 +16,7 @@ import type { ResolvedPrincipal } from "../src/mount.js";
 
 export const TEST_DATABASE_URL =
   process.env.MAILBOX_TEST_DATABASE_URL ??
-  "postgres://postgres:postgres@localhost:5433/mailbox_core";
+  "postgres://postgres:postgres@localhost:5432/mailbox_core";
 
 /**
  * Opens a standalone handle. `close` drains the pool — without it a suite
