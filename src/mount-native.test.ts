@@ -1,11 +1,10 @@
 // The thin route layer over the native store: list (search + keyset),
 // read/unread flags, and archive/trash/restore moves.
 import { beforeEach, describe, expect, test } from "bun:test";
-import { Hono } from "hono";
-import { mountMailbox } from "./mount.js";
+import { createMailboxRoutes } from "./mount.js";
 import { createInMemoryMailboxEventBus } from "./bus.js";
 import { writeMailboxMessage } from "./write.js";
-import { withTestDb, seedScope } from "./test-helpers.js";
+import { allowAllGrants, mountAs, withTestDb, seedScope } from "./test-helpers.js";
 import type { MailboxDb } from "./db.js";
 
 let db: MailboxDb;
@@ -17,14 +16,16 @@ beforeEach(async () => {
 });
 
 function buildApp() {
-  const app = new Hono();
-  mountMailbox(app, {
-    db,
-    bus: createInMemoryMailboxEventBus(),
-    resolvePrincipal: () => SCOPE,
-    senderAddressFor: () => "p1@t1.example",
-    deliver: () => {},
-  });
+  const app = mountAs(
+    SCOPE,
+    createMailboxRoutes({
+      db,
+      requireGrant: allowAllGrants,
+      bus: createInMemoryMailboxEventBus(),
+      senderAddressFor: () => "p1@t1.example",
+      deliver: () => {},
+    }),
+  );
   return app;
 }
 

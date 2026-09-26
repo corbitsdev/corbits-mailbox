@@ -1,13 +1,17 @@
 import { describe, test, expect, spyOn } from "bun:test";
-import { Hono } from "hono";
 import { SSEStreamingApi } from "hono/streaming";
-import { mountMailbox, MAX_PENDING_SSE_EVENTS } from "./mount.js";
+import { createMailboxRoutes, MAX_PENDING_SSE_EVENTS } from "./mount.js";
 import {
   createInMemoryMailboxEventBus,
   type MailboxEventBus,
   type MailboxEventScope,
 } from "./bus.js";
-import { withTestDb, seedScope } from "./test-helpers.js";
+import {
+  allowAllGrants,
+  mountAs,
+  withTestDb,
+  seedScope,
+} from "./test-helpers.js";
 import { writeMailboxMessage } from "./write.js";
 
 describe("SSE stream", () => {
@@ -15,13 +19,16 @@ describe("SSE stream", () => {
     const db = await withTestDb();
     await seedScope(db, "t1", "p1");
     const bus = createInMemoryMailboxEventBus();
-    const app = mountMailbox(new Hono(), {
-      db,
-      bus,
-      resolvePrincipal: () => ({ tenantId: "t1", principalId: "p1" }),
-      senderAddressFor: () => "sender@t1.example",
-      deliver: () => {},
-    });
+    const app = mountAs(
+      { tenantId: "t1", principalId: "p1" },
+      createMailboxRoutes({
+        db,
+        requireGrant: allowAllGrants,
+        bus,
+        senderAddressFor: () => "sender@t1.example",
+        deliver: () => {},
+      }),
+    );
     const res = await app.request("/me/inbox/events");
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("text/event-stream");
@@ -68,13 +75,16 @@ describe("SSE stream", () => {
     await seedScope(db, "tenantA", "alice");
     await seedScope(db, "tenantB", "alice");
     const bus = createInMemoryMailboxEventBus();
-    const app = mountMailbox(new Hono(), {
-      db,
-      bus,
-      resolvePrincipal: () => ({ tenantId: "tenantA", principalId: "alice" }),
-      senderAddressFor: () => "sender@tenantA.example",
-      deliver: () => {},
-    });
+    const app = mountAs(
+      { tenantId: "tenantA", principalId: "alice" },
+      createMailboxRoutes({
+        db,
+        requireGrant: allowAllGrants,
+        bus,
+        senderAddressFor: () => "sender@tenantA.example",
+        deliver: () => {},
+      }),
+    );
     const res = await app.request("/me/inbox/events");
     expect(res.status).toBe(200);
     const reader = res.body!.getReader();
@@ -131,15 +141,18 @@ describe("SSE stream", () => {
     await seedScope(db, "t1", "p1");
     const bus = createInMemoryMailboxEventBus();
     const scope = { tenantId: "t1", principalId: "p1" };
-    const app = mountMailbox(new Hono(), {
-      db,
-      bus,
-      resolvePrincipal: () => scope,
-      senderAddressFor: () => "sender@t1.example",
-      deliver: () => {},
-      // Short heartbeat so the handler notices the overflow-close promptly.
-      heartbeatIntervalMs: 50,
-    });
+    const app = mountAs(
+      scope,
+      createMailboxRoutes({
+        db,
+        requireGrant: allowAllGrants,
+        bus,
+        senderAddressFor: () => "sender@t1.example",
+        deliver: () => {},
+        // Short heartbeat so the handler notices the overflow-close promptly.
+        heartbeatIntervalMs: 50,
+      }),
+    );
     const res = await app.request("/me/inbox/events");
     expect(res.status).toBe(200);
     const reader = res.body!.getReader();
@@ -198,15 +211,18 @@ describe("SSE stream", () => {
         };
       },
     };
-    const app = mountMailbox(new Hono(), {
-      db,
-      bus,
-      resolvePrincipal: () => scope,
-      senderAddressFor: () => "sender@t1.example",
-      deliver: () => {},
-      // Short heartbeat so the loop notices `closed` and runs finally promptly.
-      heartbeatIntervalMs: 50,
-    });
+    const app = mountAs(
+      scope,
+      createMailboxRoutes({
+        db,
+        requireGrant: allowAllGrants,
+        bus,
+        senderAddressFor: () => "sender@t1.example",
+        deliver: () => {},
+        // Short heartbeat so the loop notices `closed` and runs finally promptly.
+        heartbeatIntervalMs: 50,
+      }),
+    );
     const writeSSE = spyOn(
       SSEStreamingApi.prototype,
       "writeSSE",

@@ -62,7 +62,7 @@ jobs:
           npm install "$TARBALL"
           node -e '
             import("@corbits/mailbox").then((m) => {
-              for (const name of ["mountMailbox", "runMailboxMigrations"]) {
+              for (const name of ["createMailboxRoutes", "runMailboxMigrations"]) {
                 if (typeof m[name] !== "function") throw new Error(`missing export: ${name}`);
               }
               console.log("node consumer ok");
