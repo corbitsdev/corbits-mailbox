@@ -11,4 +11,3 @@ import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
 // would reject a host handle bound to its own (e.g. `createDB`'s). Nothing
 // here reads `db.query`.
 export type MailboxDb = PostgresJsDatabase<any>;
-

@@ -23,8 +23,12 @@ describe("runMailboxMigrations", () => {
     await fromEmpty(async ({ client }) => {
       await admin.unsafe(`DROP SCHEMA IF EXISTS "host_cp" CASCADE`);
       await admin.unsafe(`CREATE SCHEMA "host_cp"`);
-      await admin.unsafe(`CREATE TABLE "host_cp"."tenant" ("id" text PRIMARY KEY)`);
-      await admin.unsafe(`CREATE TABLE "host_cp"."principal" ("id" text PRIMARY KEY)`);
+      await admin.unsafe(
+        `CREATE TABLE "host_cp"."tenant" ("id" text PRIMARY KEY)`,
+      );
+      await admin.unsafe(
+        `CREATE TABLE "host_cp"."principal" ("id" text PRIMARY KEY)`,
+      );
       try {
         await runMailboxMigrations(dbConfigFromUrl(TEST_DATABASE_URL), {
           schema: "host_cp",
@@ -125,7 +129,10 @@ describe("runMailboxMigrations", () => {
   test("0005 leaves uid and modseq NOT NULL: every write path is the native store now", async () => {
     await fromEmpty(async ({ db }) => {
       await applyMailboxMigrations(db, "public");
-      const rows = await db.execute<{ column_name: string; is_nullable: string }>(
+      const rows = await db.execute<{
+        column_name: string;
+        is_nullable: string;
+      }>(
         sql`SELECT column_name, is_nullable FROM information_schema.columns
             WHERE table_schema = 'mailbox' AND table_name = 'principal_mail'
               AND column_name IN ('uid', 'modseq')
@@ -274,7 +281,9 @@ describe("schema.ts vs. the DDL applyMailboxMigrations actually creates", () => 
       .split(", ")
       .map((column) => {
         const desc = column.endsWith(" DESC");
-        const bare = column.replace(/ (DESC|ASC)$/, "").replace(/ NULLS.*$/, "");
+        const bare = column
+          .replace(/ (DESC|ASC)$/, "")
+          .replace(/ NULLS.*$/, "");
         return `${bare} ${desc ? "desc" : "asc"}`;
       })
       .join(", ");

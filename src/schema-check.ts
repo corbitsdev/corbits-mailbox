@@ -51,7 +51,7 @@ export class SchemaTypeMismatchError extends Error {
         "\nThe migrations use CREATE TABLE IF NOT EXISTS, which matches on " +
         "the table NAME only: a pre-existing table of the same name is left " +
         "untouched. Rename or move the conflicting table out of the " +
-        "\"mailbox\" schema.",
+        '"mailbox" schema.',
     );
     this.name = "SchemaTypeMismatchError";
   }

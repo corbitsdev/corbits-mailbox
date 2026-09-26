@@ -175,7 +175,9 @@ export function createMailboxPersist<R>(
         ),
       );
     const byId = new Map(rows.map((row) => [row.id, row.id]));
-    const byRefId = new Map(rows.map((row) => [row.refId.toLowerCase(), row.id]));
+    const byRefId = new Map(
+      rows.map((row) => [row.refId.toLowerCase(), row.id]),
+    );
     const resolved: ResolvedRecipient[] = [];
     const unknown: ResolvedRecipient[] = [];
     for (const recipient of addressed) {

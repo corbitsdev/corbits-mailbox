@@ -1,5 +1,9 @@
 import { sql } from "drizzle-orm";
-import type { MailboxStore, StoredEnvelope, StoredMessage } from "@intx/mailbox";
+import type {
+  MailboxStore,
+  StoredEnvelope,
+  StoredMessage,
+} from "@intx/mailbox";
 import type { MailboxDb } from "./db.js";
 
 // drizzle's `sql` tag spreads a bare array interpolation as a comma-separated
@@ -156,7 +160,8 @@ export async function openNativeMailboxStore(
     WHERE "tenant_id" = ${tenantId} AND "principal_id" = ${principalId} AND "folder" = ${folder}
     ORDER BY "uid" ASC
   `);
-  const messages: (StoredMessage & { rowId: string })[] = rows.map(toStoredMessage);
+  const messages: (StoredMessage & { rowId: string })[] =
+    rows.map(toStoredMessage);
   const byUid = new Map(messages.map((m) => [m.uid, m]));
 
   // Every queued write chains onto the last, so two writes to the same
@@ -216,7 +221,8 @@ export async function openNativeMailboxStore(
       byUid.set(uid, message);
 
       enqueue(() =>
-        db.execute(sql`
+        db
+          .execute(sql`
           INSERT INTO "mailbox"."principal_mail"
             ("id", "tenant_id", "principal_id", "address", "direction", "raw",
              "subject", "from_address", "message_id", "in_reply_to", "references",
@@ -229,13 +235,14 @@ export async function openNativeMailboxStore(
             ${envelope.to.length > 0 ? JSON.stringify(envelope.to) : null},
             ${envelope.date.toISOString()}, ${folder}, ${uid}, ${modseq}, ${pgTextArrayLiteral(flags)}::text[]
           )
-        `).then(() =>
-          db.execute(sql`
+        `)
+          .then(() =>
+            db.execute(sql`
             UPDATE "mailbox"."mailbox_state"
             SET "uid_next" = ${state.uidNext}, "highest_modseq" = ${state.highestModSeq}
             WHERE "tenant_id" = ${tenantId} AND "principal_id" = ${principalId} AND "folder" = ${folder}
           `),
-        ),
+          ),
       );
       return uid;
     },
@@ -265,16 +272,18 @@ export async function openNativeMailboxStore(
       msg.modseq = modseq;
       const nextFlags = [...msg.flags];
       enqueue(() =>
-        db.execute(sql`
+        db
+          .execute(sql`
           UPDATE "mailbox"."principal_mail"
           SET "flags" = ${pgTextArrayLiteral(nextFlags)}::text[], "modseq" = ${modseq}
           WHERE "id" = ${msg.rowId}
-        `).then(() =>
-          db.execute(sql`
+        `)
+          .then(() =>
+            db.execute(sql`
             UPDATE "mailbox"."mailbox_state" SET "highest_modseq" = ${modseq}
             WHERE "tenant_id" = ${tenantId} AND "principal_id" = ${principalId} AND "folder" = ${folder}
           `),
-        ),
+          ),
       );
       return msg;
     },
@@ -287,16 +296,18 @@ export async function openNativeMailboxStore(
       msg.modseq = modseq;
       const nextFlags = [...msg.flags];
       enqueue(() =>
-        db.execute(sql`
+        db
+          .execute(sql`
           UPDATE "mailbox"."principal_mail"
           SET "flags" = ${pgTextArrayLiteral(nextFlags)}::text[], "modseq" = ${modseq}
           WHERE "id" = ${msg.rowId}
-        `).then(() =>
-          db.execute(sql`
+        `)
+          .then(() =>
+            db.execute(sql`
             UPDATE "mailbox"."mailbox_state" SET "highest_modseq" = ${modseq}
             WHERE "tenant_id" = ${tenantId} AND "principal_id" = ${principalId} AND "folder" = ${folder}
           `),
-        ),
+          ),
       );
       return msg;
     },

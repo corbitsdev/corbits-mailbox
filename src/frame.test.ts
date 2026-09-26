@@ -114,7 +114,9 @@ describe("buildMailFrame headers", () => {
     expect(() => frame({ messageId: "<<double@example.com>>" })).toThrow(
       RangeError,
     );
-    expect(() => frame({ inReplyTo: "parent@example.com" })).toThrow(RangeError);
+    expect(() => frame({ inReplyTo: "parent@example.com" })).toThrow(
+      RangeError,
+    );
     expect(() =>
       frame({ references: ["<ok@example.com>", "not-an-id"] }),
     ).toThrow(RangeError);
@@ -125,13 +127,9 @@ describe("buildMailFrame headers", () => {
     // `"john doe"@example.com` is a legal (if obsolete-syntax) local part;
     // widened rather than documented as a limitation because a quoted local
     // part is real, if rare, on host-supplied threading headers.
-    const h = headers(
-      frame({ messageId: '<"john doe"@example.com>' }),
-    );
+    const h = headers(frame({ messageId: '<"john doe"@example.com>' }));
     expect(h.get("message-id")).toBe('<"john doe"@example.com>');
-    expect(
-      () => frame({ inReplyTo: '<"a b"@example.com>' }),
-    ).not.toThrow();
+    expect(() => frame({ inReplyTo: '<"a b"@example.com>' })).not.toThrow();
     // A quoted part still cannot contain a bare `<` or `>`, and an unescaped
     // trailing quote must close the string before the `@`.
     expect(() => frame({ messageId: '<"open@example.com>' })).toThrow(
