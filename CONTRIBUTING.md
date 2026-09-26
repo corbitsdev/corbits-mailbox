@@ -52,7 +52,7 @@ statements, so editing one that has already been applied fails loudly on the nex
 rather than letting fresh and existing databases diverge. Add a new migration instead.
 
 `schema.ts` and `migrations.ts` must agree statement for statement — the runtime
-queries read through the drizzle table object, and `src/schema-ddl-parity.test.ts`
+queries read through the drizzle table object, and `src/migrations.test.ts`
 diffs the two against a live database. Change one, change the other, in the same commit.
 
 ## Agent-originated mail

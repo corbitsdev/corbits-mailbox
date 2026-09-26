@@ -10,6 +10,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { sql } from "drizzle-orm";
+import { getTableConfig } from "drizzle-orm/pg-core";
 import {
   MIGRATIONS,
   MigrationChecksumError,
@@ -17,6 +18,11 @@ import {
   runMailboxMigrations,
 } from "./migrations.js";
 import { buildMailFrame } from "./frame.js";
+import { principalMail } from "./schema.js";
+import {
+  expectedColumnTypes,
+  SchemaTypeMismatchError,
+} from "./schema-check.js";
 import {
   createHostControlPlane,
   createMailboxDb,
@@ -149,7 +155,7 @@ describe("runMailboxMigrations", () => {
       // the keyset the default page seeks on, and the three the thread read
       // adds — the msg-id lookup, the GIN index serving the `refs` containment
       // filter, and the thread's own oldest-first keyset.
-      // `schema-ddl-parity.test.ts` holds schema.ts to this same list.
+      // The schema.ts parity suite below holds schema.ts to this same list.
       expect(mailIndexes.map((i) => i.indexname)).toEqual([
         "principal_mail_pkey",
         "principal_mail_refs_idx",
@@ -681,5 +687,197 @@ describe("applyMailboxMigrations under concurrent cold start", () => {
     );
     await Promise.all(runners.map((r) => r.client.end()));
     expect(results.every((r) => r.status === "fulfilled")).toBe(true);
+  });
+});
+
+// The drizzle table object is a public export, so a host can point
+// `drizzle-kit push`/`generate` at it. If it declares an index the migrations
+// do not create, or with a different column order, that host's schema silently
+// diverges from the one this package's queries were planned against.
+describe("schema.ts vs. the DDL applyMailboxMigrations actually creates", () => {
+  /** `name USING method(col asc, col desc)` plus `unique`/`partial` markers. */
+  type IndexDescriptor = string;
+
+  function declaredIndexes(): IndexDescriptor[] {
+    return getTableConfig(principalMail)
+      .indexes.map((index) => {
+        const config = index.config;
+        const columns = config.columns
+          .map((column) => {
+            // An expression index has no `.name`; fail rather than compare it
+            // as blank.
+            const name = (column as { name?: string }).name;
+            if (name === undefined) {
+              throw new Error(
+                `index ${config.name} uses an expression column this parity check cannot canonicalize`,
+              );
+            }
+            const order =
+              (column as { indexConfig?: { order?: string } }).indexConfig
+                ?.order ?? "asc";
+            return `${name} ${order}`;
+          })
+          .join(", ");
+        const flags = [
+          config.unique === true ? "unique" : null,
+          config.where !== undefined ? "partial" : null,
+        ].filter((flag) => flag !== null);
+        const suffix = flags.length > 0 ? ` [${flags.join(" ")}]` : "";
+        // The access method matters: `refs @> …` is only servable by GIN.
+        const method = (config as { method?: string }).method ?? "btree";
+        return `${config.name} USING ${method}(${columns})${suffix}`;
+      })
+      .sort();
+  }
+
+  // `pg_get_indexdef` renders `CREATE [UNIQUE] INDEX <name> ON <tbl> USING
+  // <method> (<cols>)[ WHERE (<pred>)]`, with DESC spelled out and ASC implicit.
+  function canonicalizeIndexDef(def: string): IndexDescriptor {
+    const match =
+      /^CREATE (UNIQUE )?INDEX (\S+) ON \S+ USING (\S+) \((.*?)\)( WHERE .*)?$/.exec(
+        def,
+      );
+    if (match === null) throw new Error(`unparsed index definition: ${def}`);
+    const [, unique, name, method, columnList, where] = match;
+    const columns = columnList!
+      .split(", ")
+      .map((column) => {
+        const desc = / DESC$/.test(column);
+        const bare = column.replace(/ (DESC|ASC)$/, "").replace(/ NULLS.*$/, "");
+        return `${bare} ${desc ? "desc" : "asc"}`;
+      })
+      .join(", ");
+    const flags = [
+      unique !== undefined ? "unique" : null,
+      where !== undefined ? "partial" : null,
+    ].filter((flag) => flag !== null);
+    const suffix = flags.length > 0 ? ` [${flags.join(" ")}]` : "";
+    return `${name} USING ${method}(${columns})${suffix}`;
+  }
+
+  test("principal_mail: declares exactly the indexes the live table has, in the same column order", async () => {
+    await fromEmpty(async ({ db }) => {
+      await applyMailboxMigrations(db, "public");
+      const rows = await db.execute<{ indexdef: string }>(sql`
+        SELECT indexdef FROM pg_indexes
+         WHERE schemaname = 'mailbox'
+           AND tablename = 'principal_mail'
+           AND indexname <> 'principal_mail_pkey'
+      `);
+      const live = rows.map((row) => canonicalizeIndexDef(row.indexdef)).sort();
+      expect(declaredIndexes()).toEqual(live);
+    });
+  });
+});
+
+describe("expectedColumnTypes", () => {
+  test("is derived from the drizzle tables: the mail plane alone, since 0005 dropped the management table", () => {
+    const tables = new Set(expectedColumnTypes().map((e) => e.table));
+    expect(tables).toEqual(new Set(["principal_mail"]));
+  });
+
+  test("expects zoneless timestamps and text ids on every relevant column", () => {
+    const byKey = new Map(
+      expectedColumnTypes().map((e) => [`${e.table}.${e.column}`, e.dataType]),
+    );
+    expect(byKey.get("principal_mail.created_at")).toBe(
+      "timestamp without time zone",
+    );
+    expect(byKey.get("principal_mail.id")).toBe("text");
+    expect(byKey.get("principal_mail.raw")).toBe("bytea");
+    expect(byKey.get("principal_mail.refs")).toBe("jsonb");
+  });
+});
+
+// `CREATE TABLE IF NOT EXISTS` matches on the table NAME only. A host that
+// already owns a `principal_mail` would get a silent no-op, a ledger row, and
+// every read decoding ITS columns through OUR codec. Each case plants such a
+// table and asserts the boot is rejected without leaving a ledger row that
+// would make the next boot skip the check.
+describe("boot against a host table this package did not create", () => {
+  /** The ledger row count, or 0 when the ledger table itself does not exist. */
+  async function ledgerRows(): Promise<number> {
+    const [ledger] = await admin<{ exists: boolean }[]>`
+      SELECT to_regclass('"mailbox"."corbits_mailbox_migrations"') IS NOT NULL AS exists`;
+    if (!ledger!.exists) return 0;
+    const [row] = await admin<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM "mailbox"."corbits_mailbox_migrations"`;
+    return row!.n;
+  }
+
+  /** Throws if the boot SUCCEEDS, rather than yielding an `undefined`. */
+  async function bootFailure(promise: Promise<void>): Promise<Error> {
+    try {
+      await promise;
+    } catch (error) {
+      return error as Error;
+    }
+    throw new Error("expected the boot to be rejected, but it succeeded");
+  }
+
+  /** Plants a host `principal_mail` with the given column DDL. */
+  async function plantPrincipalMail(columns: string): Promise<void> {
+    await admin.unsafe(`CREATE SCHEMA "mailbox"`);
+    await admin.unsafe(`CREATE TABLE "mailbox"."principal_mail" (${columns})`);
+  }
+
+  const BASE_COLUMNS = `
+    "id" text PRIMARY KEY,
+    "tenant_id" text NOT NULL,
+    "principal_id" text NOT NULL,
+    "address" text NOT NULL,
+    "direction" text NOT NULL,
+    "raw" bytea NOT NULL,
+    "from_address" text,
+    "message_key" text,
+    "refs" jsonb`;
+
+  test("rejects a pre-existing table whose column TYPE diverges", async () => {
+    await fromEmpty(async ({ db }) => {
+      // `created_at` still a `timestamptz`: invisible to every query until a
+      // non-UTC host serves the wrong page.
+      await plantPrincipalMail(`${BASE_COLUMNS},
+        "subject" text,
+        "created_at" timestamptz NOT NULL DEFAULT now()`);
+      const failure = await bootFailure(applyMailboxMigrations(db, "public"));
+      expect(failure).toBeInstanceOf(SchemaTypeMismatchError);
+      expect((failure as SchemaTypeMismatchError).mismatches).toEqual([
+        "principal_mail.created_at is timestamp with time zone, " +
+          "expected timestamp without time zone",
+      ]);
+      // Rejected inside the migration's transaction, so the ledger row rolled
+      // back; otherwise the next boot would skip the check.
+      expect(await ledgerRows()).toBe(0);
+    });
+  });
+
+  test("rejects a pre-existing table with a column MISSING outright", async () => {
+    await fromEmpty(async ({ db }) => {
+      // No `subject`, a column no index covers. `refs` stays present: it is
+      // GIN-indexed, so its absence would be rejected by the DDL, not this check.
+      await plantPrincipalMail(`${BASE_COLUMNS},
+        "created_at" timestamp NOT NULL DEFAULT now()`);
+      const failure = await bootFailure(applyMailboxMigrations(db, "public"));
+      expect(failure).toBeInstanceOf(SchemaTypeMismatchError);
+      expect((failure as SchemaTypeMismatchError).mismatches).toEqual([
+        "principal_mail.subject is missing (expected text)",
+      ]);
+      expect(await ledgerRows()).toBe(0);
+    });
+  });
+
+  test("a rejected boot leaves the NEXT boot still rejecting", async () => {
+    await fromEmpty(async ({ db }) => {
+      await plantPrincipalMail(`${BASE_COLUMNS},
+        "created_at" timestamptz NOT NULL DEFAULT now()`);
+      await expect(applyMailboxMigrations(db, "public")).rejects.toThrow(
+        SchemaTypeMismatchError,
+      );
+      // A guard that only fires on the first boot is one a restart disables.
+      await expect(applyMailboxMigrations(db, "public")).rejects.toThrow(
+        SchemaTypeMismatchError,
+      );
+      expect(await ledgerRows()).toBe(0);
+    });
   });
 });
