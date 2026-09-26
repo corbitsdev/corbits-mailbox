@@ -1,7 +1,5 @@
 # @corbits/mailbox
 
-[![npm](https://img.shields.io/npm/v/@corbits/mailbox.svg)](https://www.npmjs.com/package/@corbits/mailbox) [![License: LGPL-2.1](https://img.shields.io/badge/license-LGPL--2.1-green.svg)](https://github.com/corbitsdev/corbits-mailbox/blob/main/LICENSE)
-
 A Corbits hub module that gives human principals in an Interchange hub an IMAP-style mailbox, mounted as Hono routes on `@intx/hub-api` and stored in the hub's Postgres. The hub is Interchange's multi-tenant control plane; a principal is an account with its own identity and permissions, and a grant is a permission a principal holds on a resource. The routes list, thread, flag, move and send mail, each checked against the caller's grants, with live updates over SSE.
 
 ## Why @corbits/mailbox?
