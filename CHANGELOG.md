@@ -148,6 +148,8 @@ always called out under their own heading.
 
 ### Changed
 
+- `build` runs `tsc` directly; the `prepare` git-install hook and its
+  `scripts/` helpers are removed. Install from npm.
 - **Caller-supplied Message-ID, direction, and message key on writes.**
   `WriteMailboxMessageArgs` gains `messageId?: string` — when supplied it
   must be a bracketed msg-id (validated with `assertMsgId`) and becomes
