@@ -45,7 +45,9 @@ describe("legacy-row backfills", () => {
         "From: bot@acme.example\r\nSubject: no ids\r\n\r\nBody\r\n",
       );
       const invalidUtf8 = Uint8Array.from([
-        ...new TextEncoder().encode("From: bot@acme.example\r\nMessage-ID: <bytes@acme.example>\r\n\r\n"),
+        ...new TextEncoder().encode(
+          "From: bot@acme.example\r\nMessage-ID: <bytes@acme.example>\r\n\r\n",
+        ),
         0xff,
         0xfe,
       ]);
@@ -53,7 +55,9 @@ describe("legacy-row backfills", () => {
         ["legacy-threaded", threaded],
         ["legacy-headerless", headerless],
         ["legacy-invalid-utf8", invalidUtf8],
-      ].entries() as IterableIterator<[number, readonly [string, Uint8Array]]>) {
+      ].entries() as IterableIterator<
+        [number, readonly [string, Uint8Array]]
+      >) {
         // uid/modseq are NOT NULL as of 0005 — supplied explicitly since these
         // rows simulate pre-native legacy inserts that predate the native
         // store's own uid assignment.
@@ -113,7 +117,9 @@ describe("legacy-row backfills", () => {
       for (const [i, [key, raw]] of [
         ["nul-ok", ok],
         ["nul-body", nulBody],
-      ].entries() as IterableIterator<[number, readonly [string, Uint8Array]]>) {
+      ].entries() as IterableIterator<
+        [number, readonly [string, Uint8Array]]
+      >) {
         await db.execute(sql`
           INSERT INTO "mailbox"."principal_mail"
             ("tenant_id","principal_id","address","direction","raw","message_key","uid","modseq")
@@ -177,7 +183,9 @@ describe("legacy-row backfills", () => {
         ["refs-folded", folded],
         ["refs-none", none],
         ["refs-decoy", decoy],
-      ].entries() as IterableIterator<[number, readonly [string, Uint8Array]]>) {
+      ].entries() as IterableIterator<
+        [number, readonly [string, Uint8Array]]
+      >) {
         await db.execute(sql`
           INSERT INTO "mailbox"."principal_mail"
             ("tenant_id","principal_id","address","direction","raw","message_key","uid","modseq")
@@ -195,11 +203,14 @@ describe("legacy-row backfills", () => {
              FROM "mailbox"."principal_mail" ORDER BY "message_key"`);
       expect(rows.map((r) => [r.message_key, r.references])).toEqual([
         ["refs-decoy", null],
-        ["refs-folded", [
-          "<root@acme.example>",
-          "<middle@acme.example>",
-          "<parent@acme.example>",
-        ]],
+        [
+          "refs-folded",
+          [
+            "<root@acme.example>",
+            "<middle@acme.example>",
+            "<parent@acme.example>",
+          ],
+        ],
         ["refs-none", null],
       ]);
     });

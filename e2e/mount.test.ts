@@ -13,9 +13,7 @@ beforeEach(async () => {
   await seedScope(db, "t1", "p1");
 });
 
-function buildApp(
-  scope: ResolvedPrincipal | null,
-) {
+function buildApp(scope: ResolvedPrincipal | null) {
   const app = mountAs(
     scope,
     createMailboxRoutes({
@@ -92,7 +90,12 @@ describe("grant gating", () => {
     });
   }
 
-  for (const path of ["/me/inbox", "/me/inbox/threads", "/me/inbox/threads/1", "/me/inbox/events"]) {
+  for (const path of [
+    "/me/inbox",
+    "/me/inbox/threads",
+    "/me/inbox/threads/1",
+    "/me/inbox/events",
+  ]) {
     test(`${path} requires mailbox:* read`, async () => {
       const checked: string[] = [];
       const res = await buildGatedApp(checked).request(path);

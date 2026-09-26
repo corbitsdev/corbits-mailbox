@@ -20,7 +20,10 @@ afterAll(async () => {
 });
 
 /** Every mailbox row, column and index outside the ledger, as one comparable value. */
-type Snapshot = { mail: { folder: string; flags: string[] }[]; state: unknown[] };
+type Snapshot = {
+  mail: { folder: string; flags: string[] }[];
+  state: unknown[];
+};
 
 async function snapshot(db: MailboxDb): Promise<Snapshot> {
   const [row] = await db.execute<{ snapshot: Snapshot }>(sql`
@@ -80,7 +83,13 @@ test("a database migrated by the published 0.1.0 runner upgrades with every row 
       references: ["<root@t1.example>"],
     }),
   });
-  await moveNativeMailboxMessage(db, { tenantId: "t1", principalId: "bob" }, "INBOX", 1, "Archive");
+  await moveNativeMailboxMessage(
+    db,
+    { tenantId: "t1", principalId: "bob" },
+    "INBOX",
+    1,
+    "Archive",
+  );
   await db.execute(
     sql`UPDATE "mailbox"."principal_mail" SET "flags" = ARRAY['\\Seen'] WHERE "folder" = 'INBOX'`,
   );

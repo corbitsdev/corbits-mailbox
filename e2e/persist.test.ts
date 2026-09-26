@@ -531,7 +531,9 @@ describe("frame size and recipient hard caps", () => {
     const atCap = new Uint8Array(MAX_MAILBOX_FRAME_BYTES);
     atCap.fill(0x41);
     expect(
-      await persist(args({ raw: atCap, recipients: ["usr_user-1@acme.example"] })),
+      await persist(
+        args({ raw: atCap, recipients: ["usr_user-1@acme.example"] }),
+      ),
     ).toBe(result);
     expect(await rowsFor("acme", "user-1")).toHaveLength(1);
 
@@ -554,8 +556,9 @@ describe("frame size and recipient hard caps", () => {
 
   test("recipient list at the cap resolves; one over refuses mailbox insert", async () => {
     // Seed enough principals so the at-cap list can resolve after filter.
-    const extraIds = Array.from({ length: MAX_MAILBOX_RECIPIENTS - 2 }, (_, i) =>
-      `extra-${i}`,
+    const extraIds = Array.from(
+      { length: MAX_MAILBOX_RECIPIENTS - 2 },
+      (_, i) => `extra-${i}`,
     );
     await seedScope(db, "acme", ...extraIds);
 

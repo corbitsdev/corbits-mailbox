@@ -1,8 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import {
-  parseAddressList,
-  resolveMailboxRecipients,
-} from "./recipients.js";
+import { parseAddressList, resolveMailboxRecipients } from "./recipients.js";
 
 describe("parseAddressList", () => {
   test("splits a multi-recipient header", () => {
@@ -62,9 +59,9 @@ describe("resolveMailboxRecipients", () => {
   });
 
   test("excludes run_ instance addresses", () => {
-    expect(
-      resolveMailboxRecipients(["run_42@acme.example"], DOMAIN),
-    ).toEqual([]);
+    expect(resolveMailboxRecipients(["run_42@acme.example"], DOMAIN)).toEqual(
+      [],
+    );
   });
 
   test("skips a cross-tenantId domain mismatch", () => {

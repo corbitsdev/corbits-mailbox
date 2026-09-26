@@ -153,7 +153,8 @@ function encodeMailboxFrame(args: WriteMailboxMessageArgs): {
   messageId: string;
 } {
   if (args.messageId !== undefined) assertMsgId(args.messageId, "messageId");
-  const messageId = args.messageId ?? generateMailboxMessageId(args.fromAddress);
+  const messageId =
+    args.messageId ?? generateMailboxMessageId(args.fromAddress);
   const frameArgs: Parameters<typeof buildMailFrame>[0] = {
     from: args.fromAddress,
     to: args.address,

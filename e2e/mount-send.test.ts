@@ -2,15 +2,13 @@
 // caller's Sent folder, and hands it to the host's `deliver` — this package
 // owns no transport of its own.
 import { beforeEach, describe, expect, test } from "bun:test";
-import { createMailboxRoutes, type OutgoingMailboxMessage } from "../src/mount.js";
+import {
+  createMailboxRoutes,
+  type OutgoingMailboxMessage,
+} from "../src/mount.js";
 import { createInMemoryMailboxEventBus } from "../src/bus.js";
 import { openNativeMailboxStore } from "../src/native-store.js";
-import {
-  allowAllGrants,
-  mountAs,
-  withTestDb,
-  seedScope,
-} from "./helpers.js";
+import { allowAllGrants, mountAs, withTestDb, seedScope } from "./helpers.js";
 import type { MailboxDb } from "../src/db.js";
 
 let db: MailboxDb;

@@ -32,7 +32,8 @@ beforeAll(async () => {
     db,
     bus: createInMemoryMailboxEventBus(),
     senderAddressFor: ({ principalId }) => `${principalId}@${TENANT.domain}`,
-    deliver: ({ from, to, raw }) => persist({ senderAddress: from, recipients: to, raw }),
+    deliver: ({ from, to, raw }) =>
+      persist({ senderAddress: from, recipients: to, raw }),
   });
 });
 
@@ -52,7 +53,11 @@ test("a message sent over HTTP is listed and readable in the recipient's inbox",
   const sent = await app.request("/mailbox/me/inbox/send", {
     method: "POST",
     headers: jsonAs(TENANT.id, "alice"),
-    body: JSON.stringify({ to: ["bob@t1.example"], subject: "Lunch", body: "Noon?" }),
+    body: JSON.stringify({
+      to: ["bob@t1.example"],
+      subject: "Lunch",
+      body: "Noon?",
+    }),
   });
   expect(sent.status).toBe(200);
 
@@ -67,9 +72,12 @@ test("a message sent over HTTP is listed and readable in the recipient's inbox",
   expect(message!.envelope.subject).toBe("Lunch");
   expect(Buffer.from(message!.raw, "base64").toString()).toContain("Noon?");
 
-  const thread = await app.request(`/mailbox/me/inbox/threads/${message!.uid}`, {
-    headers: as(TENANT.id, "bob"),
-  });
+  const thread = await app.request(
+    `/mailbox/me/inbox/threads/${message!.uid}`,
+    {
+      headers: as(TENANT.id, "bob"),
+    },
+  );
   expect(thread.status).toBe(200);
   const { thread: root } = (await thread.json()) as {
     thread: { uid: number; envelope: { subject: string }; children: unknown[] };
