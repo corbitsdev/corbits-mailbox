@@ -2,7 +2,7 @@
 // deciding which of those addresses are principal mailboxes this tenant owns.
 
 import { extractAddrSpec } from "@intx/mime";
-import { isRunAddress } from "./intx-types-compat.js";
+import { isRunAddress } from "@intx/types";
 
 /**
  * Split an address-list header (`To:`, `Cc:`) into its individual addresses.

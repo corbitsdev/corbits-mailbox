@@ -4,12 +4,12 @@ Give a **person** in an Interchange hub an inbox: list, read, flag, send, and li
 
 ## Runtime support
 
-Node >= 24 consumes built `dist/`. Bun >= 1.2 runs TypeScript source. Peers: `@intx/db`, `@intx/hub-api`, `@intx/log`, `@intx/mailbox`, `@intx/mime`, `@intx/types`, `drizzle-orm`, `hono`, `postgres`.
+Node >= 24 consumes built `dist/`. Bun >= 1.2 runs TypeScript source. Peers: `@intx/db`, `@intx/hub-api`, `@intx/log`, `@intx/mailbox`, `@intx/mime`, `@intx/types`, `drizzle-orm`, `hono`, `hono-openapi` (with its own peers), `postgres`.
 
 ## Quickstart
 
 ```bash
-npm add @corbits/mailbox @intx/db @intx/hub-api @intx/log @intx/mailbox @intx/mime @intx/types drizzle-orm hono postgres
+npm add @corbits/mailbox @intx/db @intx/hub-api @intx/log @intx/mailbox @intx/mime @intx/types drizzle-orm hono hono-openapi @standard-community/standard-json @standard-community/standard-openapi postgres
 ```
 
 ```ts
