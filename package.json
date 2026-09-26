@@ -39,6 +39,7 @@
   },
   "files": [
     "dist",
+    "migrations",
     "README.md",
     "LICENSE"
   ],
@@ -65,6 +66,7 @@
     "postgres": "^3.4.0"
   },
   "devDependencies": {
+    "@corbits/mailbox-0.1.0": "npm:@corbits/mailbox@0.1.0",
     "@hono/standard-validator": "0.2.3",
     "@intx/db": "0.4.0",
     "@intx/hub-api": "0.4.0",

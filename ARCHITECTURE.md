@@ -113,14 +113,14 @@ no mailbox row for that frame.
 | `recipients.ts` | Address-list parsing and domain-scoped recipient resolution. |
 | `sender-display.ts` | The pure half of display names, plus the resolver seam. |
 | `vocabulary.ts` | The host's triage vocabulary: validation, the generated rank, the ordering fingerprint. |
-| `schema.ts` / `migrations.ts` | The two tables, and the DDL that creates them. |
+| `schema.ts` / `migrations.ts` | The tables, and the runner that replays `migrations/*.sql`. |
 | `bus.ts` / `db.ts` / `refs.ts` | The event-bus port, the db handle type, the ref schema. |
 
 ## Data model
 
-Two physical tables, plus this package's own migration ledger — all living in a
+Two physical tables, both living in a
 dedicated `mailbox` Postgres schema in the HOST's database
-(`"mailbox"."principal_mail"`, `"mailbox"."mailbox"`), never in `public` and
+(`"mailbox"."principal_mail"`, `"mailbox"."mailbox_state"`), never in `public` and
 never in a database of their own. Every row in either belongs to exactly one
 `(tenant_id, principal_id)` mailbox.
 
@@ -425,58 +425,47 @@ that matches its predicate exactly. What remains, honestly: **`sort=priority`
 pays a join** over the management layer on top of a rank that was never
 index-servable, ~3.8x its pre-split cost.
 
-`schema.ts` and `migrations.ts` must agree statement for statement: the
+`schema.ts` and `migrations/*.sql` must agree statement for statement: the
 runtime queries read through the drizzle table object, so a drift between the
 two would query columns or rely on indexes the migrations never created.
 `src/migrations.test.ts` diffs the two against a live database.
 
 ## Migrations
 
-`runMailboxMigrations(config, { schema })` is idempotent and safe to call
-unconditionally on every boot of every replica. It opens one connection from
-`config` and closes it when done. `schema` names the host schema holding
-`tenant` and `principal`; the FKs are pointed there at execution time, while
-ledger checksums hash the statements as shipped, so the same migration has the
-same checksum whatever the host schema. The FKs are fixed by the run that
-first applies each migration; passing a different `schema` later does not move
-them.
+`runMailboxMigrations(config, { schema })` replays every `migrations/*.sql`
+file in filename order on each run, the same way Interchange `runMigrations`
+does, and is safe to call unconditionally on every boot of every replica. It
+opens one connection from `config` and closes it when done. `schema` names the
+host schema holding `tenant` and `principal`; the `"public".` FK references in
+the files are rewritten to it. The FKs are fixed by the run that first creates
+each table; passing a different `schema` later does not move them.
 
+- **Every file is idempotent, so there is no ledger.** DDL is `IF NOT EXISTS`,
+  and every backfill runs inside a `DO` block only in the replay that adds its
+  column or table, so a replay never rewrites a row. Edit a file only in ways a
+  database already carrying the old version converges from.
 - The whole run is one transaction whose first statements are
   `SET LOCAL client_min_messages = warning` and a **transaction-scoped**
-  advisory lock. A transaction pins one pooled connection, so the lock, the
-  ledger read and the DDL are the same session, and the lock releases on commit
-  or rollback with no unlock call to lose. `CREATE TABLE IF NOT EXISTS` is not
-  itself race-safe, so the lock — not the `IF NOT EXISTS` — is what makes
-  concurrent cold starts safe.
-- Lowering `client_min_messages` is why a re-run prints nothing: every
-  statement is `IF NOT EXISTS`, and postgres.js would otherwise dump each
-  NOTICE object to the console on every replica start.
-- The ledger is this package's own table,
-  `"mailbox"."corbits_mailbox_migrations"`, never shared with the host's
-  migration bookkeeping. Each row records a **checksum of the migration's
-  rendered statements**, `NOT NULL`, so editing a shipped migration fails with
-  a named `MigrationChecksumError` on the next boot instead of leaving deployed
-  databases silently behind fresh ones. Ship a new migration instead. The
-  checksum normalization is character-for-character the sibling cores'.
-- Each migration applies inside a **savepoint** together with its ledger row,
-  so it can never be recorded as applied with only some statements run.
+  advisory lock. `CREATE TABLE IF NOT EXISTS` is not itself race-safe, so the
+  lock — not the `IF NOT EXISTS` — is what makes concurrent cold starts safe.
+- Lowering `client_min_messages` is why a replay prints nothing: postgres.js
+  would otherwise dump each `IF NOT EXISTS` NOTICE object to the console.
 - **Last, on the same transaction, `assertExpectedColumnTypes` runs**
   (`src/schema-check.ts`). `CREATE TABLE IF NOT EXISTS` compares the table name
-  and nothing else, so against a host that already owns a `mailbox` or
-  `principal_mail` it would silently no-op and every read would decode the
-  host's columns through our codec. The expectation is derived from the drizzle
-  table objects, so it cannot drift; a rejected boot rolls the ledger row back
-  with it.
-- **A migration can also run that same check early**, via
-  `Migration.assertColumnsBeforeStatement`. `0003_mail_references` sets it: a
-  host whose `principal_mail` predates this package leaves `refs` missing (it
-  is only ever declared inline in `0001`'s `CREATE TABLE`, which no-ops against
-  a pre-existing table), and without the early check the first statement to
-  notice would be `0003`'s `CREATE INDEX ... USING gin ("refs")` — a raw
-  Postgres "column \"refs\" does not exist" instead of the named
-  `SchemaTypeMismatchError` diagnostic. The knob only changes when the runner
-  calls the check, never `Migration.statements`, so it cannot change
-  `migrationChecksum`.
+  and nothing else, so against a host that already owns a `principal_mail` it
+  would silently no-op and every read would decode the host's columns through
+  our codec. The expectation is derived from the drizzle table objects, so it
+  cannot drift; a rejected boot rolls back everything the run applied.
+- 0.1.0 kept a checksum ledger, `"mailbox"."corbits_mailbox_migrations"`.
+  `0007_drop_migrations_ledger.sql` drops it; a 0.1.0 database upgrades on its
+  next boot with no manual step and no row changed
+  (`tests/upgrade-from-0.1.0.test.ts`).
+- A database from before 0.1.0 (run from source) upgrades too: the guarded
+  backfills in 0002–0004 fill the columns they add from the rows already
+  there, 0004 takes each message's folder and `\Seen` from the pre-native
+  `"mailbox"."mailbox"` table, and 0005 then drops that table.
+- The runner rewrites every `"public".` followed by a quoted identifier, so a
+  migration file may use `"public".` only to qualify a host-table FK.
 
 **Everything lands in the `mailbox` schema, fully qualified.** Nothing resolves
 through `search_path`, so the host's own setting cannot redirect or shadow
