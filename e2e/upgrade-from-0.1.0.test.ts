@@ -7,8 +7,7 @@ import {
   runMailboxMigrations as runPublishedMigrations,
 } from "@corbits/mailbox-0.1.0";
 import { runMailboxMigrations, type MailboxDb } from "../src/index.js";
-import { seedScope } from "../src/test-helpers.js";
-import { createEmptyTestDb, type EmptyTestDb } from "./lib/db-harness.js";
+import { seedScope, createEmptyTestDb, type EmptyTestDb } from "./helpers.js";
 
 let testDb: EmptyTestDb | undefined;
 

@@ -1,11 +1,11 @@
 // The thin route layer over the native store: list (search + keyset),
 // read/unread flags, and archive/trash/restore moves.
 import { beforeEach, describe, expect, test } from "bun:test";
-import { createMailboxRoutes } from "./mount.js";
-import { createInMemoryMailboxEventBus } from "./bus.js";
-import { writeMailboxMessage } from "./write.js";
-import { allowAllGrants, mountAs, withTestDb, seedScope } from "./test-helpers.js";
-import type { MailboxDb } from "./db.js";
+import { createMailboxRoutes } from "../src/mount.js";
+import { createInMemoryMailboxEventBus } from "../src/bus.js";
+import { writeMailboxMessage } from "../src/write.js";
+import { allowAllGrants, mountAs, withTestDb, seedScope } from "./helpers.js";
+import type { MailboxDb } from "../src/db.js";
 
 let db: MailboxDb;
 const SCOPE = { tenantId: "t1", principalId: "p1" };

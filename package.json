@@ -1,6 +1,6 @@
 {
   "name": "@corbits/mailbox",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publishConfig": {
     "access": "public"
   },
@@ -48,7 +48,8 @@
     "build": "rm -rf dist && tsc -p tsconfig.build.json",
     "prepack": "bun run build",
     "typecheck": "tsc --noEmit",
-    "test": "bun test src tests"
+    "test": "bun test ./src",
+    "test:e2e": "bun test ./e2e"
   },
   "dependencies": {
     "arktype": "^2.2.3"
