@@ -70,7 +70,7 @@ export async function runMailboxMigrations(
     user: config.user,
     password: config.password,
     database: config.database,
-    ssl: config.ssl,
+    ssl: config.ssl ?? false,
     max: 1,
     onnotice: () => undefined,
   });

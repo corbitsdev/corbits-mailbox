@@ -1,6 +1,10 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { SSEStreamingApi } from "hono/streaming";
-import { createMailboxRoutes, MAX_PENDING_SSE_EVENTS } from "../src/mount.js";
+import {
+  createMailboxRoutes,
+  MAX_PENDING_SSE_EVENTS,
+  type CreateMailboxRoutesDeps,
+} from "../src/mount.js";
 import {
   createInMemoryMailboxEventBus,
   type MailboxEventBus,
@@ -18,17 +22,16 @@ function routes(
   scope: MailboxEventScope,
   heartbeatIntervalMs?: number,
 ) {
-  return mountAs(
-    scope,
-    createMailboxRoutes({
-      db,
-      requireGrant: allowAllGrants,
-      bus,
-      senderAddressFor: () => `sender@${scope.tenantId}.example`,
-      deliver: () => {},
-      heartbeatIntervalMs,
-    }),
-  );
+  const deps: CreateMailboxRoutesDeps = {
+    db,
+    requireGrant: allowAllGrants,
+    bus,
+    senderAddressFor: () => `sender@${scope.tenantId}.example`,
+    deliver: () => {},
+  };
+  if (heartbeatIntervalMs !== undefined)
+    deps.heartbeatIntervalMs = heartbeatIntervalMs;
+  return mountAs(scope, createMailboxRoutes(deps));
 }
 
 /** Read frames until `done(text)` is satisfied, or give up after `timeoutMs`. */

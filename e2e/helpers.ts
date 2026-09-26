@@ -223,7 +223,7 @@ export function testTenant(id: string): TenantRow {
 }
 
 /** Headers for a request made as `principalId` in `tenantId`. */
-export function as(tenantId: string, principalId: string): Headers {
+export function as(tenantId: string, principalId: string) {
   return new Headers({
     [TENANT_HEADER]: tenantId,
     [PRINCIPAL_HEADER]: principalId,
@@ -231,7 +231,7 @@ export function as(tenantId: string, principalId: string): Headers {
 }
 
 /** `as`, for a JSON request body. */
-export function jsonAs(tenantId: string, principalId: string): Headers {
+export function jsonAs(tenantId: string, principalId: string) {
   const headers = as(tenantId, principalId);
   headers.set("content-type", "application/json");
   return headers;
