@@ -47,9 +47,8 @@
   ],
   "sideEffects": false,
   "scripts": {
-    "build": "node scripts/build.mjs",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
     "prepack": "bun run build",
-    "prepare": "node scripts/prepare.mjs",
     "typecheck": "tsc --noEmit",
     "test": "bun test src"
   },
