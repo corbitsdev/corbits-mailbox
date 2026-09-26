@@ -3,7 +3,6 @@ import { executeSearch, executeThread } from "@intx/mailbox";
 import type { StoredEnvelope } from "@intx/mailbox";
 import {
   createPrincipalMailboxStore,
-  moveNativeMailboxMessage,
   openNativeMailboxStore,
 } from "../src/native-store.js";
 import { seedScope, withTestDb } from "./helpers.js";
@@ -46,7 +45,9 @@ describe("native MailboxStore over the principal mailbox tables", () => {
     expect(inbox.uidNext).toBe(1);
     expect(inbox.highestModSeq).toBe(0);
 
-    const raw = new TextEncoder().encode("From: sender@example.com\r\n\r\nBody");
+    const raw = new TextEncoder().encode(
+      "From: sender@example.com\r\n\r\nBody",
+    );
     const uid = inbox.append(raw, envelope(), []);
     expect(uid).toBe(1);
     expect(inbox.uidNext).toBe(2);
@@ -80,7 +81,9 @@ describe("native MailboxStore over the principal mailbox tables", () => {
     expect(reopenedMsg?.flags.has("\\Seen")).toBe(false);
     expect(reopenedMsg?.modseq).toBe(3);
     const rawBack = await reopened.readRaw(uid);
-    expect(new TextDecoder().decode(rawBack)).toBe("From: sender@example.com\r\n\r\nBody");
+    expect(new TextDecoder().decode(rawBack)).toBe(
+      "From: sender@example.com\r\n\r\nBody",
+    );
   });
 
   it("remove drops a message", async () => {
@@ -156,7 +159,9 @@ describe("native MailboxStore over the principal mailbox tables", () => {
     );
     await inbox.settled;
 
-    const refs = await executeSearch("INBOX", inbox, { from: "sender@example.com" });
+    const refs = await executeSearch("INBOX", inbox, {
+      from: "sender@example.com",
+    });
     expect(refs).toEqual([
       { uid: 1, mailbox: "INBOX" },
       { uid: 2, mailbox: "INBOX" },
@@ -181,7 +186,11 @@ describe("native MailboxStore over the principal mailbox tables", () => {
       folder: "INBOX",
     });
     const writeInstant = new Date();
-    const uid = inbox.append(new Uint8Array([1]), envelope({ date: writeInstant }), []);
+    const uid = inbox.append(
+      new Uint8Array([1]),
+      envelope({ date: writeInstant }),
+      [],
+    );
     await inbox.settled;
     // A host's session zone is rarely UTC; the read must not depend on it.
     await db.execute(sql`SET TIME ZONE 'America/Los_Angeles'`);

@@ -44,7 +44,11 @@ test("0004 carries folder and \\Seen out of a pre-0.1.0 mailbox table", async ()
 
     await applyMailboxMigrations(db, "public");
 
-    const rows = await db.execute<{ id: string; folder: string; flags: string[] }>(
+    const rows = await db.execute<{
+      id: string;
+      folder: string;
+      flags: string[];
+    }>(
       sql`SELECT "id", "folder", "flags" FROM "mailbox"."principal_mail" ORDER BY "id"`,
     );
     expect([...rows]).toEqual([

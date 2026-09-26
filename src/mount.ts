@@ -14,8 +14,16 @@ import {
   type MailboxEventBus,
   type MailboxEventOp,
 } from "./bus.js";
-import { openNativeMailboxStore, moveNativeMailboxMessage } from "./native-store.js";
-import { assertMsgId, buildMailFrame, generateMailboxMessageId, headerValue } from "./frame.js";
+import {
+  openNativeMailboxStore,
+  moveNativeMailboxMessage,
+} from "./native-store.js";
+import {
+  assertMsgId,
+  buildMailFrame,
+  generateMailboxMessageId,
+  headerValue,
+} from "./frame.js";
 
 const logger = getLogger(["corbits-mailbox", "mount"]);
 
@@ -43,9 +51,7 @@ export type CreateMailboxRoutesDeps = {
    * The caller's own address, as the host resolves it — the `From:` of every
    * message `POST /me/inbox/send` builds.
    */
-  senderAddressFor: (
-    principal: ResolvedPrincipal,
-  ) => Promise<string> | string;
+  senderAddressFor: (principal: ResolvedPrincipal) => Promise<string> | string;
   /**
    * The host's actual transport. This package only builds the RFC 5322
    * message and appends a copy to the caller's `Sent` folder — it never puts
@@ -84,7 +90,9 @@ function isListFolder(value: string): value is ListFolder {
   return (LIST_FOLDERS as readonly string[]).includes(value);
 }
 
-function parseLimit(raw: string | undefined): { limit: number } | { error: string } {
+function parseLimit(
+  raw: string | undefined,
+): { limit: number } | { error: string } {
   if (raw === undefined) return { limit: DEFAULT_LIMIT };
   if (!/^\d+$/.test(raw)) return { error: "limit must be a positive integer" };
   const limit = Number(raw);
@@ -98,7 +106,9 @@ function parseLimit(raw: string | undefined): { limit: number } | { error: strin
 }
 
 /** `?cursor=` is the uid of the last item on the previous page. */
-function parseCursor(raw: string | undefined): { cursor?: number } | { error: string } {
+function parseCursor(
+  raw: string | undefined,
+): { cursor?: number } | { error: string } {
   if (raw === undefined) return {};
   if (!/^\d+$/.test(raw)) return { error: "malformed cursor" };
   const cursor = Number(raw);
@@ -156,7 +166,10 @@ type MailboxThreadNode = {
   children: MailboxThreadNode[];
 };
 
-function enrichThread(store: NativeMailboxStore, node: Thread): MailboxThreadNode {
+function enrichThread(
+  store: NativeMailboxStore,
+  node: Thread,
+): MailboxThreadNode {
   const message = store.find(node.ref.uid);
   if (!message) {
     throw new Error(`thread node uid ${node.ref.uid} is not in the store`);
@@ -278,20 +291,26 @@ export function createMailboxRoutes(
         return c.json({ error: "invalid folder" }, 400);
       }
       const parsedLimit = parseLimit(c.req.query("limit"));
-      if ("error" in parsedLimit) return c.json({ error: parsedLimit.error }, 400);
+      if ("error" in parsedLimit)
+        return c.json({ error: parsedLimit.error }, 400);
       const parsedCursor = parseCursor(c.req.query("cursor"));
-      if ("error" in parsedCursor) return c.json({ error: parsedCursor.error }, 400);
+      if ("error" in parsedCursor)
+        return c.json({ error: parsedCursor.error }, 400);
 
       const resolved = resolvePrincipal(c);
       if (!resolved) return c.json({ error: "No resolvable principalId" }, 403);
 
-      const store = await openNativeMailboxStore(db, inFolder(resolved, folder));
+      const store = await openNativeMailboxStore(
+        db,
+        inFolder(resolved, folder),
+      );
       // No query predicate: `executeSearch` returns every ref, in store order
       // (uid ascending, since `append` only ever grows uid). Reversed for
       // newest-first, then paged with a plain uid keyset.
       const refs = (await executeSearch(folder, store, {})).reverse();
       const page = refs.filter(
-        (ref) => parsedCursor.cursor === undefined || ref.uid < parsedCursor.cursor,
+        (ref) =>
+          parsedCursor.cursor === undefined || ref.uid < parsedCursor.cursor,
       );
       const items = page.slice(0, parsedLimit.limit);
       const messages: MailboxListItem[] = [];
@@ -356,7 +375,10 @@ export function createMailboxRoutes(
       const resolved = resolvePrincipal(c);
       if (!resolved) return c.json({ error: "No resolvable principalId" }, 403);
 
-      const store = await openNativeMailboxStore(db, inFolder(resolved, folder));
+      const store = await openNativeMailboxStore(
+        db,
+        inFolder(resolved, folder),
+      );
       const threads = await executeThread(folder, store, "references");
       return c.json({
         threads: threads.map((thread) => enrichThread(store, thread)),
@@ -399,7 +421,10 @@ export function createMailboxRoutes(
       const resolved = resolvePrincipal(c);
       if (!resolved) return c.json({ error: "No resolvable principalId" }, 403);
 
-      const store = await openNativeMailboxStore(db, inFolder(resolved, folder));
+      const store = await openNativeMailboxStore(
+        db,
+        inFolder(resolved, folder),
+      );
       const threads = await executeThread(folder, store, "references");
       const root = threads.find((thread) => thread.ref.uid === rootUid);
       if (!root) return c.json({ error: "Thread not found" }, 404);
@@ -458,7 +483,10 @@ export function createMailboxRoutes(
         // back.
         let parentReferences: string[] = [];
         for (const folder of LIST_FOLDERS) {
-          const folderStore = await openNativeMailboxStore(db, inFolder(resolved, folder));
+          const folderStore = await openNativeMailboxStore(
+            db,
+            inFolder(resolved, folder),
+          );
           const parent = folderStore.messages.find(
             (m) => m.envelope.messageId === inReplyTo,
           );
@@ -481,7 +509,10 @@ export function createMailboxRoutes(
       if (references !== undefined) frameArgs.references = references;
       const raw = buildMailFrame(frameArgs);
 
-      const sentStore = await openNativeMailboxStore(db, inFolder(resolved, "Sent"));
+      const sentStore = await openNativeMailboxStore(
+        db,
+        inFolder(resolved, "Sent"),
+      );
       const uid = sentStore.append(
         raw,
         {
@@ -588,7 +619,8 @@ export function createMailboxRoutes(
       requireGrant("mailbox:*", "manage"),
       describeRoute({
         tags: TAGS,
-        summary: verb === "read" ? "Mark a message read" : "Mark a message unread",
+        summary:
+          verb === "read" ? "Mark a message read" : "Mark a message unread",
         parameters: [ID_PARAM],
         responses: {
           200: { description: "The flag was applied" },
@@ -599,12 +631,18 @@ export function createMailboxRoutes(
       }),
       async (c) => {
         const uid = parseUid(c.req.param("uid") ?? "");
-        if (uid === null) return c.json({ error: "uid must be a positive integer" }, 400);
+        if (uid === null)
+          return c.json({ error: "uid must be a positive integer" }, 400);
         const resolved = resolvePrincipal(c);
-        if (!resolved) return c.json({ error: "No resolvable principalId" }, 403);
+        if (!resolved)
+          return c.json({ error: "No resolvable principalId" }, 403);
         const folder = c.req.query("folder") ?? DEFAULT_FOLDER;
-        const store = await openNativeMailboxStore(db, inFolder(resolved, folder));
-        if (!store.find(uid)) return c.json({ error: "Message not found" }, 404);
+        const store = await openNativeMailboxStore(
+          db,
+          inFolder(resolved, folder),
+        );
+        if (!store.find(uid))
+          return c.json({ error: "Message not found" }, 404);
         if (add) store.addFlags(uid, [...flags]);
         else store.removeFlags(uid, [...flags]);
         await store.settled;
@@ -631,9 +669,11 @@ export function createMailboxRoutes(
       }),
       async (c) => {
         const uid = parseUid(c.req.param("uid") ?? "");
-        if (uid === null) return c.json({ error: "uid must be a positive integer" }, 400);
+        if (uid === null)
+          return c.json({ error: "uid must be a positive integer" }, 400);
         const resolved = resolvePrincipal(c);
-        if (!resolved) return c.json({ error: "No resolvable principalId" }, 403);
+        if (!resolved)
+          return c.json({ error: "No resolvable principalId" }, 403);
         // `restore` has no fixed source: a message can be restored out of
         // either Archive or Trash, named by `?folder=`.
         const fromFolder = from ?? c.req.query("folder") ?? "Archive";

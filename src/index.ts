@@ -52,10 +52,7 @@ export type {
   MailboxEventOp,
 } from "./bus.js";
 
-export {
-  writeMailboxMessage,
-  deliverInboxItems,
-} from "./write.js";
+export { writeMailboxMessage, deliverInboxItems } from "./write.js";
 export type {
   WriteMailboxMessageArgs,
   InboxItem,
