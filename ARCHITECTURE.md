@@ -431,9 +431,9 @@ that matches its predicate exactly. What remains, honestly: **`sort=priority`
 pays a join** over the management layer on top of a rank that was never
 index-servable, ~3.8x its pre-split cost.
 
-`schema.ts` and `migrations.ts` must agree statement for statement: the drizzle
-table object is a public export, so a host pointing `drizzle-kit` at it would
-otherwise recreate indexes the migrations do not have.
+`schema.ts` and `migrations.ts` must agree statement for statement: the
+runtime queries read through the drizzle table object, so a drift between the
+two would query columns or rely on indexes the migrations never created.
 `src/schema-ddl-parity.test.ts` diffs the two against a live database.
 
 ## Migrations

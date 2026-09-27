@@ -214,6 +214,12 @@ always called out under their own heading.
 
 ### Breaking
 
+- **The barrel no longer exports schema objects or internal constants.**
+  `principalMail`, `mailboxPgSchema`, `expectedColumnTypes`,
+  `assertExpectedColumnTypes`, `MESSAGE_ID_FALLBACK_DOMAIN`, and
+  `MAX_PENDING_SSE_EVENTS`, and the `PrincipalMailRow`/`PrincipalMailInsert`
+  row types are gone from `@corbits/mailbox`.
+  `runMailboxMigrations` still asserts column types on every boot.
 - **Hard caps on frame size and transport recipient fan-out.** Frames above
   `MAX_MAILBOX_FRAME_BYTES` (1 MiB) and transport recipient lists longer than
   `MAX_MAILBOX_RECIPIENTS` (50) are refused with `RangeError` before durable
