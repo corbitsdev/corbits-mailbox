@@ -47,7 +47,7 @@ function countingBus(): { bus: MailboxEventBus; live: () => number } {
 }
 
 async function readUntil(
-  reader: ReadableStreamDefaultReader<Uint8Array>,
+  reader: Pick<ReadableStreamDefaultReader<Uint8Array>, "read">,
   done: (text: string) => boolean,
 ): Promise<string> {
   const decoder = new TextDecoder();
