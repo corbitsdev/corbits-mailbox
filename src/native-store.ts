@@ -97,7 +97,6 @@ type Row = {
   uid: string | number;
   modseq: string | number;
   flags: string[];
-  raw: Uint8Array;
   subject: string | null;
   from_address: string | null;
   message_id: string | null;
@@ -143,7 +142,7 @@ function toStoredMessage(row: Row): StoredMessage & { rowId: string } {
 }
 
 async function readState(
-  db: MailboxDb,
+  db: Pick<MailboxDb, "execute">,
   tenantId: string,
   principalId: string,
   folder: string,
@@ -196,7 +195,7 @@ export async function openNativeMailboxStore(
   // a naive UTC value, so no AT TIME ZONE: that would re-render it in the
   // session zone. Never cast inside WHERE — that would break the index.
   const rows = await db.execute<Row>(sql`
-    SELECT "id", "uid", "modseq", "flags", "raw", "subject", "from_address",
+    SELECT "id", "uid", "modseq", "flags", "subject", "from_address",
            "message_id", "in_reply_to", "references", "to_addresses",
            to_char("created_at", 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "created_at"
     FROM "mailbox"."principal_mail"
@@ -443,6 +442,11 @@ export async function openNativeMailboxStore(
   return store;
 }
 
+/** `moveNativeMailboxMessage` found no message with that uid. */
+export class MailboxMessageNotFoundError extends Error {
+  override name = "MailboxMessageNotFoundError";
+}
+
 /**
  * Move a message from one folder to another for the same (tenant, principal).
  * Not part of `@intx/mailbox`'s `MailboxStore` interface — IMAP MOVE reassigns a
@@ -450,7 +454,9 @@ export async function openNativeMailboxStore(
  * both folders' `mailbox_state` rows, so this operates directly on the
  * database rather than through two `NativeMailboxStore` instances (each of
  * which only knows its own folder's counters). Returns the message's new uid
- * in `toFolder`. Any already-open `NativeMailboxStore` for either folder must
+ * in `toFolder`, in one transaction, so a move that fails (the uid is not in
+ * `fromFolder`, or `toFolder` already holds its Message-ID from the same
+ * sender) changes nothing. Any already-open `NativeMailboxStore` for either folder must
  * be reopened with `openNativeMailboxStore` to see the result.
  */
 export async function moveNativeMailboxMessage(
@@ -461,40 +467,54 @@ export async function moveNativeMailboxMessage(
   toFolder: string,
 ): Promise<number> {
   const { tenantId, principalId } = scope;
-  const rows = await db.execute<{ id: string }>(sql`
-    SELECT "id" FROM "mailbox"."principal_mail"
-    WHERE "tenant_id" = ${tenantId} AND "principal_id" = ${principalId}
-      AND "folder" = ${fromFolder} AND "uid" = ${uid}
-  `);
-  const row = rows[0];
-  if (row === undefined) {
-    throw new Error(`Message UID ${uid} not found in mailbox "${fromFolder}"`);
-  }
+  return db.transaction(async (tx) => {
+    // Lock both folders' state rows in one fixed order, so moves in opposite
+    // directions queue instead of deadlocking.
+    await readState(tx, tenantId, principalId, toFolder);
+    await tx.execute(sql`
+      SELECT 1 FROM "mailbox"."mailbox_state"
+      WHERE "tenant_id" = ${tenantId} AND "principal_id" = ${principalId}
+        AND "folder" IN (${fromFolder}, ${toFolder})
+      ORDER BY "folder"
+      FOR UPDATE
+    `);
+    const rows = await tx.execute<{ id: string }>(sql`
+      SELECT "id" FROM "mailbox"."principal_mail"
+      WHERE "tenant_id" = ${tenantId} AND "principal_id" = ${principalId}
+        AND "folder" = ${fromFolder} AND "uid" = ${uid}
+      FOR UPDATE
+    `);
+    const row = rows[0];
+    if (row === undefined) {
+      throw new MailboxMessageNotFoundError(
+        `Message UID ${uid} not found in mailbox "${fromFolder}"`,
+      );
+    }
 
-  await readState(db, tenantId, principalId, toFolder);
-  const bumped = await db.execute<{
-    uid_next: string | number;
-    highest_modseq: string | number;
-  }>(sql`
-    UPDATE "mailbox"."mailbox_state"
-    SET "uid_next" = "uid_next" + 1, "highest_modseq" = "highest_modseq" + 1
-    WHERE "tenant_id" = ${tenantId} AND "principal_id" = ${principalId} AND "folder" = ${toFolder}
-    RETURNING "uid_next" - 1 AS "uid_next", "highest_modseq"
-  `);
-  const newUid = Number(bumped[0]!.uid_next);
-  const newModseq = Number(bumped[0]!.highest_modseq);
+    const bumped = await tx.execute<{
+      uid_next: string | number;
+      highest_modseq: string | number;
+    }>(sql`
+      UPDATE "mailbox"."mailbox_state"
+      SET "uid_next" = "uid_next" + 1, "highest_modseq" = "highest_modseq" + 1
+      WHERE "tenant_id" = ${tenantId} AND "principal_id" = ${principalId} AND "folder" = ${toFolder}
+      RETURNING "uid_next" - 1 AS "uid_next", "highest_modseq"
+    `);
+    const newUid = Number(bumped[0]!.uid_next);
+    const newModseq = Number(bumped[0]!.highest_modseq);
 
-  await db.execute(sql`
-    UPDATE "mailbox"."principal_mail"
-    SET "folder" = ${toFolder}, "uid" = ${newUid}, "modseq" = ${newModseq}
-    WHERE "id" = ${row.id}
-  `);
-  await db.execute(sql`
-    UPDATE "mailbox"."mailbox_state"
-    SET "highest_modseq" = "highest_modseq" + 1
-    WHERE "tenant_id" = ${tenantId} AND "principal_id" = ${principalId} AND "folder" = ${fromFolder}
-  `);
-  return newUid;
+    await tx.execute(sql`
+      UPDATE "mailbox"."principal_mail"
+      SET "folder" = ${toFolder}, "uid" = ${newUid}, "modseq" = ${newModseq}
+      WHERE "id" = ${row.id}
+    `);
+    await tx.execute(sql`
+      UPDATE "mailbox"."mailbox_state"
+      SET "highest_modseq" = "highest_modseq" + 1
+      WHERE "tenant_id" = ${tenantId} AND "principal_id" = ${principalId} AND "folder" = ${fromFolder}
+    `);
+    return newUid;
+  });
 }
 
 /**

@@ -16,6 +16,7 @@ import {
 } from "./bus.js";
 import {
   openNativeMailboxStore,
+  MailboxMessageNotFoundError,
   moveNativeMailboxMessage,
 } from "./native-store.js";
 import {
@@ -90,6 +91,18 @@ type ListFolder = (typeof LIST_FOLDERS)[number];
 function isListFolder(value: string): value is ListFolder {
   return (LIST_FOLDERS as readonly string[]).includes(value);
 }
+
+/** Postgres unique_violation, raw or wrapped by drizzle as the cause. */
+function isUniqueViolation(err: unknown): boolean {
+  const code = (e: unknown) => (e as { code?: unknown } | null)?.code;
+  return (
+    code(err) === "23505" ||
+    (err instanceof Error && code(err.cause) === "23505")
+  );
+}
+
+/** Folders `restore` may move a message out of. */
+const RESTORE_FOLDERS: readonly string[] = ["Archive", "Trash"];
 
 function parseLimit(
   raw: string | undefined,
@@ -649,7 +662,7 @@ export function createMailboxRoutes(
         parameters: [ID_PARAM],
         responses: {
           200: { description: "The flag was applied" },
-          400: { description: "uid is not a positive integer" },
+          400: { description: "Bad uid or folder" },
           403: { description: "No resolvable principalId" },
           404: { description: "No message with that uid in this mailbox" },
         },
@@ -662,6 +675,9 @@ export function createMailboxRoutes(
         if (!resolved)
           return c.json({ error: "No resolvable principalId" }, 403);
         const folder = c.req.query("folder") ?? DEFAULT_FOLDER;
+        if (!isListFolder(folder)) {
+          return c.json({ error: "invalid folder" }, 400);
+        }
         const store = await openNativeMailboxStore(
           db,
           inFolder(resolved, folder),
@@ -687,9 +703,16 @@ export function createMailboxRoutes(
         parameters: [ID_PARAM],
         responses: {
           200: { description: "The message was moved" },
-          400: { description: "uid is not a positive integer" },
+          400: {
+            description:
+              "Bad uid, or a restore folder other than Archive or Trash",
+          },
           403: { description: "No resolvable principalId" },
           404: { description: "No message with that uid in the source folder" },
+          409: {
+            description:
+              "The destination already holds this Message-ID from the same sender",
+          },
         },
       }),
       async (c) => {
@@ -702,6 +725,12 @@ export function createMailboxRoutes(
         // `restore` has no fixed source: a message can be restored out of
         // either Archive or Trash, named by `?folder=`.
         const fromFolder = from ?? c.req.query("folder") ?? "Archive";
+        if (from === undefined && !RESTORE_FOLDERS.includes(fromFolder)) {
+          return c.json(
+            { error: "restore folder must be Archive or Trash" },
+            400,
+          );
+        }
         let newUid: number;
         try {
           newUid = await moveNativeMailboxMessage(
@@ -711,8 +740,14 @@ export function createMailboxRoutes(
             uid,
             to,
           );
-        } catch {
-          return c.json({ error: "Message not found" }, 404);
+        } catch (err) {
+          if (err instanceof MailboxMessageNotFoundError) {
+            return c.json({ error: "Message not found" }, 404);
+          }
+          if (isUniqueViolation(err)) {
+            return c.json({ error: `${to} already holds this message` }, 409);
+          }
+          throw err;
         }
         publish(resolved, `${to}:${newUid}`, op);
         return c.json({ uid: newUid, ok: true as const });

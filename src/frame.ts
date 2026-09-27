@@ -17,6 +17,76 @@ export function headerValue(value: string): string {
     .trim();
 }
 
+// RFC 2047 encoded-word: =?charset?B|Q?text?=, with the whitespace that
+// follows it when another encoded-word comes next.
+const WORD = String.raw`=\?[^?\s]+\?[BbQq]\?[^?\s]*\?=`;
+const ENCODED_WORD = new RegExp(
+  String.raw`=\?([^?\s]+)\?([BbQq])\?([^?\s]*)\?=(\s+(?=${WORD}))?`,
+  "g",
+);
+const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2,3}={0,2})?$/;
+
+function decodeEncodedWord(charset: string, encoding: string, text: string) {
+  let bytes: Buffer;
+  if (encoding.toUpperCase() === "B") {
+    if (!BASE64.test(text)) throw new Error("invalid base64");
+    bytes = Buffer.from(text, "base64");
+  } else {
+    bytes = Buffer.from(
+      text
+        .replace(/_/g, " ")
+        .replace(/=([0-9A-Fa-f]{2})/g, (_, hex: string) =>
+          String.fromCharCode(parseInt(hex, 16)),
+        ),
+      "latin1",
+    );
+  }
+  return new TextDecoder(charset.split("*")[0], { fatal: true }).decode(bytes);
+}
+
+/**
+ * A header value with its RFC 2047 encoded-words decoded, for the cached
+ * columns. Whitespace between adjacent encoded-words is dropped, as §6.2
+ * requires. A word that does not decode (unknown charset, bad base64, bytes
+ * invalid in its charset) stays as written, with the whitespace around it.
+ */
+export function decodeEncodedWords(value: string): string {
+  return value.replace(
+    ENCODED_WORD,
+    (
+      word,
+      charset: string,
+      encoding: string,
+      text: string,
+      gap = "",
+      at: number,
+    ) => {
+      const decoded = tryDecodeEncodedWord(charset, encoding, text);
+      if (decoded === undefined) return word;
+      const next = new RegExp(ENCODED_WORD.source, "y");
+      next.lastIndex = at + word.length;
+      const following = next.exec(value);
+      const joins =
+        following !== null &&
+        tryDecodeEncodedWord(following[1]!, following[2]!, following[3]!) !==
+          undefined;
+      return joins ? decoded : decoded + gap;
+    },
+  );
+}
+
+function tryDecodeEncodedWord(
+  charset: string,
+  encoding: string,
+  text: string,
+): string | undefined {
+  try {
+    return decodeEncodedWord(charset, encoding, text);
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * The domain a minted Message-ID falls back to when the sender address carries
  * none. Not a cosmetic choice:

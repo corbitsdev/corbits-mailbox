@@ -3,8 +3,15 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { createMailboxRoutes } from "../src/mount.js";
 import { createInMemoryMailboxEventBus } from "../src/bus.js";
+import { sql } from "drizzle-orm";
 import { writeMailboxMessage } from "../src/write.js";
-import { allowAllGrants, mountAs, withTestDb, seedScope } from "./helpers.js";
+import {
+  allowAllGrants,
+  handle,
+  mountAs,
+  withTestDb,
+  seedScope,
+} from "./helpers.js";
 import type { MailboxDb } from "../src/db.js";
 
 let db: MailboxDb;
@@ -224,9 +231,115 @@ describe("archive/trash/restore", () => {
     expect(inbox.messages).toHaveLength(1);
   });
 
+  test("restore out of anything but Archive or Trash is a 400", async () => {
+    const uid = await seedMessage("Stay");
+    const app = buildApp();
+    for (const folder of ["INBOX", "Sent", "junk"]) {
+      const res = await app.request(
+        `/me/inbox/${uid}/restore?folder=${folder}`,
+        {
+          method: "POST",
+        },
+      );
+      expect(res.status).toBe(400);
+    }
+    expect(
+      (await app.request(`/me/inbox/${uid}/read`, { method: "POST" })).status,
+    ).toBe(200);
+  });
+
+  test("an unknown ?folder= on read and unread is a 400 that creates no mailbox", async () => {
+    const app = buildApp();
+    for (const verb of ["read", "unread"]) {
+      const res = await app.request(`/me/inbox/1/${verb}?folder=junk`, {
+        method: "POST",
+      });
+      expect(res.status).toBe(400);
+    }
+    const rows = await db.execute(
+      sql`SELECT 1 FROM "mailbox"."mailbox_state" WHERE "folder" = 'junk'`,
+    );
+    expect(rows).toHaveLength(0);
+  });
+
   test("trash on an unknown uid is a 404", async () => {
     const app = buildApp();
     const res = await app.request("/me/inbox/999/trash", { method: "POST" });
     expect(res.status).toBe(404);
+  });
+
+  test("a move onto a Message-ID the destination holds is a 409 that burns no uid", async () => {
+    const message = {
+      ...SCOPE,
+      address: "p1@t1.example",
+      fromAddress: "a@t1.example",
+      subject: "Twice",
+      body: "Body",
+      messageId: "<twice@t1.example>",
+    };
+    await writeMailboxMessage(db, { ...message, folder: "Archive" });
+    const written = await writeMailboxMessage(db, message);
+    const state = () =>
+      db.execute<{ folder: string; uid_next: string }>(
+        sql`SELECT "folder", "uid_next" FROM "mailbox"."mailbox_state" ORDER BY "folder"`,
+      );
+    const before = await state();
+    const app = buildApp();
+    const res = await app.request(`/me/inbox/${written!.uid}/archive`, {
+      method: "POST",
+    });
+    expect(res.status).toBe(409);
+    expect(await state()).toEqual(before);
+  });
+
+  test("interleaved archive and restore moves never deadlock or lose rows", async () => {
+    for (let i = 0; i < 16; i++) {
+      await writeMailboxMessage(db, {
+        ...SCOPE,
+        folder: i % 2 === 0 ? "INBOX" : "Archive",
+        address: "p1@t1.example",
+        fromAddress: "a@t1.example",
+        subject: `m${i}`,
+        body: "Body",
+      });
+    }
+    const app = buildApp();
+    const move = async (path: string) =>
+      (await app.request(path, { method: "POST" })).status;
+    const moves: Promise<number>[] = [];
+    for (let uid = 1; uid <= 8; uid++) {
+      moves.push(
+        move(`/me/inbox/${uid}/archive`),
+        move(`/me/inbox/${uid}/restore?folder=Archive`),
+      );
+    }
+    const statuses = await Promise.all(moves);
+    for (const status of statuses) expect([200, 404, 409]).toContain(status);
+
+    const rows = await db.execute<{
+      subject: string;
+      folder: string;
+      uid: number;
+    }>(sql`SELECT "subject", "folder", "uid" FROM "mailbox"."principal_mail"`);
+    expect(rows).toHaveLength(16);
+    expect(new Set(rows.map((r) => r.subject)).size).toBe(16);
+    expect(new Set(rows.map((r) => `${r.folder}/${r.uid}`)).size).toBe(16);
+  });
+
+  test("a move while the database is unreachable is a 500, not a 404", async () => {
+    const { client, db: down } = handle();
+    await client.end();
+    const app = mountAs(
+      SCOPE,
+      createMailboxRoutes({
+        db: down,
+        requireGrant: allowAllGrants,
+        bus: createInMemoryMailboxEventBus(),
+        senderAddressFor: () => "p1@t1.example",
+        deliver: () => {},
+      }),
+    );
+    const res = await app.request("/me/inbox/1/archive", { method: "POST" });
+    expect(res.status).toBe(500);
   });
 });

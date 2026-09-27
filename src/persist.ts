@@ -22,7 +22,11 @@ import { hostPrincipal } from "./schema.js";
 import type { MailboxDb } from "./db.js";
 import { openNativeMailboxStore } from "./native-store.js";
 import { publishMailboxEvent, type MailboxEventBus } from "./bus.js";
-import { decodeMailFrame, parseMsgIdList } from "./frame.js";
+import {
+  decodeEncodedWords,
+  decodeMailFrame,
+  parseMsgIdList,
+} from "./frame.js";
 import {
   resolveMailboxRecipients,
   type ResolvedRecipient,
@@ -199,7 +203,7 @@ export function createMailboxPersist<R>(
     // can infer, matching what `writeMailboxMessage` mints when a caller
     // supplies none of these fields.
     const decoded = decodeMailFrame(raw);
-    const subject = decoded?.headers.get("subject") ?? "";
+    const subject = decodeEncodedWords(decoded?.headers.get("subject") ?? "");
     const fromAddress = decoded?.headers.get("from") ?? senderAddress;
     const messageId = decoded?.messageId ?? null;
     const inReplyTo =
