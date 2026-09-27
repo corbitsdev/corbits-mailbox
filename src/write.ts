@@ -222,9 +222,6 @@ export async function writeMailboxMessage(
     principalId: args.principalId,
     folder,
   });
-  if (store.messages.some((m) => m.envelope.messageId === messageId)) {
-    return null;
-  }
   const uid = await store.appendMessage(
     raw,
     {
@@ -239,7 +236,9 @@ export async function writeMailboxMessage(
       interchangeCorrelationId: undefined,
     },
     [],
+    args.fromAddress,
   );
+  if (uid === null) return null;
 
   const id = `${args.tenantId}:${args.principalId}:${folder}:${uid}`;
   if (bus) {

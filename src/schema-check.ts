@@ -35,6 +35,7 @@ import { principalMail } from "./schema.js";
  */
 const DATA_TYPE_BY_SQL_TYPE: Record<string, string> = {
   text: "text",
+  bigint: "bigint",
   jsonb: "jsonb",
   bytea: "bytea",
   timestamp: "timestamp without time zone",

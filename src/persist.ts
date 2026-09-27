@@ -207,21 +207,16 @@ export function createMailboxPersist<R>(
     const references = decoded?.references ?? [];
 
     // One append per recipient, into their own INBOX — the native store has
-    // no multi-recipient batch. Deduped on messageId within each recipient's
-    // mailbox: a retried frame (same Message-ID) never delivers twice to the
-    // same principal.
+    // no multi-recipient batch. Deduped on messageId and the authorized
+    // envelope sender within each recipient's mailbox: a retried frame never
+    // delivers twice to the same principal, and a forged From cannot suppress
+    // another sender's mail.
     for (const recipient of resolved) {
       const store = await openNativeMailboxStore(db, {
         tenantId: auth.tenantId,
         principalId: recipient.principalId,
         folder: "INBOX",
       });
-      if (
-        messageId !== null &&
-        store.messages.some((m) => m.envelope.messageId === messageId)
-      ) {
-        continue;
-      }
       const uid = await store.appendMessage(
         raw,
         {
@@ -236,7 +231,9 @@ export function createMailboxPersist<R>(
           interchangeCorrelationId: undefined,
         },
         [],
+        senderAddress,
       );
+      if (uid === null) continue;
       announce({
         id: `${auth.tenantId}:${recipient.principalId}:INBOX:${uid}`,
         tenantId: auth.tenantId,

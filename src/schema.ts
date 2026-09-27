@@ -1,4 +1,5 @@
 import {
+  bigint,
   customType,
   index,
   jsonb,
@@ -93,7 +94,14 @@ export const principalMail = mailboxPgSchema.table(
     raw: bytea("raw").notNull(),
     subject: text("subject"),
     fromAddress: text("from_address"),
+    // The host-authorized envelope sender, the Message-ID dedupe key's sender
+    // half. Added by migration `0008_unique_uid_and_message_id`.
+    senderAddress: text("sender_address").notNull().default(""),
     messageKey: text("message_key"),
+    // The IMAP mailbox and uid migration `0004_native_mailbox_store` added,
+    // named here for the unique index below.
+    folder: text("folder").notNull().default("INBOX"),
+    uid: bigint("uid", { mode: "number" }).notNull(),
     // The threading headers, cached off `raw` at write for the SAME reason
     // `subject` and `from_address` are: list never loads the MIME frame, so a
     // client renders a thread from the projection alone instead of fetching
@@ -170,6 +178,19 @@ export const principalMail = mailboxPgSchema.table(
       t.principalId,
       t.messageId,
     ),
+    // One row per uid in each mailbox. Created by migration
+    // `0008_unique_uid_and_message_id`.
+    uniqueIndex("principal_mail_tenant_id_principal_id_folder_uid_idx").on(
+      t.tenantId,
+      t.principalId,
+      t.folder,
+      t.uid,
+    ),
+    // The append dedupe key: one row per Message-ID from one envelope sender
+    // in each mailbox. Created by migration `0008_unique_uid_and_message_id`.
+    uniqueIndex("principal_mail_folder_message_id_sender_address_idx")
+      .on(t.tenantId, t.principalId, t.folder, t.messageId, t.senderAddress)
+      .where(sql`${t.messageId} IS NOT NULL`),
     // `readMailboxThread`'s own keyset order: oldest first, `(created_at, id)`,
     // scoped the same way every other access path here is. The list-path index
     // above covers the same three columns in the opposite direction and a

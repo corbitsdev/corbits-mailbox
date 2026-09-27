@@ -193,3 +193,36 @@ describe("deliverInboxItems", () => {
     expect(results[0]!.id).not.toBeNull();
   });
 });
+
+describe("concurrent appends to one mailbox", () => {
+  test("five writes get five distinct uids", async () => {
+    const written = await Promise.all(
+      [0, 1, 2, 3, 4].map((i) =>
+        writeMailboxMessage(db, args({ subject: `m${i}` })),
+      ),
+    );
+    expect(written.map((w) => w?.uid).sort()).toEqual([1, 2, 3, 4, 5]);
+    const store = await openNativeMailboxStore(db, {
+      tenantId: "t1",
+      principalId: "p1",
+      folder: "INBOX",
+    });
+    expect(store.messages.map((m) => m.uid)).toEqual([1, 2, 3, 4, 5]);
+    expect(store.uidNext).toBe(6);
+  });
+
+  test("three writes with one Message-ID land one row", async () => {
+    const written = await Promise.all(
+      [0, 1, 2].map(() =>
+        writeMailboxMessage(db, args({ messageId: "<same@t1.example>" })),
+      ),
+    );
+    expect(written.filter((w) => w !== null)).toHaveLength(1);
+    const store = await openNativeMailboxStore(db, {
+      tenantId: "t1",
+      principalId: "p1",
+      folder: "INBOX",
+    });
+    expect(store.messages).toHaveLength(1);
+  });
+});

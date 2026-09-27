@@ -129,7 +129,11 @@ describe("native MailboxStore over the principal mailbox tables", () => {
 
     // Moving again gets the next uid in Archive, not a collision.
     const inbox2 = await store.open("INBOX");
-    const uid2 = inbox2.append(new Uint8Array([10]), envelope(), []);
+    const uid2 = inbox2.append(
+      new Uint8Array([10]),
+      envelope({ messageId: "<m2@example.com>" }),
+      [],
+    );
     await inbox2.settled;
     const secondMove = await store.move("INBOX", uid2, "Archive");
     expect(secondMove).toBe(2);
