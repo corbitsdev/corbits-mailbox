@@ -8,6 +8,7 @@ import {
 } from "../src/mount.js";
 import { createInMemoryMailboxEventBus } from "../src/bus.js";
 import { openNativeMailboxStore } from "../src/native-store.js";
+import { MAX_MAILBOX_FRAME_BYTES } from "../src/write.js";
 import { allowAllGrants, mountAs, withTestDb, seedScope } from "./helpers.js";
 import type { MailboxDb } from "../src/db.js";
 
@@ -20,14 +21,14 @@ beforeEach(async () => {
   await seedScope(db, SCOPE.tenantId, SCOPE.principalId);
 });
 
-function buildApp(deliveries: OutgoingMailboxMessage[]) {
+function buildApp(deliveries: OutgoingMailboxMessage[], sender = FROM) {
   const app = mountAs(
     SCOPE,
     createMailboxRoutes({
       db,
       requireGrant: allowAllGrants,
       bus: createInMemoryMailboxEventBus(),
-      senderAddressFor: () => FROM,
+      senderAddressFor: () => sender,
       deliver: (message) => {
         deliveries.push(message);
       },
@@ -122,6 +123,62 @@ describe("POST /me/inbox/send", () => {
 
     expect(res.status).toBe(400);
     expect(deliveries).toHaveLength(0);
+  });
+
+  function send(app: ReturnType<typeof buildApp>, body: object) {
+    return app.request("/me/inbox/send", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  }
+
+  test("400s on a recipient carrying CR, LF or NUL, before any append or deliver", async () => {
+    const deliveries: OutgoingMailboxMessage[] = [];
+    const app = buildApp(deliveries);
+    for (const to of [
+      "bob@example.com\r\nBcc: evil@example.com",
+      "bob@example.com\nX: 1",
+      "bob\u0000@example.com",
+    ]) {
+      const res = await send(app, { to: [to], body: "Hi" });
+      expect(res.status).toBe(400);
+    }
+    expect(deliveries).toHaveLength(0);
+    const sent = await openNativeMailboxStore(db, { ...SCOPE, folder: "Sent" });
+    expect(sent.messages).toHaveLength(0);
+  });
+
+  test("mints the Message-ID from the addr-spec of a display-name sender", async () => {
+    const deliveries: OutgoingMailboxMessage[] = [];
+    const app = buildApp(deliveries, "Pat <p1@t1.example>");
+    const res = await send(app, { to: ["bob@example.com"], body: "Hi" });
+    expect(res.status).toBe(200);
+    const { messageId } = (await res.json()) as { messageId: string };
+    expect(messageId).toMatch(/^<[^<>]+@t1\.example>$/);
+    expect(deliveries[0]!.from).toBe("Pat <p1@t1.example>");
+  });
+
+  test("mints under hub.invalid when the host's sender has no addr-spec", async () => {
+    const deliveries: OutgoingMailboxMessage[] = [];
+    const app = buildApp(deliveries, "Pat");
+    const res = await send(app, { to: ["bob@example.com"], body: "Hi" });
+    expect(res.status).toBe(200);
+    const { messageId } = (await res.json()) as { messageId: string };
+    expect(messageId).toMatch(/^<[^<>]+@hub\.invalid>$/);
+  });
+
+  test("400s on a frame over the size cap without calling deliver", async () => {
+    const deliveries: OutgoingMailboxMessage[] = [];
+    const app = buildApp(deliveries);
+    const res = await send(app, {
+      to: ["bob@example.com"],
+      body: "x".repeat(MAX_MAILBOX_FRAME_BYTES),
+    });
+    expect(res.status).toBe(400);
+    expect(deliveries).toHaveLength(0);
+    const sent = await openNativeMailboxStore(db, { ...SCOPE, folder: "Sent" });
+    expect(sent.messages).toHaveLength(0);
   });
 
   test("403s with no resolvable principal", async () => {
