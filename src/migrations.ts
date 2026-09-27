@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
 import { sql, type SQL } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
+import { drizzle } from "drizzle-orm/postgres-js";
+import postgres from "postgres";
+import type { DBConfig } from "@intx/db";
 import type { MailboxDb } from "./db.js";
 import { assertExpectedColumnTypes } from "./schema-check.js";
 
@@ -534,8 +537,8 @@ export class MigrationChecksumError extends Error {
  * every boot" printed a wall of what looked like errors on every replica start.
  * `SET LOCAL` scopes the change to this transaction and stops at NOTICE:
  * WARNING and above still reach the host untouched. It is set on the connection
- * rather than via a client option so it holds for ANY handle a host hands in,
- * including one this package did not construct.
+ * rather than via a client option so it holds for every handle the tests pass
+ * in, not only the one `runMailboxMigrations` builds.
  *
  * Each migration applies inside its own nested transaction (a savepoint under
  * the outer one), so a migration is all-or-nothing with its ledger row and can
@@ -544,7 +547,11 @@ export class MigrationChecksumError extends Error {
  * stops being equivalent, and a runner that rolls back inconsistently is not
  * something to discover then.
  */
-export async function runMailboxMigrations(db: MailboxDb): Promise<void> {
+export async function applyMailboxMigrations(
+  db: MailboxDb,
+  hostSchema: string,
+): Promise<void> {
+  const hostIdent = `"${hostSchema.replace(/"/g, '""')}".`;
   await db.transaction(async (tx) => {
     await tx.execute(sql`SET LOCAL client_min_messages = warning`);
     await tx.execute(sql`SELECT pg_advisory_xact_lock(${LOCK_KEY})`);
@@ -587,7 +594,12 @@ export async function runMailboxMigrations(db: MailboxDb): Promise<void> {
           if (migration.assertColumnsBeforeStatement === index) {
             await assertExpectedColumnTypes(step);
           }
-          await step.execute(statement);
+          // Checksums hash the statements as shipped, so the ledger is the
+          // same whichever host schema the FKs are pointed at.
+          const rendered = DIALECT.sqlToQuery(statement).sql;
+          await step.execute(
+            sql.raw(rendered.replace(/"public"\.(?=")/g, hostIdent)),
+          );
         }
         await step.execute(
           sql`INSERT INTO "mailbox".${sql.identifier(LEDGER_TABLE)} ("id", "checksum") VALUES (${migration.id}, ${expected})`,
@@ -602,4 +614,34 @@ export async function runMailboxMigrations(db: MailboxDb): Promise<void> {
     // back with it: nothing is left recorded as applied. See schema-check.ts.
     await assertExpectedColumnTypes(tx);
   });
+}
+
+/**
+ * Takes the same `config` and `schema` the host passes Interchange's
+ * `runMigrations`: `schema` is where the host's `tenant` and `principal`
+ * tables live, and the mailbox FKs point there. The mailbox's own tables
+ * always live in the `mailbox` schema.
+ */
+export async function runMailboxMigrations(
+  config: DBConfig,
+  options: { schema: string },
+): Promise<void> {
+  if (options.schema.length === 0) {
+    throw new Error("runMailboxMigrations: schema name must not be empty");
+  }
+  const client = postgres({
+    host: config.host,
+    port: config.port,
+    user: config.user,
+    password: config.password,
+    database: config.database,
+    ssl: config.ssl,
+    max: 1,
+    onnotice: () => undefined,
+  });
+  try {
+    await applyMailboxMigrations(drizzle(client), options.schema);
+  } finally {
+    await client.end({ timeout: 5 });
+  }
 }

@@ -1,5 +1,4 @@
-import { drizzle, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
-import postgres from "postgres";
+import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
 
 /**
  * The db handle this package expects a host to hand in — the drizzle instance
@@ -13,15 +12,3 @@ import postgres from "postgres";
 // handle bound to its own (e.g. `createDB`'s). Nothing here reads `db.query`.
 export type MailboxDb = PostgresJsDatabase<any>;
 
-/**
- * Opens a standalone handle, for hosts and scripts that don't already have one.
- * `close` drains the pool — without it a migrate-only script keeps an open
- * socket and never exits.
- */
-export function createMailboxDb(connectionString: string): {
-  db: MailboxDb;
-  close: () => Promise<void>;
-} {
-  const client = postgres(connectionString);
-  return { db: drizzle(client), close: () => client.end() };
-}

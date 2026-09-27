@@ -4,24 +4,24 @@ Give a **person** in an Interchange hub an inbox: list, read, flag, send, and li
 
 ## Runtime support
 
-Node >= 24 consumes built `dist/`. Bun >= 1.2 runs TypeScript source. Peers: `@intx/hub-api`, `@intx/log`, `@intx/mailbox`, `@intx/mime`, `@intx/types`, `drizzle-orm`, `hono`, `postgres`.
+Node >= 24 consumes built `dist/`. Bun >= 1.2 runs TypeScript source. Peers: `@intx/db`, `@intx/hub-api`, `@intx/log`, `@intx/mailbox`, `@intx/mime`, `@intx/types`, `drizzle-orm`, `hono`, `postgres`.
 
 ## Quickstart
 
 ```bash
-npm add @corbits/mailbox @intx/hub-api @intx/log @intx/mailbox @intx/mime @intx/types drizzle-orm hono postgres
+npm add @corbits/mailbox @intx/db @intx/hub-api @intx/log @intx/mailbox @intx/mime @intx/types drizzle-orm hono postgres
 ```
 
 ```ts
+import { createDB } from "@intx/db";
 import {
   createInMemoryMailboxEventBus,
-  createMailboxDb,
   createMailboxRoutes,
   runMailboxMigrations,
 } from "@corbits/mailbox";
 
-const { db, close } = createMailboxDb(databaseUrl);
-await runMailboxMigrations(db);
+await runMailboxMigrations(dbConfig, { schema: "public" });
+const { db, close } = createDB(dbConfig);
 
 app.route(
   "/api/tenants/:tenantId/mailbox",
@@ -37,33 +37,33 @@ app.route(
 process.once("SIGTERM", close);
 ```
 
-`app` is the host's `Hono<TenantEnv>` behind its tenant middleware, `requireGrant` comes from `@intx/hub-api`'s `createRequireGrant`, and `addressOf` and `transport` are the host's own directory and mail transport. `runMailboxMigrations` creates the `mailbox` schema; it needs the host's `tenant` and `principal` tables to exist first.
+`app` is the host's `Hono<TenantEnv>` behind its tenant middleware, `requireGrant` comes from `@intx/hub-api`'s `createRequireGrant`, and `addressOf` and `transport` are the host's own directory and mail transport. `dbConfig` is the same config and `schema` the host passes Interchange's `runMigrations`: the schema holding its `tenant` and `principal` tables, which must exist first. The mailbox's own tables always live in the `mailbox` schema.
 
-| `deps`                | Type                                                              | What the host provides                                                                                                                                                                  |
-| --------------------- | ----------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `db`                  | `MailboxDb`                                                       | Mail lives there (schema `mailbox`). `createMailboxDb` opens a handle; a hub that already has one passes it instead.                                                                   |
-| `bus`                 | `MailboxEventBus`                                                 | SSE fan-out only; mail itself is Postgres. `createInMemoryMailboxEventBus()` for a single process; a shared bus when several processes must fan the same inbox events.                  |
-| `requireGrant`        | `RequireGrant`                                                    | Gates reads on `mailbox:*` `read`, send on `create`, and the flag and move verbs on `manage`.                                                                                          |
-| `senderAddressFor`    | `(principal: ResolvedPrincipal) => string`                        | That person's From: address, from the host's own directory.                                                                                                                             |
-| `deliver`             | `(message: OutgoingMailboxMessage) => void`                       | The host's mail transport. Called once per send with `{ raw, from, to, messageId }` after the message is filed in `Sent`. This package builds MIME; transmission is the host's job.      |
-| `heartbeatIntervalMs` | `number` (optional)                                               | SSE keep-alive period. Defaults to 25s.                                                                                                                                                 |
+| `deps`                | Type                                                              | What the host provides                                                                                                                                                              |
+| --------------------- | ----------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `db`                  | `MailboxDb`                                                       | Mail lives there (schema `mailbox`). A hub passes the handle it already has.                                                                                                        |
+| `bus`                 | `MailboxEventBus`                                                 | SSE fan-out only; mail itself is Postgres. `createInMemoryMailboxEventBus()` for a single process; a shared bus when several processes must fan the same inbox events.              |
+| `requireGrant`        | `RequireGrant`                                                    | Gates reads on `mailbox:*` `read`, send on `create`, and the flag and move verbs on `manage`.                                                                                       |
+| `senderAddressFor`    | `(principal: ResolvedPrincipal) => string`                        | That person's From: address, from the host's own directory.                                                                                                                         |
+| `deliver`             | `(message: OutgoingMailboxMessage) => void`                       | The host's mail transport. Called once per send with `{ raw, from, to, messageId }` after the message is filed in `Sent`. This package builds MIME; transmission is the host's job. |
+| `heartbeatIntervalMs` | `number` (optional)                                               | SSE keep-alive period. Defaults to 25s.                                                                                                                                             |
 
 ### Routes
 
 Paths are relative to where the host mounts the sub-app. Every route reads or writes only the caller's own mailbox.
 
-| Method | Path                         | Purpose                                                                                     |
-| ------ | ---------------------------- | ------------------------------------------------------------------------------------------- |
+| Method | Path                         | Purpose                                                                                              |
+| ------ | ---------------------------- | ---------------------------------------------------------------------------------------------------- |
 | GET    | `/me/inbox`                  | List a folder newest first. `?folder=` INBOX (default), Sent, Archive, Trash; `?limit=`, `?cursor=`. |
-| GET    | `/me/inbox/threads`          | A folder as threads (REFERENCES algorithm). `?folder=` as above.                           |
-| GET    | `/me/inbox/threads/:rootUid` | One thread, rooted at `rootUid`. `?folder=` as above.                                      |
-| POST   | `/me/inbox/send`             | Build a message from `{ to, subject?, body, inReplyTo? }`, file it in `Sent`, call `deliver`. |
-| GET    | `/me/inbox/events`           | Server-sent `mailbox` events for the caller, with a heartbeat.                              |
-| POST   | `/me/inbox/:uid/read`        | Set `\Seen` on a message in `?folder=` (INBOX by default).                                  |
-| POST   | `/me/inbox/:uid/unread`      | Clear `\Seen` on a message in `?folder=` (INBOX by default).                                |
-| POST   | `/me/inbox/:uid/archive`     | Move from INBOX to Archive.                                                                 |
-| POST   | `/me/inbox/:uid/trash`       | Move from INBOX to Trash.                                                                   |
-| POST   | `/me/inbox/:uid/restore`     | Move back to INBOX from `?folder=` (Archive by default).                                    |
+| GET    | `/me/inbox/threads`          | A folder as threads (REFERENCES algorithm). `?folder=` as above.                                     |
+| GET    | `/me/inbox/threads/:rootUid` | One thread, rooted at `rootUid`. `?folder=` as above.                                                |
+| POST   | `/me/inbox/send`             | Build a message from `{ to, subject?, body, inReplyTo? }`, file it in `Sent`, call `deliver`.        |
+| GET    | `/me/inbox/events`           | Server-sent `mailbox` events for the caller, with a heartbeat.                                       |
+| POST   | `/me/inbox/:uid/read`        | Set `\Seen` on a message in `?folder=` (INBOX by default).                                           |
+| POST   | `/me/inbox/:uid/unread`      | Clear `\Seen` on a message in `?folder=` (INBOX by default).                                         |
+| POST   | `/me/inbox/:uid/archive`     | Move from INBOX to Archive.                                                                          |
+| POST   | `/me/inbox/:uid/trash`       | Move from INBOX to Trash.                                                                            |
+| POST   | `/me/inbox/:uid/restore`     | Move back to INBOX from `?folder=` (Archive by default).                                             |
 
 ### Agent-originated mail
 

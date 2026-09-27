@@ -10,15 +10,17 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { sql } from "drizzle-orm";
-import { createMailboxDb } from "./db.js";
 import {
   MIGRATIONS,
   MigrationChecksumError,
+  applyMailboxMigrations,
   runMailboxMigrations,
 } from "./migrations.js";
 import { buildMailFrame } from "./frame.js";
 import {
   createHostControlPlane,
+  createMailboxDb,
+  dbConfigFromUrl,
   seedScope,
   TEST_DATABASE_URL,
 } from "./test-helpers.js";
@@ -33,7 +35,8 @@ beforeAll(async () => {
 afterAll(async () => {
   // Leave the schema the way every other suite expects to find it, whatever
   // the last case here did to it.
-  await runMailboxMigrations(adminDb);
+  await dropMailboxSchema();
+  await applyMailboxMigrations(adminDb, "public");
   await admin.end();
 });
 
@@ -61,9 +64,43 @@ async function fromEmpty(
 }
 
 describe("runMailboxMigrations", () => {
+  test("points the FKs at the host schema it is given", async () => {
+    await fromEmpty(async ({ client }) => {
+      await admin.unsafe(`DROP SCHEMA IF EXISTS "host_cp" CASCADE`);
+      await admin.unsafe(`CREATE SCHEMA "host_cp"`);
+      await admin.unsafe(`CREATE TABLE "host_cp"."tenant" ("id" text PRIMARY KEY)`);
+      await admin.unsafe(`CREATE TABLE "host_cp"."principal" ("id" text PRIMARY KEY)`);
+      try {
+        await runMailboxMigrations(dbConfigFromUrl(TEST_DATABASE_URL), {
+          schema: "host_cp",
+        });
+        const targets = await client<{ target: string }[]>`
+          SELECT DISTINCT confrelid::regclass::text AS target
+            FROM pg_constraint
+           WHERE contype = 'f'
+             AND connamespace = 'mailbox'::regnamespace
+             AND confrelid::regclass::text NOT LIKE 'mailbox.%'
+           ORDER BY target`;
+        expect(targets.map((row) => row.target)).toEqual([
+          "host_cp.principal",
+          "host_cp.tenant",
+        ]);
+      } finally {
+        await dropMailboxSchema();
+        await admin.unsafe(`DROP SCHEMA "host_cp" CASCADE`);
+      }
+    });
+  });
+
+  test("refuses an empty schema name", async () => {
+    await expect(
+      runMailboxMigrations(dbConfigFromUrl(TEST_DATABASE_URL), { schema: "" }),
+    ).rejects.toThrow("schema name must not be empty");
+  });
+
   test("builds the full schema from an empty database", async () => {
     await fromEmpty(async ({ db }) => {
-      await runMailboxMigrations(db);
+      await applyMailboxMigrations(db, "public");
 
       // The mail plane reads 1-1 with Interchange's `session_mail`: the message
       // as delivered, plus the cached header columns and this package's scope.
@@ -133,7 +170,7 @@ describe("runMailboxMigrations", () => {
 
   test("0005 leaves uid and modseq NOT NULL: every write path is the native store now", async () => {
     await fromEmpty(async ({ db }) => {
-      await runMailboxMigrations(db);
+      await applyMailboxMigrations(db, "public");
       const rows = await db.execute<{ column_name: string; is_nullable: string }>(
         sql`SELECT column_name, is_nullable FROM information_schema.columns
             WHERE table_schema = 'mailbox' AND table_name = 'principal_mail'
@@ -149,7 +186,7 @@ describe("runMailboxMigrations", () => {
 
   test("the keyset index matches the list query's ORDER BY exactly", async () => {
     await fromEmpty(async ({ db }) => {
-      await runMailboxMigrations(db);
+      await applyMailboxMigrations(db, "public");
       const [row] = await db.execute<{ indexdef: string }>(
         sql`SELECT indexdef FROM pg_indexes WHERE schemaname = 'mailbox'
             AND indexname = 'principal_mail_tenant_id_principal_id_created_at_id_idx'`,
@@ -169,7 +206,7 @@ describe("runMailboxMigrations", () => {
     // the upgrade and every older message would project no parent.
     await fromEmpty(async ({ db }) => {
       // Build the pre-0002 schema, then seed through it.
-      await runMailboxMigrations(db);
+      await applyMailboxMigrations(db, "public");
       await db.execute(
         sql`ALTER TABLE "mailbox"."principal_mail"
             DROP COLUMN "message_id", DROP COLUMN "in_reply_to"`,
@@ -215,7 +252,7 @@ describe("runMailboxMigrations", () => {
         `);
       }
 
-      await runMailboxMigrations(db);
+      await applyMailboxMigrations(db, "public");
 
       const rows = await db.execute<{
         message_key: string;
@@ -241,7 +278,7 @@ describe("runMailboxMigrations", () => {
     // entire `raw`, NUL included) and GREEN once only the NUL-stripped header
     // slice reaches `convert_from`.
     await fromEmpty(async ({ db }) => {
-      await runMailboxMigrations(db);
+      await applyMailboxMigrations(db, "public");
       await db.execute(
         sql`ALTER TABLE "mailbox"."principal_mail"
             DROP COLUMN "message_id", DROP COLUMN "in_reply_to"`,
@@ -276,7 +313,7 @@ describe("runMailboxMigrations", () => {
         `);
       }
 
-      await runMailboxMigrations(db);
+      await applyMailboxMigrations(db, "public");
 
       const ledger = await db.execute<{ id: string }>(
         sql`SELECT "id" FROM "mailbox"."corbits_mailbox_migrations" ORDER BY "id"`,
@@ -311,7 +348,7 @@ describe("runMailboxMigrations", () => {
     // only the first fragment, and every older message would then link to the
     // wrong ancestor — worse than linking to none.
     await fromEmpty(async ({ db }) => {
-      await runMailboxMigrations(db);
+      await applyMailboxMigrations(db, "public");
       await db.execute(
         sql`ALTER TABLE "mailbox"."principal_mail" DROP COLUMN "references"`,
       );
@@ -356,7 +393,7 @@ describe("runMailboxMigrations", () => {
         `);
       }
 
-      await runMailboxMigrations(db);
+      await applyMailboxMigrations(db, "public");
 
       const rows = await db.execute<{
         message_key: string;
@@ -381,7 +418,7 @@ describe("runMailboxMigrations", () => {
     // runtime path now uses too, so a frame decoded before or after the
     // upgrade projects the same cached `in_reply_to`.
     await fromEmpty(async ({ db }) => {
-      await runMailboxMigrations(db);
+      await applyMailboxMigrations(db, "public");
       await db.execute(
         sql`ALTER TABLE "mailbox"."principal_mail"
             DROP COLUMN "message_id", DROP COLUMN "in_reply_to"`,
@@ -418,7 +455,7 @@ describe("runMailboxMigrations", () => {
                   ${Buffer.from(enc.encode(text))}, ${key}, ${i + 1}, ${i + 1})
         `);
       }
-      await runMailboxMigrations(db);
+      await applyMailboxMigrations(db, "public");
       const rows = await db.execute<{
         message_key: string;
         message_id: string | null;
@@ -440,8 +477,8 @@ describe("runMailboxMigrations", () => {
 
   test("is idempotent: running twice does not error and applies once", async () => {
     await fromEmpty(async ({ db }) => {
-      await runMailboxMigrations(db);
-      await runMailboxMigrations(db);
+      await applyMailboxMigrations(db, "public");
+      await applyMailboxMigrations(db, "public");
 
       const rows = await db.execute<{ id: string; count: string }>(
         sql`SELECT "id", count(*)::text AS count
@@ -460,7 +497,7 @@ describe("runMailboxMigrations", () => {
 
   test("records a checksum per applied migration", async () => {
     await fromEmpty(async ({ db }) => {
-      await runMailboxMigrations(db);
+      await applyMailboxMigrations(db, "public");
       const rows = await db.execute<{ id: string; checksum: string | null }>(
         sql`SELECT "id", "checksum" FROM "mailbox"."corbits_mailbox_migrations"`,
       );
@@ -473,7 +510,7 @@ describe("runMailboxMigrations", () => {
 
   test("refuses to boot when a shipped migration was edited after it applied", async () => {
     await fromEmpty(async ({ db }) => {
-      await runMailboxMigrations(db);
+      await applyMailboxMigrations(db, "public");
       // Stand in for someone editing MIGRATIONS[0].statements in place: the
       // ledger now disagrees with the code, which is exactly the divergence
       // that used to be invisible — old environments skip the edit forever
@@ -485,10 +522,10 @@ describe("runMailboxMigrations", () => {
       // A NAMED error, matching both sibling cores: a host catching this to
       // tell "someone edited a migration" apart from "the database is down"
       // should not have to regex-match a message string.
-      await expect(runMailboxMigrations(db)).rejects.toThrow(
+      await expect(applyMailboxMigrations(db, "public")).rejects.toThrow(
         MigrationChecksumError,
       );
-      await expect(runMailboxMigrations(db)).rejects.toThrow(
+      await expect(applyMailboxMigrations(db, "public")).rejects.toThrow(
         /has changed since it was applied/,
       );
     });
@@ -501,7 +538,7 @@ describe("runMailboxMigrations", () => {
       // can exist, and while the column was nullable the runner would accept
       // exactly one edit to a shipped migration without complaint. NOT NULL is
       // what makes the documented immutability guarantee unconditional.
-      await runMailboxMigrations(db);
+      await applyMailboxMigrations(db, "public");
       // Drizzle wraps driver errors, so the NOT NULL violation is on `.cause`,
       // not on the message `toThrow` would match.
       const failure = await db
@@ -521,7 +558,7 @@ describe("runMailboxMigrations", () => {
 
   test("creates its own ledger table distinct from any host table", async () => {
     await fromEmpty(async ({ db }) => {
-      await runMailboxMigrations(db);
+      await applyMailboxMigrations(db, "public");
       const rows = await db.execute<{ exists: boolean }>(
         sql`SELECT EXISTS (SELECT 1 FROM information_schema.tables
             WHERE table_schema = 'mailbox'
@@ -536,7 +573,7 @@ describe("runMailboxMigrations", () => {
     // only belong to a tenant and principal the host knows, and offboarding
     // either carries the mailbox rows out with it.
     await fromEmpty(async ({ db }) => {
-      await runMailboxMigrations(db);
+      await applyMailboxMigrations(db, "public");
       const rows = await db.execute<{
         constraint_name: string;
         table_name: string;
@@ -575,7 +612,7 @@ describe("runMailboxMigrations", () => {
       connection: { search_path: "mbx_elsewhere" },
     });
     try {
-      await runMailboxMigrations(drizzle(client));
+      await applyMailboxMigrations(drizzle(client), "public");
       const found = await admin.unsafe(
         `SELECT to_regclass('mailbox.principal_mail') AS t,
                 to_regclass('mailbox.corbits_mailbox_migrations') AS l,
@@ -592,7 +629,7 @@ describe("runMailboxMigrations", () => {
 
   test("closing the handle it opened drains the pool", async () => {
     const { db, close } = createMailboxDb(TEST_DATABASE_URL);
-    await runMailboxMigrations(db);
+    await applyMailboxMigrations(db, "public");
     await close();
     // A closed pool refuses further work rather than hanging the process.
     expect(async () => {
@@ -601,7 +638,7 @@ describe("runMailboxMigrations", () => {
   });
 });
 
-describe("runMailboxMigrations under concurrent cold start", () => {
+describe("applyMailboxMigrations under concurrent cold start", () => {
   // `CREATE TABLE IF NOT EXISTS` is NOT race-safe: the existence check and the
   // pg_type insert are not atomic, so without an advisory lock the losers crash
   // with 23505 on (typname, typnamespace). Pre-creating the ledger only moves
@@ -610,7 +647,7 @@ describe("runMailboxMigrations under concurrent cold start", () => {
     await dropMailboxSchema();
     const runners = Array.from({ length: 4 }, () => handle());
     const results = await Promise.allSettled(
-      runners.map((r) => runMailboxMigrations(r.db)),
+      runners.map((r) => applyMailboxMigrations(r.db, "public")),
     );
     await Promise.all(runners.map((r) => r.client.end()));
 
@@ -635,12 +672,12 @@ describe("runMailboxMigrations under concurrent cold start", () => {
   test("a second wave against an already-migrated schema is a no-op for all", async () => {
     await dropMailboxSchema();
     const first = handle();
-    await runMailboxMigrations(first.db);
+    await applyMailboxMigrations(first.db, "public");
     await first.client.end();
 
     const runners = Array.from({ length: 3 }, () => handle());
     const results = await Promise.allSettled(
-      runners.map((r) => runMailboxMigrations(r.db)),
+      runners.map((r) => applyMailboxMigrations(r.db, "public")),
     );
     await Promise.all(runners.map((r) => r.client.end()));
     expect(results.every((r) => r.status === "fulfilled")).toBe(true);

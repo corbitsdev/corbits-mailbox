@@ -12,7 +12,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { sql } from "drizzle-orm";
-import { MIGRATIONS, runMailboxMigrations } from "./migrations.js";
+import { MIGRATIONS, applyMailboxMigrations } from "./migrations.js";
 import {
   expectedColumnTypes,
   SchemaTypeMismatchError,
@@ -29,7 +29,7 @@ afterAll(async () => {
   // Leave the schema rebuilt for whatever suite runs after this one — the
   // planted conflicting table has to go first, or the rebuild rejects too.
   await admin.unsafe(`DROP SCHEMA IF EXISTS "mailbox" CASCADE`);
-  await runMailboxMigrations(drizzle(admin));
+  await applyMailboxMigrations(drizzle(admin), "public");
   await admin.end();
 });
 
@@ -74,7 +74,7 @@ async function ledgerRows(schema: string): Promise<number> {
 }
 
 /**
- * The error `runMailboxMigrations` rejected with. A boot that SUCCEEDS is the
+ * The error `applyMailboxMigrations` rejected with. A boot that SUCCEEDS is the
  * failure every case below is written to catch, so it must not slip through as
  * an `undefined` that the assertions then read properties off.
  */
@@ -110,7 +110,7 @@ describe("expectedColumnTypes", () => {
 describe("boot against a host table this package did not create", () => {
   test("a fresh, correct database boots and records the migration", async () => {
     await inFreshSchema("mbx_check_ok", async ({ db }) => {
-      await runMailboxMigrations(db);
+      await applyMailboxMigrations(db, "public");
       expect(await ledgerRows("mailbox")).toBe(MIGRATIONS.length);
     });
   });
@@ -136,7 +136,7 @@ describe("boot against a host table this package did not create", () => {
           "refs" jsonb,
           "created_at" timestamptz NOT NULL DEFAULT now()
         )`);
-      const failure = await bootFailure(runMailboxMigrations(db));
+      const failure = await bootFailure(applyMailboxMigrations(db, "public"));
       expect(failure).toBeInstanceOf(SchemaTypeMismatchError);
       expect((failure as SchemaTypeMismatchError).mismatches).toEqual([
         "principal_mail.created_at is timestamp with time zone, " +
@@ -174,7 +174,7 @@ describe("boot against a host table this package did not create", () => {
           "refs" jsonb,
           "created_at" timestamp NOT NULL DEFAULT now()
         )`);
-      const failure = await bootFailure(runMailboxMigrations(db));
+      const failure = await bootFailure(applyMailboxMigrations(db, "public"));
       expect(failure).toBeInstanceOf(SchemaTypeMismatchError);
       expect((failure as SchemaTypeMismatchError).mismatches).toEqual([
         "principal_mail.subject is missing (expected text)",
@@ -199,13 +199,13 @@ describe("boot against a host table this package did not create", () => {
           "refs" jsonb,
           "created_at" timestamptz NOT NULL DEFAULT now()
         )`);
-      await expect(runMailboxMigrations(db)).rejects.toThrow(
+      await expect(applyMailboxMigrations(db, "public")).rejects.toThrow(
         SchemaTypeMismatchError,
       );
       // No "it already applied, skip it" shortcut on the second attempt: the
       // ledger is empty, so the check runs again and fails again. A guard that
       // only fires on the first boot is one a restart disables.
-      await expect(runMailboxMigrations(db)).rejects.toThrow(
+      await expect(applyMailboxMigrations(db, "public")).rejects.toThrow(
         SchemaTypeMismatchError,
       );
       expect(await ledgerRows(schema)).toBe(0);
