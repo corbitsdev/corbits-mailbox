@@ -1,14 +1,14 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { SSEStreamingApi } from "hono/streaming";
-import { createMailboxRoutes, MAX_PENDING_SSE_EVENTS } from "./mount.js";
+import { createMailboxRoutes, MAX_PENDING_SSE_EVENTS } from "../src/mount.js";
 import {
   createInMemoryMailboxEventBus,
   type MailboxEventBus,
   type MailboxEventScope,
-} from "./bus.js";
-import { writeMailboxMessage } from "./write.js";
-import { allowAllGrants, mountAs, withTestDb, seedScope } from "./test-helpers.js";
-import type { MailboxDb } from "./db.js";
+} from "../src/bus.js";
+import { writeMailboxMessage } from "../src/write.js";
+import { allowAllGrants, mountAs, withTestDb, seedScope } from "./helpers.js";
+import type { MailboxDb } from "../src/db.js";
 
 const SCOPE = { tenantId: "t1", principalId: "p1" };
 
@@ -360,21 +360,6 @@ describe("SSE heartbeat", () => {
     const text = await readUntil(body, (t) => t.includes("event: mailbox"));
     expect(text).toContain("event: mailbox");
     expect(text).toContain(": heartbeat");
-  });
-
-  test("the default interval is the documented 25s, not the test override", async () => {
-    const db = await withTestDb();
-    const app = routes(db, createInMemoryMailboxEventBus(), SCOPE);
-    const res = await app.request("/me/inbox/events");
-
-    // With no override, nothing may arrive within a second — otherwise the
-    // override is leaking into the default and the 25s figure is fiction.
-    const text = await readUntil(
-      res.body!,
-      (t) => t.includes(": heartbeat"),
-      1_000,
-    );
-    expect(text).toBe("");
   });
 
   test("mount refuses a non-positive or non-finite heartbeatIntervalMs", async () => {

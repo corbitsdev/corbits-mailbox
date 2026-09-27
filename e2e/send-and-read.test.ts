@@ -5,15 +5,15 @@ import {
   createInMemoryMailboxEventBus,
   createMailboxPersist,
 } from "../src/index.js";
-import { seedScope } from "../src/test-helpers.js";
 import {
+  seedScope,
   as,
   createTestApp,
   createTestDb,
   jsonAs,
   testTenant,
   type TestDb,
-} from "./lib/db-harness.js";
+} from "./helpers.js";
 
 const TENANT = testTenant("t1");
 

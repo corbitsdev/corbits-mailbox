@@ -5,9 +5,9 @@ import {
   createPrincipalMailboxStore,
   moveNativeMailboxMessage,
   openNativeMailboxStore,
-} from "./native-store.js";
-import { seedScope, withTestDb } from "./test-helpers.js";
-import type { MailboxDb } from "./db.js";
+} from "../src/native-store.js";
+import { seedScope, withTestDb } from "./helpers.js";
+import type { MailboxDb } from "../src/db.js";
 import { sql } from "drizzle-orm";
 
 const TENANT_ID = "tenant-native";

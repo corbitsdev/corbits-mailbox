@@ -1,10 +1,10 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import type { RequireGrant, TenantEnv } from "@intx/hub-api";
-import { createMailboxRoutes, type ResolvedPrincipal } from "./mount.js";
-import { createInMemoryMailboxEventBus } from "./bus.js";
-import { allowAllGrants, mountAs, withTestDb, seedScope } from "./test-helpers.js";
-import type { MailboxDb } from "./db.js";
+import { createMailboxRoutes, type ResolvedPrincipal } from "../src/mount.js";
+import { createInMemoryMailboxEventBus } from "../src/bus.js";
+import { allowAllGrants, mountAs, withTestDb, seedScope } from "./helpers.js";
+import type { MailboxDb } from "../src/db.js";
 
 let db: MailboxDb;
 

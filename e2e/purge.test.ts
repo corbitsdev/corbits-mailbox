@@ -4,11 +4,11 @@
 // done: everything for that tenant, nothing belonging to anyone else.
 import { beforeEach, describe, expect, test } from "bun:test";
 import { and, eq } from "drizzle-orm";
-import { purgeTenantMailbox, purgePrincipalMailbox } from "./purge.js";
-import { writeMailboxMessage } from "./write.js";
-import { principalMail } from "./schema.js";
-import { withTestDb, seedScope } from "./test-helpers.js";
-import type { MailboxDb } from "./db.js";
+import { purgeTenantMailbox, purgePrincipalMailbox } from "../src/purge.js";
+import { writeMailboxMessage } from "../src/write.js";
+import { principalMail } from "../src/schema.js";
+import { withTestDb, seedScope } from "./helpers.js";
+import type { MailboxDb } from "../src/db.js";
 
 let db: MailboxDb;
 
