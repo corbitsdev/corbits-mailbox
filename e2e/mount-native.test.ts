@@ -68,7 +68,9 @@ describe("GET /me/inbox", () => {
     expect(body1.messages).toHaveLength(2);
     expect(body1.nextCursor).toBeDefined();
 
-    const page2 = await app.request(`/me/inbox?limit=2&cursor=${body1.nextCursor}`);
+    const page2 = await app.request(
+      `/me/inbox?limit=2&cursor=${body1.nextCursor}`,
+    );
     const body2 = (await page2.json()) as { messages: { uid: number }[] };
     expect(body2.messages).toHaveLength(1);
     expect(body2.messages[0]!.uid).toBeLessThan(body1.messages[1]!.uid);
@@ -85,10 +87,12 @@ describe("read/unread", () => {
   test("read sets \\Seen, unread clears it", async () => {
     const uid = await seedMessage("Hi");
     const app = buildApp();
-    const readRes = await app.request(`/me/inbox/${uid}/read`, { method: "POST" });
+    const readRes = await app.request(`/me/inbox/${uid}/read`, {
+      method: "POST",
+    });
     expect(readRes.status).toBe(200);
 
-    const list = await (await app.request("/me/inbox")).json() as {
+    const list = (await (await app.request("/me/inbox")).json()) as {
       messages: { uid: number; flags: string[] }[];
     };
     expect(list.messages[0]!.flags).toContain("\\Seen");
@@ -97,7 +101,7 @@ describe("read/unread", () => {
       method: "POST",
     });
     expect(unreadRes.status).toBe(200);
-    const list2 = await (await app.request("/me/inbox")).json() as {
+    const list2 = (await (await app.request("/me/inbox")).json()) as {
       messages: { uid: number; flags: string[] }[];
     };
     expect(list2.messages[0]!.flags).not.toContain("\\Seen");
@@ -163,7 +167,11 @@ describe("GET /me/inbox/threads/:rootUid", () => {
     const res = await app.request(`/me/inbox/threads/${uid}`);
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
-      thread: { uid: number; envelope: { subject: string }; children: unknown[] };
+      thread: {
+        uid: number;
+        envelope: { subject: string };
+        children: unknown[];
+      };
     };
     expect(body.thread.uid).toBe(uid);
     expect(body.thread.envelope.subject).toBe("Solo");
@@ -186,13 +194,13 @@ describe("archive/trash/restore", () => {
     });
     expect(res.status).toBe(200);
 
-    const inbox = await (await app.request("/me/inbox")).json() as {
+    const inbox = (await (await app.request("/me/inbox")).json()) as {
       messages: unknown[];
     };
     expect(inbox.messages).toHaveLength(0);
-    const archive = await (
+    const archive = (await (
       await app.request("/me/inbox?folder=Archive")
-    ).json() as { messages: unknown[] };
+    ).json()) as { messages: unknown[] };
     expect(archive.messages).toHaveLength(1);
   });
 
@@ -200,9 +208,9 @@ describe("archive/trash/restore", () => {
     const uid = await seedMessage("Round trip");
     const app = buildApp();
     await app.request(`/me/inbox/${uid}/archive`, { method: "POST" });
-    const archived = await (
+    const archived = (await (
       await app.request("/me/inbox?folder=Archive")
-    ).json() as { messages: { uid: number }[] };
+    ).json()) as { messages: { uid: number }[] };
     const archivedUid = archived.messages[0]!.uid;
 
     const restoreRes = await app.request(
@@ -210,7 +218,7 @@ describe("archive/trash/restore", () => {
       { method: "POST" },
     );
     expect(restoreRes.status).toBe(200);
-    const inbox = await (await app.request("/me/inbox")).json() as {
+    const inbox = (await (await app.request("/me/inbox")).json()) as {
       messages: unknown[];
     };
     expect(inbox.messages).toHaveLength(1);

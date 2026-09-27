@@ -8,7 +8,9 @@ import {
 
 describe("assertMailboxScope / assertMailboxTenantId", () => {
   test("accepts a non-blank scope", () => {
-    expect(() => assertMailboxScope({ tenantId: "t1", principalId: "p1" })).not.toThrow();
+    expect(() =>
+      assertMailboxScope({ tenantId: "t1", principalId: "p1" }),
+    ).not.toThrow();
   });
 
   test("rejects a blank tenantId or principalId", () => {

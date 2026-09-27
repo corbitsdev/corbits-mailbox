@@ -4,7 +4,10 @@ import {
   deliverInboxItems,
   MAX_MAILBOX_FRAME_BYTES,
 } from "../src/write.js";
-import { createInMemoryMailboxEventBus, type MailboxEvent } from "../src/bus.js";
+import {
+  createInMemoryMailboxEventBus,
+  type MailboxEvent,
+} from "../src/bus.js";
 import { openNativeMailboxStore } from "../src/native-store.js";
 import { withTestDb, seedScope } from "./helpers.js";
 import type { MailboxDb } from "../src/db.js";
@@ -97,9 +100,9 @@ describe("writeMailboxMessage", () => {
 
   test("a body/subject at the frame-byte cap is refused before any append", async () => {
     const huge = "a".repeat(MAX_MAILBOX_FRAME_BYTES);
-    await expect(
-      writeMailboxMessage(db, args({ body: huge })),
-    ).rejects.toThrow(RangeError);
+    await expect(writeMailboxMessage(db, args({ body: huge }))).rejects.toThrow(
+      RangeError,
+    );
     const store = await openNativeMailboxStore(db, {
       tenantId: "t1",
       principalId: "p1",
@@ -126,7 +129,9 @@ describe("writeMailboxMessage", () => {
 });
 
 describe("deliverInboxItems", () => {
-  function item(over: Partial<Parameters<typeof deliverInboxItems>[1][number]> = {}) {
+  function item(
+    over: Partial<Parameters<typeof deliverInboxItems>[1][number]> = {},
+  ) {
     return {
       tenantId: "t1",
       principalId: "p1",

@@ -89,6 +89,7 @@ new; the list below is what the surface consists of rather than what changed.
   Interchange's `session_mail` has no read/archive/trash layer at all, because
   agents don't triage their inbox. That layer is genuinely ours to own — it just
   does not belong on the mail row.
+
 - **No closed vocabulary anywhere in the package.** `mountMailbox` requires
   `vocabulary: { priorities, statuses }` from the host, with no default:
   `priorities` is ordered most-urgent-first and the `sort=priority` ranking

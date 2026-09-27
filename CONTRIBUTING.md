@@ -94,7 +94,7 @@ outbound frame; it does both writes.
 ## Pull requests
 
 - Keep commits focused, and keep the diff to the change you are describing.
-- Explain *why* in the commit message; the code already says what.
+- Explain _why_ in the commit message; the code already says what.
 - CI must be green: typecheck, unit, e2e, build,
   and a Node consumer smoke test that installs the packed tarball.
 - Contributions are accepted under the repository's LGPL-2.1-only licence.
