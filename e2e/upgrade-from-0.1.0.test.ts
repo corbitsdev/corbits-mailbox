@@ -4,6 +4,7 @@ import {
   buildMailFrame,
   createMailboxPersist,
   moveNativeMailboxMessage,
+  openNativeMailboxStore as openPublishedStore,
   runMailboxMigrations as runPublishedMigrations,
 } from "@corbits/mailbox-0.1.0";
 import { runMailboxMigrations, type MailboxDb } from "../src/index.js";
@@ -23,15 +24,17 @@ afterAll(async () => {
 type Snapshot = {
   mail: { folder: string; flags: string[] }[];
   state: unknown[];
+  columns: string[];
+  indexes: string[];
 };
 
 async function snapshot(db: MailboxDb): Promise<Snapshot> {
   const [row] = await db.execute<{ snapshot: Snapshot }>(sql`
     SELECT jsonb_build_object(
-      'mail', (SELECT jsonb_agg(to_jsonb(m) ORDER BY m."id") FROM "mailbox"."principal_mail" m),
+      'mail', (SELECT jsonb_agg(to_jsonb(m) - 'sender_address' ORDER BY m."id") FROM "mailbox"."principal_mail" m),
       'state', (SELECT jsonb_agg(to_jsonb(s) ORDER BY s."tenant_id", s."principal_id", s."folder")
                   FROM "mailbox"."mailbox_state" s),
-      'columns', (SELECT jsonb_agg(jsonb_build_array(table_name, column_name, data_type, is_nullable, column_default)
+      'columns', (SELECT jsonb_agg(concat_ws(' ', table_name, column_name, data_type, is_nullable, column_default)
                            ORDER BY table_name, column_name)
                     FROM information_schema.columns
                     WHERE table_schema = 'mailbox' AND table_name <> 'corbits_mailbox_migrations'),
@@ -102,8 +105,73 @@ test("a database migrated by the published 0.1.0 runner upgrades with every row 
 
   await runMailboxMigrations(config, { schema: "public" });
   expect(await ledgerExists(db)).toBe(false);
-  expect(await snapshot(db)).toEqual(before);
+  const after = await snapshot(db);
+  // 0008 adds sender_address, backfilled from the From, and the uid and
+  // Message-ID unique indexes, and nothing else.
+  expect(after.mail).toEqual(before.mail);
+  expect(after.state).toEqual(before.state);
+  expect(after.columns.filter((c) => !before.columns.includes(c))).toEqual([
+    "principal_mail sender_address text NO ''::text",
+  ]);
+  expect(before.columns.filter((c) => !after.columns.includes(c))).toEqual([]);
+  const senders = await db.execute<{ same: boolean }>(
+    sql`SELECT "sender_address" = "from_address" AS "same" FROM "mailbox"."principal_mail"`,
+  );
+  expect(senders.map((r) => r.same)).toEqual([true, true]);
+  expect(after.indexes.filter((def) => !before.indexes.includes(def))).toEqual([
+    "CREATE UNIQUE INDEX principal_mail_folder_message_id_sender_address_idx ON mailbox.principal_mail USING btree (tenant_id, principal_id, folder, message_id, sender_address) WHERE (message_id IS NOT NULL)",
+    "CREATE UNIQUE INDEX principal_mail_tenant_id_principal_id_folder_uid_idx ON mailbox.principal_mail USING btree (tenant_id, principal_id, folder, uid)",
+  ]);
 
   await runMailboxMigrations(config, { schema: "public" });
-  expect(await snapshot(db)).toEqual(before);
+  expect(await snapshot(db)).toEqual(after);
+});
+
+test("a 0.1.0 database whose racing appends left duplicate uids and uid_next behind upgrades", async () => {
+  const { db, config, close } = await createEmptyTestDb();
+  try {
+    await runPublishedMigrations(db);
+    await seedScope(db, "t2", "carol");
+    const scope = { tenantId: "t2", principalId: "carol", folder: "INBOX" };
+    const envelope = (messageId: string) => ({
+      messageId,
+      from: "f@t2.example",
+      to: ["carol@t2.example"],
+      subject: messageId,
+      date: new Date(),
+      inReplyTo: undefined,
+      references: [],
+      interchangeType: undefined,
+      interchangeCorrelationId: undefined,
+    });
+    // Two 0.1.0 stores open at uid_next 1: one appends uids 1-3, then the other
+    // appends uid 1 and writes uid_next back to 2.
+    const first = await openPublishedStore(db, scope);
+    const second = await openPublishedStore(db, scope);
+    for (const id of ["<a1@x>", "<a2@x>", "<a3@x>"]) {
+      first.append(new Uint8Array([1]), envelope(id), []);
+    }
+    await first.settled;
+    second.append(new Uint8Array([1]), envelope("<b1@x>"), []);
+    await second.settled;
+
+    await runMailboxMigrations(config, { schema: "public" });
+
+    const rows = await db.execute<{ message_id: string; uid: string }>(
+      sql`SELECT "message_id", "uid" FROM "mailbox"."principal_mail"
+        WHERE "tenant_id" = 't2' ORDER BY "uid"`,
+    );
+    expect(rows.map((r) => [r.message_id, Number(r.uid)])).toEqual([
+      ["<a1@x>", 1],
+      ["<a2@x>", 2],
+      ["<a3@x>", 3],
+      ["<b1@x>", 4],
+    ]);
+    const [state] = await db.execute<{ uid_next: string }>(
+      sql`SELECT "uid_next" FROM "mailbox"."mailbox_state" WHERE "tenant_id" = 't2'`,
+    );
+    expect(Number(state!.uid_next)).toBe(5);
+  } finally {
+    await close();
+  }
 });

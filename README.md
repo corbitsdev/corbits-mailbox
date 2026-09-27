@@ -116,6 +116,8 @@ Takes the same arguments as `@intx/db`'s `runMigrations`. `schema` holds the hos
 | `assertMailboxScope`, `assertMailboxTenantId`, `assertMailboxFrameBytes`, `MailboxScopeIdsSchema` | Scope and frame-size checks the write paths run.                                             |
 | `MAX_MAILBOX_PAGE_LIMIT`, `MAX_MAILBOX_RECIPIENTS`, `MAX_MAILBOX_FRAME_BYTES`                     | Page size (200), recipients per frame, and frame size (1 MiB) limits.                        |
 
+The interface's synchronous `append` must return a uid before it reaches Postgres, so it cannot allocate one atomically and two stores appending at once can lose a write. Write with `appendMessage`, `writeMailboxMessage` or `createMailboxPersist` instead.
+
 ## Using with Interchange
 
 The host's tenant middleware sets `tenant` and `principal` on the context; the routes read the caller from there, the same principal `requireGrant` authorizes. Grant each person `mailbox:*` with the `read`, `create` and `manage` actions they need.

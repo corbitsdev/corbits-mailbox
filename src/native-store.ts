@@ -1,4 +1,4 @@
-import { sql } from "drizzle-orm";
+import { sql, TransactionRollbackError } from "drizzle-orm";
 import type {
   MailboxStore,
   StoredEnvelope,
@@ -41,9 +41,13 @@ function pgTextArrayLiteral(items: readonly string[]): string {
  * other at the database. Call `await store.settled` before trusting a write
  * has actually landed (every test in `native-store.test.ts` does).
  *
- * `settled` never rejects, so a caller that must fail when its write fails
- * uses `appendMessage`, which resolves only once that append has landed and
- * rolls the in-memory mirror back when it has not.
+ * `settled` never rejects, and `append` must return its uid synchronously, so
+ * it takes the uid from this instance's counter and cannot allocate it
+ * atomically: two instances appending at once collide on the unique uid index
+ * and the later write is lost. Hosts write through `appendMessage`,
+ * `writeMailboxMessage` or `createMailboxPersist` instead, which allocate the
+ * uid from `mailbox_state` inside the insert's transaction and reject when the
+ * insert fails.
  */
 export type NativeMailboxStore = MailboxStore & {
   readonly tenantId: string;
@@ -51,12 +55,18 @@ export type NativeMailboxStore = MailboxStore & {
   readonly folder: string;
   /** Resolves once every write queued so far has been applied to Postgres. */
   readonly settled: Promise<void>;
-  /** `append`, resolving once the row has landed; rejects, rolled back, when it does not. */
+  /**
+   * Appends with a uid allocated atomically in Postgres. Resolves to that uid
+   * once the row has landed, or to `null` when this mailbox already holds the
+   * envelope's Message-ID from `sender`, the host-authorized envelope sender.
+   * Rejects when the insert fails.
+   */
   appendMessage(
     raw: Uint8Array,
     envelope: StoredEnvelope,
     flags: string[],
-  ): Promise<number>;
+    sender: string,
+  ): Promise<number | null>;
 };
 
 // Postgres text and jsonb refuse U+0000, so a NUL in any cached header or
@@ -204,9 +214,12 @@ export async function openNativeMailboxStore(
   // caller that needs to observe a failure awaits the promise `enqueue`
   // returns, not `store.settled`.
   let settled: Promise<void> = Promise.resolve();
-  function enqueue(work: () => Promise<unknown>): Promise<void> {
-    const done = settled.then(work).then(() => undefined);
-    settled = done.catch(() => undefined);
+  function enqueue<T>(work: () => Promise<T>): Promise<T> {
+    const done = settled.then(work);
+    settled = done.then(
+      () => undefined,
+      () => undefined,
+    );
     return done;
   }
 
@@ -218,7 +231,7 @@ export async function openNativeMailboxStore(
     return msg;
   }
 
-  function appendLocal(
+  function append(
     raw: Uint8Array,
     rawEnvelope: StoredEnvelope,
     flags: string[],
@@ -239,17 +252,17 @@ export async function openNativeMailboxStore(
     messages.push(message);
     byUid.set(uid, message);
 
-    const written = enqueue(() =>
+    enqueue(() =>
       db.transaction(async (tx) => {
         await tx.execute(sql`
           INSERT INTO "mailbox"."principal_mail"
             ("id", "tenant_id", "principal_id", "address", "direction", "raw",
-             "subject", "from_address", "message_id", "in_reply_to", "references",
-             "to_addresses", "created_at", "folder", "uid", "modseq", "flags")
+             "subject", "from_address", "sender_address", "message_id", "in_reply_to",
+             "references", "to_addresses", "created_at", "folder", "uid", "modseq", "flags")
           VALUES (
             ${rowId}, ${tenantId}, ${principalId}, ${envelope.from || envelope.to[0] || ""},
             'inbound', ${Buffer.from(raw)}, ${envelope.subject}, ${envelope.from},
-            ${envelope.messageId || null}, ${envelope.inReplyTo ?? null},
+            ${envelope.from}, ${envelope.messageId || null}, ${envelope.inReplyTo ?? null},
             ${envelope.references.length > 0 ? JSON.stringify(envelope.references) : null},
             ${envelope.to.length > 0 ? JSON.stringify(envelope.to) : null},
             ${envelope.date.toISOString()}, ${folder}, ${uid}, ${modseq}, ${pgTextArrayLiteral(flags)}::text[]
@@ -263,7 +276,7 @@ export async function openNativeMailboxStore(
         `);
       }),
     );
-    return { uid, modseq, message, written };
+    return uid;
   }
 
   const store: NativeMailboxStore = {
@@ -284,25 +297,68 @@ export async function openNativeMailboxStore(
       return settled;
     },
 
-    append(raw, envelope, flags) {
-      return appendLocal(raw, envelope, flags).uid;
-    },
+    append,
 
-    async appendMessage(raw, envelope, flags) {
-      const { uid, modseq, message, written } = appendLocal(
-        raw,
-        envelope,
-        flags,
-      );
-      try {
-        await written;
-      } catch (err) {
-        messages.splice(messages.indexOf(message), 1);
-        byUid.delete(uid);
-        if (state.uidNext === uid + 1) state.uidNext = uid;
-        if (state.highestModSeq === modseq) state.highestModSeq = modseq - 1;
+    async appendMessage(raw, rawEnvelope, flags, sender) {
+      const envelope = cleanEnvelope(rawEnvelope);
+      const rowId = crypto.randomUUID();
+      const landed = await enqueue(() =>
+        db.transaction(async (tx) => {
+          const [counters] = await tx.execute<{
+            uid: string | number;
+            modseq: string | number;
+          }>(sql`
+            UPDATE "mailbox"."mailbox_state"
+            SET "uid_next" = "uid_next" + 1, "highest_modseq" = "highest_modseq" + 1
+            WHERE "tenant_id" = ${tenantId} AND "principal_id" = ${principalId} AND "folder" = ${folder}
+            RETURNING "uid_next" - 1 AS "uid", "highest_modseq" AS "modseq"
+          `);
+          const uid = Number(counters!.uid);
+          const modseq = Number(counters!.modseq);
+          // The mailbox_state row lock taken above serializes appends to this
+          // mailbox, so a concurrent writer with the same Message-ID has
+          // either committed (and this conflicts) or waits behind this one.
+          const inserted = await tx.execute(sql`
+            INSERT INTO "mailbox"."principal_mail"
+              ("id", "tenant_id", "principal_id", "address", "direction", "raw",
+               "subject", "from_address", "sender_address", "message_id", "in_reply_to",
+               "references", "to_addresses", "created_at", "folder", "uid", "modseq", "flags")
+            VALUES (
+              ${rowId}, ${tenantId}, ${principalId}, ${envelope.from || envelope.to[0] || ""},
+              'inbound', ${Buffer.from(raw)}, ${envelope.subject}, ${envelope.from},
+              ${withoutNul(sender)}, ${envelope.messageId || null}, ${envelope.inReplyTo ?? null},
+              ${envelope.references.length > 0 ? JSON.stringify(envelope.references) : null},
+              ${envelope.to.length > 0 ? JSON.stringify(envelope.to) : null},
+              ${envelope.date.toISOString()}, ${folder}, ${uid}, ${modseq}, ${pgTextArrayLiteral(flags)}::text[]
+            )
+            ON CONFLICT ("tenant_id", "principal_id", "folder", "message_id", "sender_address")
+              WHERE "message_id" IS NOT NULL
+              DO NOTHING
+            RETURNING "id"
+          `);
+          if (inserted.length === 0) {
+            tx.rollback();
+          }
+          return { uid, modseq };
+        }),
+      ).catch((err: unknown) => {
+        if (err instanceof TransactionRollbackError) return null;
         throw err;
-      }
+      });
+      if (landed === null) return null;
+
+      const { uid, modseq } = landed;
+      state.uidNext = Math.max(state.uidNext, uid + 1);
+      state.highestModSeq = Math.max(state.highestModSeq, modseq);
+      const message: StoredMessage & { rowId: string } = {
+        rowId,
+        uid,
+        modseq,
+        flags: new Set(flags),
+        envelope,
+      };
+      messages.push(message);
+      byUid.set(uid, message);
       return uid;
     },
 

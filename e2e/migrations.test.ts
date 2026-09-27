@@ -85,6 +85,7 @@ describe("runMailboxMigrations", () => {
         "raw",
         "references",
         "refs",
+        "sender_address",
         "subject",
         "tenant_id",
         "to_addresses",
@@ -109,10 +110,12 @@ describe("runMailboxMigrations", () => {
       // filter, and the thread's own oldest-first keyset.
       // The schema.ts parity suite below holds schema.ts to this same list.
       expect(mailIndexes.map((i) => i.indexname)).toEqual([
+        "principal_mail_folder_message_id_sender_address_idx",
         "principal_mail_pkey",
         "principal_mail_refs_idx",
         "principal_mail_tenant_id_principal_id_created_at_id_asc_idx",
         "principal_mail_tenant_id_principal_id_created_at_id_idx",
+        "principal_mail_tenant_id_principal_id_folder_uid_idx",
         "principal_mail_tenant_id_principal_id_message_id_idx",
         "principal_mail_tenant_id_principal_id_message_key_idx",
       ]);
@@ -151,6 +154,80 @@ describe("runMailboxMigrations", () => {
       const [ledger] = await admin<{ exists: boolean }[]>`
         SELECT to_regclass('"mailbox"."corbits_mailbox_migrations"') IS NOT NULL AS exists`;
       expect(ledger!.exists).toBe(true);
+    });
+  });
+
+  test("0008 renumbers duplicate uids and clears repeated Message-IDs without dropping a row", async () => {
+    await fromEmpty(async ({ db }) => {
+      await applyMailboxMigrations(db, "public");
+      await admin.unsafe(`
+        DROP INDEX "mailbox"."principal_mail_tenant_id_principal_id_folder_uid_idx";
+        DROP INDEX "mailbox"."principal_mail_folder_message_id_sender_address_idx";
+        INSERT INTO "tenant" VALUES ('t8') ON CONFLICT DO NOTHING;
+        INSERT INTO "principal" VALUES ('p8', 't8', 'p8') ON CONFLICT DO NOTHING;
+        INSERT INTO "mailbox"."mailbox_state" VALUES ('t8', 'p8', 'INBOX', 1, 3, 3);
+        INSERT INTO "mailbox"."principal_mail"
+          ("id", "tenant_id", "principal_id", "address", "direction", "raw",
+           "message_id", "sender_address", "created_at", "uid", "modseq")
+        VALUES
+          ('a', 't8', 'p8', 'x', 'inbound', '\\x00', '<m@x>', 'f@x', '2026-01-01', 1, 1),
+          ('b', 't8', 'p8', 'x', 'inbound', '\\x00', '<m@x>', 'f@x', '2026-01-02', 2, 2),
+          ('c', 't8', 'p8', 'x', 'inbound', '\\x00', '<n@x>', 'f@x', '2026-01-03', 2, 3),
+          ('d', 't8', 'p8', 'x', 'inbound', '\\x00', NULL, 'f@x', '2026-01-04', 2, 3),
+          ('e', 't8', 'p8', 'x', 'inbound', '\\x00', '<m@x>', 'g@x', '2026-01-05', 5, 4);
+      `);
+
+      await applyMailboxMigrations(db, "public");
+
+      const rows = await admin<
+        { id: string; uid: string; message_id: string | null }[]
+      >`SELECT "id", "uid", "message_id" FROM "mailbox"."principal_mail"
+        WHERE "tenant_id" = 't8' ORDER BY "id"`;
+      expect(rows.map((r) => [r.id, Number(r.uid), r.message_id])).toEqual([
+        ["a", 1, "<m@x>"],
+        ["b", 2, null],
+        ["c", 6, "<n@x>"],
+        ["d", 7, null],
+        ["e", 5, "<m@x>"],
+      ]);
+      const [state] = await admin<{ uid_next: string }[]>`
+        SELECT "uid_next" FROM "mailbox"."mailbox_state" WHERE "tenant_id" = 't8'`;
+      expect(Number(state!.uid_next)).toBe(8);
+    });
+  });
+
+  test("0008 renumbers a mailbox with no mailbox_state row and creates one past its uids", async () => {
+    await fromEmpty(async ({ db }) => {
+      await applyMailboxMigrations(db, "public");
+      await admin.unsafe(`
+        DROP INDEX "mailbox"."principal_mail_tenant_id_principal_id_folder_uid_idx";
+        INSERT INTO "tenant" VALUES ('t8') ON CONFLICT DO NOTHING;
+        INSERT INTO "principal" VALUES ('p8', 't8', 'p8') ON CONFLICT DO NOTHING;
+        INSERT INTO "mailbox"."principal_mail"
+          ("id", "tenant_id", "principal_id", "address", "direction", "raw",
+           "sender_address", "created_at", "folder", "uid", "modseq")
+        VALUES
+          ('a', 't8', 'p8', 'x', 'inbound', '\\x00', 'f@x', '2026-01-01', 'Archive', 1, 1),
+          ('b', 't8', 'p8', 'x', 'inbound', '\\x00', 'f@x', '2026-01-02', 'Archive', 1, 2),
+          ('c', 't8', 'p8', 'x', 'inbound', '\\x00', 'f@x', '2026-01-03', 'Archive', 2, 3);
+      `);
+
+      await applyMailboxMigrations(db, "public");
+
+      const rows = await admin<{ id: string; uid: string }[]>`
+        SELECT "id", "uid" FROM "mailbox"."principal_mail"
+        WHERE "tenant_id" = 't8' ORDER BY "id"`;
+      expect(rows.map((r) => [r.id, Number(r.uid)])).toEqual([
+        ["a", 1],
+        ["b", 3],
+        ["c", 2],
+      ]);
+      const state = await admin<{ uid_next: string; highest_modseq: string }[]>`
+        SELECT "uid_next", "highest_modseq" FROM "mailbox"."mailbox_state"
+        WHERE "tenant_id" = 't8' AND "folder" = 'Archive'`;
+      expect(
+        state.map((r) => [Number(r.uid_next), Number(r.highest_modseq)]),
+      ).toEqual([[4, 3]]);
     });
   });
 

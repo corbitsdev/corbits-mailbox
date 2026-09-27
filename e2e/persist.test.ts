@@ -599,3 +599,33 @@ describe("frame size and recipient hard caps", () => {
     expect(calls).toHaveLength(2);
   });
 });
+
+describe("Message-ID dedupe", () => {
+  test("keys on the authorized envelope sender, not the From header", async () => {
+    const persist = createMailboxPersist(db, {
+      upstream: async () => undefined,
+      authorizeSender: () => ACTIVE,
+    });
+    // A forged From reusing SENDER's Message-ID from another envelope sender
+    // lands first, and SENDER's own mail still delivers.
+    await persist(args({ senderAddress: "intruder@acme.example" }));
+    await persist(args());
+    // A retry from SENDER with a reformatted From is still a duplicate.
+    await persist(
+      args({
+        raw: buildMailFrame({
+          from: `Heartbeat <${SENDER}>`,
+          to: "usr_user-1@acme.example",
+          subject: "Run finished",
+          body: "Body",
+          messageId: "<fixed@acme.example>",
+        }),
+      }),
+    );
+    const rows = await rowsFor("acme", "user-1");
+    expect(rows.map((r) => r.senderAddress).sort()).toEqual([
+      SENDER,
+      "intruder@acme.example",
+    ]);
+  });
+});

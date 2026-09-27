@@ -102,7 +102,7 @@ describe("a refused append", () => {
       interchangeCorrelationId: undefined,
     };
     await expect(
-      store.appendMessage(new Uint8Array([1]), envelope, []),
+      store.appendMessage(new Uint8Array([1]), envelope, [], envelope.from),
     ).rejects.toThrow();
     expect(store.uidNext).toBe(1);
     expect(store.highestModSeq).toBe(0);

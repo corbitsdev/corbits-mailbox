@@ -527,7 +527,10 @@ export function createMailboxRoutes(
           interchangeCorrelationId: undefined,
         },
         [],
+        fromAddress,
       );
+      // A freshly minted Message-ID cannot already be in Sent.
+      if (uid === null) throw new Error(`Sent already holds ${messageId}`);
       publish(resolved, `Sent:${uid}`, "create");
 
       await deliver({ raw, from: fromAddress, to: parsed.to, messageId });
