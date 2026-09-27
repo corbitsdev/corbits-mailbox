@@ -1,7 +1,8 @@
-import type { Context, Env, Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
 import { describeRoute } from "hono-openapi";
 import { type } from "arktype";
+import type { RequireGrant, TenantEnv } from "@intx/hub-api";
 import { getLogger } from "@intx/log";
 import { executeSearch, executeThread } from "@intx/mailbox";
 import type { Thread } from "@intx/types/runtime";
@@ -28,12 +29,11 @@ export type OutgoingMailboxMessage = {
   messageId: string;
 };
 
-export type MountMailboxOpts = {
+export type CreateMailboxRoutesDeps = {
   db: MailboxDb;
   bus: MailboxEventBus;
-  resolvePrincipal: (
-    ctx: unknown,
-  ) => Promise<ResolvedPrincipal | null> | ResolvedPrincipal | null;
+  /** `mailbox:*` `read` for reads, `create` for send, `manage` for flag/move. */
+  requireGrant: RequireGrant;
   /**
    * SSE keep-alive period. Defaults to 25s — under the 30s idle timeout most
    * proxies default to.
@@ -114,12 +114,16 @@ function parseUid(raw: string): number | null {
 }
 
 const TAGS = ["mailbox"];
-const ID_PARAM = {
-  name: "uid",
-  in: "path" as const,
-  required: true,
-  schema: { type: "integer" as const },
-};
+function uidParam(name: string) {
+  return {
+    name,
+    in: "path" as const,
+    required: true,
+    schema: { type: "integer" as const },
+  };
+}
+
+const ID_PARAM = uidParam("uid");
 
 /**
  * One item of `GET /me/inbox`: `@intx/mailbox`'s `executeSearch`'s ref, plus the
@@ -157,17 +161,20 @@ type MailboxThreadNode = {
 
 function enrichThread(store: NativeMailboxStore, node: Thread): MailboxThreadNode {
   const message = store.find(node.ref.uid);
+  if (!message) {
+    throw new Error(`thread node uid ${node.ref.uid} is not in the store`);
+  }
   return {
     uid: node.ref.uid,
-    flags: message ? [...message.flags] : [],
+    flags: [...message.flags],
     envelope: {
-      messageId: message?.envelope.messageId ?? "",
-      from: message?.envelope.from ?? "",
-      to: message?.envelope.to ?? [],
-      subject: message?.envelope.subject ?? "",
-      date: new Date(message?.envelope.date ?? 0).toISOString(),
-      inReplyTo: message?.envelope.inReplyTo,
-      references: message?.envelope.references ?? [],
+      messageId: message.envelope.messageId,
+      from: message.envelope.from,
+      to: message.envelope.to,
+      subject: message.envelope.subject,
+      date: new Date(message.envelope.date).toISOString(),
+      inReplyTo: message.envelope.inReplyTo,
+      references: message.envelope.references,
     },
     children: node.children.map((child) => enrichThread(store, child)),
   };
@@ -185,31 +192,46 @@ const MOVE_VERBS = [
 ] as const;
 
 /**
- * Mount the mailbox routes onto a host Hono app under `/me/inbox*`.
+ * Whose mailbox this request reads: the `tenant` and `principal` the host's
+ * tenant middleware set, the same principal `requireGrant` authorizes.
+ */
+function resolvePrincipal(c: Context<TenantEnv>): ResolvedPrincipal | null {
+  const tenantId = c.get("tenant")?.id;
+  const principalId = c.get("principal")?.id;
+  return tenantId && principalId ? { tenantId, principalId } : null;
+}
+
+function inFolder(
+  scope: ResolvedPrincipal,
+  folder: string,
+): ResolvedPrincipal & { folder: string } {
+  return { tenantId: scope.tenantId, principalId: scope.principalId, folder };
+}
+
+/**
+ * The mailbox routes under `/me/inbox*`, as a sub-app the host mounts with
+ * `app.route`.
  *
  * This library exists ONLY to give human principals a native Interchange
  * mailbox — list, read/unread, archive/trash/restore, and a live SSE stream.
  * Every route is a thin wrapper over `NativeMailboxStore` and
  * `@intx/mailbox`'s `executeSearch`.
  *
- * "No-member asymmetry" is intentional, spec'd behavior: when
- * `resolvePrincipal` yields no principal, list returns an EMPTY result (200)
- * — a caller with no mailbox identity simply sees an empty inbox — while
- * events and mutations return 403, since those operate on (or stream) a
- * specific identity that does not exist.
+ * Every route returns 403 when the context carries no principal.
  */
-export function mountMailbox<E extends Env>(
-  app: Hono<E>,
-  opts: MountMailboxOpts,
-): Hono<E> {
-  const { db, bus, resolvePrincipal, senderAddressFor, deliver } = opts;
+export function createMailboxRoutes(
+  deps: CreateMailboxRoutesDeps,
+): Hono<TenantEnv> {
+  const { db, bus, requireGrant, senderAddressFor, deliver } = deps;
   const heartbeatIntervalMs =
-    opts.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
+    deps.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
   if (!Number.isFinite(heartbeatIntervalMs) || heartbeatIntervalMs <= 0) {
     throw new RangeError(
       "mailbox heartbeatIntervalMs must be a finite positive number",
     );
   }
+
+  const app = new Hono<TenantEnv>();
 
   function publish(
     scope: ResolvedPrincipal,
@@ -221,13 +243,13 @@ export function mountMailbox<E extends Env>(
 
   app.get(
     "/me/inbox",
+    requireGrant("mailbox:*", "read"),
     describeRoute({
       tags: TAGS,
       summary: "List the caller's inbox",
       description:
         "Newest first, keyset-paginated over the native mailbox store's uid " +
-        "counter. With no resolvable principalId this returns an empty list, " +
-        "not a 403.",
+        "counter.",
       parameters: [
         {
           name: "folder",
@@ -263,10 +285,10 @@ export function mountMailbox<E extends Env>(
       const parsedCursor = parseCursor(c.req.query("cursor"));
       if ("error" in parsedCursor) return c.json({ error: parsedCursor.error }, 400);
 
-      const resolved = await resolvePrincipal(c);
-      if (!resolved) return c.json({ messages: [] });
+      const resolved = resolvePrincipal(c);
+      if (!resolved) return c.json({ error: "No resolvable principalId" }, 403);
 
-      const store = await openNativeMailboxStore(db, { ...resolved, folder });
+      const store = await openNativeMailboxStore(db, inFolder(resolved, folder));
       // No query predicate: `executeSearch` returns every ref, in store order
       // (uid ascending, since `append` only ever grows uid). Reversed for
       // newest-first, then paged with a plain uid keyset.
@@ -307,14 +329,14 @@ export function mountMailbox<E extends Env>(
 
   app.get(
     "/me/inbox/threads",
+    requireGrant("mailbox:*", "read"),
     describeRoute({
       tags: TAGS,
       summary: "The caller's inbox as threads",
       description:
         "`@intx/mailbox`'s `executeThread` (REFERENCES algorithm) run over the " +
         "folder's native store — roots plus children, each ref carrying the " +
-        "same envelope fields `GET /me/inbox` returns. With no resolvable " +
-        "principalId this returns an empty list, not a 403.",
+        "same envelope fields `GET /me/inbox` returns.",
       parameters: [
         {
           name: "folder",
@@ -334,10 +356,10 @@ export function mountMailbox<E extends Env>(
       if (!isListFolder(folder)) {
         return c.json({ error: "invalid folder" }, 400);
       }
-      const resolved = await resolvePrincipal(c);
-      if (!resolved) return c.json({ threads: [] });
+      const resolved = resolvePrincipal(c);
+      if (!resolved) return c.json({ error: "No resolvable principalId" }, 403);
 
-      const store = await openNativeMailboxStore(db, { ...resolved, folder });
+      const store = await openNativeMailboxStore(db, inFolder(resolved, folder));
       const threads = await executeThread(folder, store, "references");
       return c.json({
         threads: threads.map((thread) => enrichThread(store, thread)),
@@ -347,11 +369,12 @@ export function mountMailbox<E extends Env>(
 
   app.get(
     "/me/inbox/threads/:rootUid",
+    requireGrant("mailbox:*", "read"),
     describeRoute({
       tags: TAGS,
       summary: "One thread, rooted at the given uid",
       parameters: [
-        { ...ID_PARAM, name: "rootUid" },
+        uidParam("rootUid"),
         {
           name: "folder",
           in: "query",
@@ -376,10 +399,10 @@ export function mountMailbox<E extends Env>(
       if (!isListFolder(folder)) {
         return c.json({ error: "invalid folder" }, 400);
       }
-      const resolved = await resolvePrincipal(c);
+      const resolved = resolvePrincipal(c);
       if (!resolved) return c.json({ error: "No resolvable principalId" }, 403);
 
-      const store = await openNativeMailboxStore(db, { ...resolved, folder });
+      const store = await openNativeMailboxStore(db, inFolder(resolved, folder));
       const threads = await executeThread(folder, store, "references");
       const root = threads.find((thread) => thread.ref.uid === rootUid);
       if (!root) return c.json({ error: "Thread not found" }, 404);
@@ -389,6 +412,7 @@ export function mountMailbox<E extends Env>(
 
   app.post(
     "/me/inbox/send",
+    requireGrant("mailbox:*", "create"),
     describeRoute({
       tags: TAGS,
       summary: "Send a message from the caller's mailbox",
@@ -402,9 +426,8 @@ export function mountMailbox<E extends Env>(
         403: { description: "No resolvable principalId" },
       },
     }),
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    async (c: Context<any, any, any>) => {
-      const resolved = await resolvePrincipal(c);
+    async (c) => {
+      const resolved = resolvePrincipal(c);
       if (!resolved) return c.json({ error: "No resolvable principalId" }, 403);
 
       let json: unknown;
@@ -438,10 +461,7 @@ export function mountMailbox<E extends Env>(
         // back.
         let parentReferences: string[] = [];
         for (const folder of LIST_FOLDERS) {
-          const folderStore = await openNativeMailboxStore(db, {
-            ...resolved,
-            folder,
-          });
+          const folderStore = await openNativeMailboxStore(db, inFolder(resolved, folder));
           const parent = folderStore.messages.find(
             (m) => m.envelope.messageId === inReplyTo,
           );
@@ -464,10 +484,7 @@ export function mountMailbox<E extends Env>(
       if (references !== undefined) frameArgs.references = references;
       const raw = buildMailFrame(frameArgs);
 
-      const sentStore = await openNativeMailboxStore(db, {
-        ...resolved,
-        folder: "Sent",
-      });
+      const sentStore = await openNativeMailboxStore(db, inFolder(resolved, "Sent"));
       const uid = sentStore.append(
         raw,
         {
@@ -494,6 +511,7 @@ export function mountMailbox<E extends Env>(
 
   app.get(
     "/me/inbox/events",
+    requireGrant("mailbox:*", "read"),
     describeRoute({
       tags: TAGS,
       summary: "Server-sent stream of mailbox events for the caller",
@@ -508,7 +526,7 @@ export function mountMailbox<E extends Env>(
       },
     }),
     async (c) => {
-      const resolved = await resolvePrincipal(c);
+      const resolved = resolvePrincipal(c);
       if (!resolved) {
         return c.json({ error: "No resolvable principalId" }, 403);
       }
@@ -570,6 +588,7 @@ export function mountMailbox<E extends Env>(
   for (const { verb, op, flags, add } of READ_VERBS) {
     app.post(
       `/me/inbox/:uid/${verb}`,
+      requireGrant("mailbox:*", "manage"),
       describeRoute({
         tags: TAGS,
         summary: verb === "read" ? "Mark a message read" : "Mark a message unread",
@@ -581,14 +600,13 @@ export function mountMailbox<E extends Env>(
           404: { description: "No message with that uid in this mailbox" },
         },
       }),
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      async (c: Context<any, any, any>) => {
+      async (c) => {
         const uid = parseUid(c.req.param("uid") ?? "");
         if (uid === null) return c.json({ error: "uid must be a positive integer" }, 400);
-        const resolved = await resolvePrincipal(c);
+        const resolved = resolvePrincipal(c);
         if (!resolved) return c.json({ error: "No resolvable principalId" }, 403);
         const folder = c.req.query("folder") ?? DEFAULT_FOLDER;
-        const store = await openNativeMailboxStore(db, { ...resolved, folder });
+        const store = await openNativeMailboxStore(db, inFolder(resolved, folder));
         if (!store.find(uid)) return c.json({ error: "Message not found" }, 404);
         if (add) store.addFlags(uid, [...flags]);
         else store.removeFlags(uid, [...flags]);
@@ -602,6 +620,7 @@ export function mountMailbox<E extends Env>(
   for (const { verb, op, from, to } of MOVE_VERBS) {
     app.post(
       `/me/inbox/:uid/${verb}`,
+      requireGrant("mailbox:*", "manage"),
       describeRoute({
         tags: TAGS,
         summary: `Move a message to ${to}`,
@@ -613,11 +632,10 @@ export function mountMailbox<E extends Env>(
           404: { description: "No message with that uid in the source folder" },
         },
       }),
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      async (c: Context<any, any, any>) => {
+      async (c) => {
         const uid = parseUid(c.req.param("uid") ?? "");
         if (uid === null) return c.json({ error: "uid must be a positive integer" }, 400);
-        const resolved = await resolvePrincipal(c);
+        const resolved = resolvePrincipal(c);
         if (!resolved) return c.json({ error: "No resolvable principalId" }, 403);
         // `restore` has no fixed source: a message can be restored out of
         // either Archive or Trash, named by `?folder=`.

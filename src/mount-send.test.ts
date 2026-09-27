@@ -2,11 +2,15 @@
 // caller's Sent folder, and hands it to the host's `deliver` — this package
 // owns no transport of its own.
 import { beforeEach, describe, expect, test } from "bun:test";
-import { Hono } from "hono";
-import { mountMailbox, type OutgoingMailboxMessage } from "./mount.js";
+import { createMailboxRoutes, type OutgoingMailboxMessage } from "./mount.js";
 import { createInMemoryMailboxEventBus } from "./bus.js";
 import { openNativeMailboxStore } from "./native-store.js";
-import { withTestDb, seedScope } from "./test-helpers.js";
+import {
+  allowAllGrants,
+  mountAs,
+  withTestDb,
+  seedScope,
+} from "./test-helpers.js";
 import type { MailboxDb } from "./db.js";
 
 let db: MailboxDb;
@@ -19,16 +23,18 @@ beforeEach(async () => {
 });
 
 function buildApp(deliveries: OutgoingMailboxMessage[]) {
-  const app = new Hono();
-  mountMailbox(app, {
-    db,
-    bus: createInMemoryMailboxEventBus(),
-    resolvePrincipal: () => SCOPE,
-    senderAddressFor: () => FROM,
-    deliver: (message) => {
-      deliveries.push(message);
-    },
-  });
+  const app = mountAs(
+    SCOPE,
+    createMailboxRoutes({
+      db,
+      requireGrant: allowAllGrants,
+      bus: createInMemoryMailboxEventBus(),
+      senderAddressFor: () => FROM,
+      deliver: (message) => {
+        deliveries.push(message);
+      },
+    }),
+  );
   return app;
 }
 
@@ -121,14 +127,16 @@ describe("POST /me/inbox/send", () => {
   });
 
   test("403s with no resolvable principal", async () => {
-    const app = new Hono();
-    mountMailbox(app, {
-      db,
-      bus: createInMemoryMailboxEventBus(),
-      resolvePrincipal: () => null,
-      senderAddressFor: () => FROM,
-      deliver: () => {},
-    });
+    const app = mountAs(
+      null,
+      createMailboxRoutes({
+        db,
+        requireGrant: allowAllGrants,
+        bus: createInMemoryMailboxEventBus(),
+        senderAddressFor: () => FROM,
+        deliver: () => {},
+      }),
+    );
 
     const res = await app.request("/me/inbox/send", {
       method: "POST",

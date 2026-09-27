@@ -4,25 +4,27 @@
 // because an idle stream and a broken keep-alive look identical until a proxy
 // drops the connection in production.
 import { describe, expect, test } from "bun:test";
-import { Hono } from "hono";
-import { mountMailbox } from "./mount.js";
+import { createMailboxRoutes } from "./mount.js";
 import { createInMemoryMailboxEventBus } from "./bus.js";
 import { writeMailboxMessage } from "./write.js";
-import { withTestDb, seedScope } from "./test-helpers.js";
+import { allowAllGrants, mountAs, withTestDb, seedScope } from "./test-helpers.js";
 import type { MailboxDb } from "./db.js";
 
 const SCOPE = { tenantId: "t1", principalId: "p1" };
 
 function stream(db: MailboxDb, heartbeatIntervalMs: number) {
   const bus = createInMemoryMailboxEventBus();
-  const app = mountMailbox(new Hono(), {
-    db,
-    bus,
-    resolvePrincipal: () => SCOPE,
-      senderAddressFor: () => "sender@t1.example",
-      deliver: () => {},
-    heartbeatIntervalMs,
-  });
+  const app = mountAs(
+    SCOPE,
+    createMailboxRoutes({
+      db,
+      requireGrant: allowAllGrants,
+      bus,
+        senderAddressFor: () => "sender@t1.example",
+        deliver: () => {},
+      heartbeatIntervalMs,
+    }),
+  );
   return { app, bus };
 }
 
@@ -120,13 +122,16 @@ describe("SSE heartbeat", () => {
   test("the default interval is the documented 25s, not the test override", async () => {
     const db = await withTestDb();
     const bus = createInMemoryMailboxEventBus();
-    const app = mountMailbox(new Hono(), {
-      db,
-      bus,
-      resolvePrincipal: () => SCOPE,
-      senderAddressFor: () => "sender@t1.example",
-      deliver: () => {},
-    });
+    const app = mountAs(
+      SCOPE,
+      createMailboxRoutes({
+        db,
+        requireGrant: allowAllGrants,
+        bus,
+        senderAddressFor: () => "sender@t1.example",
+        deliver: () => {},
+      }),
+    );
     const res = await app.request("/me/inbox/events");
 
     // With no override, nothing may arrive within a second — otherwise the
@@ -144,16 +149,20 @@ describe("SSE heartbeat", () => {
     // NaN/Infinity are the same class of host misconfiguration. Fail at mount,
     // not on the first request, same as a bad vocabulary.
     const db = await withTestDb();
-    const base = {
-      db,
-      bus: createInMemoryMailboxEventBus(),
-      resolvePrincipal: () => SCOPE,
-      senderAddressFor: () => "sender@t1.example",
-      deliver: () => {},
-    };
+    const bus = createInMemoryMailboxEventBus();
     for (const heartbeatIntervalMs of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
       expect(() =>
-        mountMailbox(new Hono(), { ...base, heartbeatIntervalMs }),
+        mountAs(
+          SCOPE,
+          createMailboxRoutes({
+            db,
+            requireGrant: allowAllGrants,
+            bus,
+            senderAddressFor: () => "sender@t1.example",
+            deliver: () => {},
+            heartbeatIntervalMs,
+          }),
+        ),
       ).toThrow(RangeError);
     }
   });

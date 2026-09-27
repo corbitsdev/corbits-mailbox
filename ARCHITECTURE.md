@@ -12,52 +12,48 @@ pool by default, owns no configuration, and starts no background work. A host
 calls two functions:
 
 - `runMailboxMigrations(db)` — once at boot, before serving.
-- `mountMailbox(app, opts)` — registers routes under `/me/inbox*` on a Hono app
-  the host already built, and returns the same app.
+- `createMailboxRoutes(deps)` — returns a `Hono<TenantEnv>` sub-app serving
+  `/me/inbox*`, which the host mounts with `app.route`.
 
 ## Where the routes are served
 
-The core registers root-relative paths and takes no base path, so the *mount
-point* is the host's decision. The convention every `@corbits/*-core` package
-documents is **`/api`** — the prefix Interchange serves its own routes under.
-No `/v1` segment, no vendor prefix.
+The sub-app registers root-relative paths and takes no base path, so the
+*mount point* is the host's decision, the same way Interchange's own
+`createGrantRoutes` and friends are mounted:
 
 ```ts
-const api = new Hono<AppEnv>();
-mountMailbox(api, { db, bus, resolvePrincipal, vocabulary });
-app.route("/api", api);
+app.route(
+  "/api/tenants/:tenantId/mailbox",
+  createMailboxRoutes({ db, bus, requireGrant, senderAddressFor, deliver }),
+);
 ```
 
-which serves `/api/me/inbox`, `/api/me/inbox/unread-count`,
-`/api/me/inbox/events`, `/api/me/inbox/:id`, and the `POST` mutations beneath
-them. Nesting rather than teaching the core a base path keeps the frozen
-`mountX<E extends Env>(app, opts) => Hono<E>` seam untouched, and lands the
-mailbox behind whatever the host already declared for `/api/me/*` — on an
-Interchange host, `requireAuth`.
+The host's tenant middleware runs first and sets `tenant` and `principal` on
+the context, exactly as it does for its own `TenantEnv` routes.
 
-## The mount seam
+## The routes seam
 
-`mountMailbox<E extends Env>(app: Hono<E>, opts): Hono<E>` is generic over the
-host's Hono `Env` and returns the app unchanged in type. Everything the package
-cannot know on its own arrives through `opts`; nothing is reached for.
+`createMailboxRoutes(deps: CreateMailboxRoutesDeps): Hono<TenantEnv>`.
+Everything the package cannot know on its own arrives through `deps`; nothing
+is reached for.
 
-| Option | Required | What it is |
+| Dep | Required | What it is |
 | --- | --- | --- |
 | `db` | yes | A drizzle `postgres-js` handle. The schema generic is `any` on purpose, so the host passes the handle it already has instead of opening a second pool. |
 | `bus` | yes | `MailboxEventBus` — per-mailbox fan-out backing the SSE route, keyed by the `(tenantId, principalId)` pair (`MailboxEventScope`). `createInMemoryMailboxEventBus()` ships as the zero-config default. |
-| `resolvePrincipal(ctx)` | yes | `{ tenantId, principalId } \| null`. `ctx` is typed `unknown`, so no Hono context typing leaks into the seam. |
-| `vocabulary` | yes | `{ priorities, statuses }` — the host's triage taxonomy; there is no default. |
-| `resolveSenderDisplays` | no | Batched `(tenantId, fromHeaders) => Map<address, label>`. Omitted, messages carry only the raw `From:` header. |
+| `requireGrant` | yes | `@intx/hub-api`'s `RequireGrant`. Reads are gated on `mailbox:*` `read`, send on `create`, flag and move verbs on `manage`. |
+| `senderAddressFor` | yes | The caller's `From:` address, from the host's own directory. |
+| `deliver` | yes | The host's transport, called once per send after the Sent copy is filed. |
 | `heartbeatIntervalMs` | no | SSE keep-alive period, default 25s (under the 30s idle timeout most proxies default to). Exists so a test can observe a heartbeat without waiting. |
 
-What it does **not** require: no auth middleware, no session library, no logger
+What it does **not** require: no session library, no logger
 configuration, no UI. What it *does* require of the database is an
 Interchange-shaped control plane: `public.tenant` and `public.principal` in the
 same database, in place before `runMailboxMigrations` runs, because the mailbox
 tables foreign-key to both. Nothing changed in Interchange to make that work —
 the coupling lives entirely on this side.
 
-One further seam lives outside `mountMailbox`, on the write side:
+One further seam lives outside `createMailboxRoutes`, on the write side:
 `createMailboxPersist(db, { upstream, authorizeSender, bus?, onRow?, resolveRefs? })`
 wraps a host's own mail-persist function so every addressed principal also
 gets a durable row. `authorizeSender(address) => { tenantId, domain } | null`
@@ -100,9 +96,6 @@ pre-transaction failure: it falls under the same dual-write contract as the
 rest of the wrapper — logged (naming `resolveRefs` as the failing stage),
 upstream unaffected (already ran, or still will, independently of this), and
 no mailbox row for that frame.
-
-`resolvePrincipal`'s signature is identical across the Corbits cores, so a host
-mounting more than one passes the same function to each.
 
 ## Modules
 
@@ -312,7 +305,7 @@ required `op` (`MailboxEventOp`: `create`, `mark_read`, `mark_unread`, `trash`,
 `archive`, `restore`, `enrich`, `assign`) and includes it on the published
 event. Every call site in this package passes one — the two delivery paths
 (`writeMailboxMessage`, `deliverInboxItems`) and the transport dual-write
-(`createMailboxPersist`) publish `create`; `mountMailbox`'s route table passes
+(`createMailboxPersist`) publish `create`; `createMailboxRoutes`'s route table passes
 the mutation's own identifier, reusing `MailboxBulkAction`'s vocabulary for
 the single-message verbs so "read one" and "read fifty" report the same op.
 `op` stays *optional on `MailboxEventSchema`* even though it is required to
@@ -494,7 +487,8 @@ delegation ref.
 
 Supplied by the host: the Hono app and the database handle (pointed at the
 database where `tenant` and `principal` live); the triage **vocabulary**; who
-the caller is (`resolvePrincipal`); whether a sender may deliver
+the caller is (the `tenant` and `principal` its tenant middleware sets on the
+context); whether a sender may deliver
 (`authorizeSender`) and to which tenant; display names
 (`resolveSenderDisplays`); an event bus, if one process is not enough; and the
 actual mail transport — this package neither sends nor receives SMTP.

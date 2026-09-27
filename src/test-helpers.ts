@@ -1,6 +1,9 @@
 import { createMailboxDb, type MailboxDb } from "./db.js";
 import { runMailboxMigrations } from "./migrations.js";
 import { sql } from "drizzle-orm";
+import { Hono } from "hono";
+import type { RequireGrant, TenantEnv } from "@intx/hub-api";
+import type { ResolvedPrincipal } from "./mount.js";
 
 export const TEST_DATABASE_URL =
   process.env.MAILBOX_TEST_DATABASE_URL ??
@@ -74,4 +77,46 @@ export async function withTestDb(): Promise<MailboxDb> {
   );
   await db.execute(sql`TRUNCATE TABLE "tenant", "principal" CASCADE`);
   return db;
+}
+
+/** A `requireGrant` that lets every request through, for route tests. */
+export const allowAllGrants: RequireGrant = () => async (_c, next) => {
+  await next();
+};
+
+/**
+ * `routes` behind a stand-in for the host's tenant middleware that puts
+ * `scope` on the context, or nothing when `scope` is null.
+ */
+export function mountAs(
+  scope: ResolvedPrincipal | null,
+  routes: Hono<TenantEnv>,
+): Hono<TenantEnv> {
+  const host = new Hono<TenantEnv>();
+  if (scope) {
+    const now = new Date();
+    host.use(async (c, next) => {
+      c.set("tenant", {
+        id: scope.tenantId,
+        name: scope.tenantId,
+        slug: scope.tenantId,
+        domain: `${scope.tenantId}.example`,
+        parentId: null,
+        config: null,
+        createdAt: now,
+        updatedAt: now,
+      });
+      c.set("principal", {
+        id: scope.principalId,
+        tenantId: scope.tenantId,
+        kind: "user",
+        refId: scope.principalId,
+        status: "active",
+        createdAt: now,
+        updatedAt: now,
+      });
+      await next();
+    });
+  }
+  return host.route("/", routes);
 }
