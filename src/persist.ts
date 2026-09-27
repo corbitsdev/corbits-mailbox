@@ -222,7 +222,7 @@ export function createMailboxPersist<R>(
       ) {
         continue;
       }
-      const uid = store.append(
+      const uid = await store.appendMessage(
         raw,
         {
           messageId: messageId ?? "",
@@ -237,7 +237,6 @@ export function createMailboxPersist<R>(
         },
         [],
       );
-      await store.settled;
       announce({
         id: `${auth.tenantId}:${recipient.principalId}:INBOX:${uid}`,
         tenantId: auth.tenantId,
