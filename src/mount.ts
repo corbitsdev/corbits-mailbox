@@ -513,7 +513,7 @@ export function createMailboxRoutes(
         db,
         inFolder(resolved, "Sent"),
       );
-      const uid = sentStore.append(
+      const uid = await sentStore.appendMessage(
         raw,
         {
           messageId,
@@ -528,7 +528,6 @@ export function createMailboxRoutes(
         },
         [],
       );
-      await sentStore.settled;
       publish(resolved, `Sent:${uid}`, "create");
 
       await deliver({ raw, from: fromAddress, to: parsed.to, messageId });

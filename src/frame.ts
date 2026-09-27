@@ -7,9 +7,13 @@ import {
 
 // Header values are single-line by contract; anything reaching a header
 // (an externally-supplied subject in particular) is flattened so it can
-// never smuggle in extra headers via embedded newlines.
+// never smuggle in extra headers via embedded newlines. NUL is dropped: no
+// header may carry it, and Postgres text cannot store it.
 export function headerValue(value: string): string {
-  return value.replace(/[\r\n]+/g, " ").trim();
+  return value
+    .replaceAll("\0", "")
+    .replace(/[\r\n]+/g, " ")
+    .trim();
 }
 
 /**
