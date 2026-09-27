@@ -428,7 +428,7 @@ index-servable, ~3.8x its pre-split cost.
 `schema.ts` and `migrations.ts` must agree statement for statement: the
 runtime queries read through the drizzle table object, so a drift between the
 two would query columns or rely on indexes the migrations never created.
-`src/schema-ddl-parity.test.ts` diffs the two against a live database.
+`src/migrations.test.ts` diffs the two against a live database.
 
 ## Migrations
 
