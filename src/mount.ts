@@ -24,6 +24,7 @@ import {
   generateMailboxMessageId,
   headerValue,
 } from "./frame.js";
+import { assertMailboxFrameBytes } from "./write.js";
 
 const logger = getLogger(["corbits-mailbox", "mount"]);
 
@@ -444,7 +445,10 @@ export function createMailboxRoutes(
         "`deliver` — this package owns no transport.",
       responses: {
         200: { description: "The Sent copy's messageId and uid" },
-        400: { description: "Malformed body" },
+        400: {
+          description:
+            "Malformed body, a recipient with CR, LF or NUL, or a frame over the size cap",
+        },
         403: { description: "No resolvable principalId" },
       },
     }),
@@ -461,6 +465,16 @@ export function createMailboxRoutes(
       const parsed = SendMailboxMessageSchema(json);
       if (parsed instanceof type.errors) {
         return c.json({ error: parsed.summary }, 400);
+      }
+
+      // A recipient is a header value and an envelope address: a CR or LF
+      // would inject headers into the frame, and none of them belongs in
+      // either.
+      if (parsed.to.some((address) => /[\r\n\0]/.test(address))) {
+        return c.json(
+          { error: "recipients must not contain CR, LF or NUL" },
+          400,
+        );
       }
 
       const fromAddress = headerValue(await senderAddressFor(resolved));
@@ -507,7 +521,16 @@ export function createMailboxRoutes(
       };
       if (inReplyTo !== undefined) frameArgs.inReplyTo = inReplyTo;
       if (references !== undefined) frameArgs.references = references;
-      const raw = buildMailFrame(frameArgs);
+      let raw: Uint8Array;
+      try {
+        raw = buildMailFrame(frameArgs);
+        assertMailboxFrameBytes(raw);
+      } catch (err) {
+        if (err instanceof RangeError) {
+          return c.json({ error: err.message }, 400);
+        }
+        throw err;
+      }
 
       const sentStore = await openNativeMailboxStore(
         db,

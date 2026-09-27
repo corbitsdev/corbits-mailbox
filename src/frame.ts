@@ -1,4 +1,5 @@
 import {
+  extractAddrSpec,
   extractPartByPath,
   formatRFC2822Date,
   parseHeaderSection,
@@ -30,12 +31,16 @@ export const MESSAGE_ID_FALLBACK_DOMAIN = "hub.invalid";
 
 /**
  * Mint a Message-ID for a frame this package authors: `<uuid@domain>`, where
- * the domain is the sender's, or `hub.invalid` when the sender address has no
- * parseable domain.
+ * the domain is that of the sender's addr-spec (`Name <addr>` included), or
+ * `hub.invalid` when the sender address has no parseable addr-spec.
  */
 export function generateMailboxMessageId(fromAddress: string): string {
-  const at = fromAddress.lastIndexOf("@");
-  const domain = at === -1 ? "" : fromAddress.slice(at + 1).trim();
+  let addrSpec = "";
+  try {
+    addrSpec = extractAddrSpec(fromAddress);
+  } catch {}
+  const at = addrSpec.lastIndexOf("@");
+  const domain = at === -1 ? "" : addrSpec.slice(at + 1).trim();
   return `<${crypto.randomUUID()}@${domain === "" ? MESSAGE_ID_FALLBACK_DOMAIN : domain}>`;
 }
 

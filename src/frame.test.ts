@@ -173,6 +173,18 @@ describe("Message-ID domain fallback", () => {
     expect(generateMessageId("no-at-sign").endsWith("@local>")).toBe(true);
   });
 
+  test("uses the addr-spec's domain when the sender carries a display form", () => {
+    const id = generateMailboxMessageId("<p@t.example>");
+    expect(id).toMatch(MESSAGE_ID);
+    expect(id.endsWith("@t.example>")).toBe(true);
+  });
+
+  test("never copies a trailing comment into the id", () => {
+    const id = generateMailboxMessageId("p@t.example (c)");
+    expect(id).toMatch(MESSAGE_ID);
+    expect(id).not.toContain("(");
+  });
+
   test("mints a distinct id per call", () => {
     expect(generateMailboxMessageId("bot@example.com")).not.toBe(
       generateMailboxMessageId("bot@example.com"),
