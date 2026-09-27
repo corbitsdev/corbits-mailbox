@@ -116,7 +116,7 @@ bun run test
 bun run build
 ```
 
-Tests expect `postgres://postgres:postgres@localhost:5433/mailbox_core` (override with `MAILBOX_TEST_DATABASE_URL` / `MAILBOX_DATABASE_URL`). See [CONTRIBUTING.md](./CONTRIBUTING.md).
+Tests expect `postgres://postgres:postgres@localhost:5433/mailbox_core` (override with `MAILBOX_TEST_DATABASE_URL`). The end-to-end suites in `tests/` create and drop a database each, so that role needs `CREATEDB`. See [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 ## License
 

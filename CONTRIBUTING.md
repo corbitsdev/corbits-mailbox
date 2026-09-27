@@ -15,6 +15,9 @@ concurrency are asserted against a live server, because that is the only place t
 true. Database-touching tests clean up after themselves and must not assume they are
 alone — concurrency behavior is part of the contract here.
 
+The suite connects to `MAILBOX_TEST_DATABASE_URL`, which defaults to
+`postgres://postgres:postgres@localhost:5433/mailbox_core` (the CI service's port).
+
 ## Acceptance scenarios live in corbitsdev/examples
 
 The end-to-end acceptance scenarios that mount this package on a real
