@@ -7,8 +7,8 @@ import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
  * `mailbox` schema there, held to the control plane by the tenant/principal
  * FKs.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- drizzle's schema
-// generic is invariant, so naming a concrete schema here would reject a host
-// handle bound to its own (e.g. `createDB`'s). Nothing here reads `db.query`.
+// drizzle's schema generic is invariant, so naming a concrete schema here
+// would reject a host handle bound to its own (e.g. `createDB`'s). Nothing
+// here reads `db.query`.
 export type MailboxDb = PostgresJsDatabase<any>;
 
