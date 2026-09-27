@@ -70,8 +70,7 @@ const DEFAULT_HEARTBEAT_INTERVAL_MS = 25_000;
 
 /**
  * Ceiling on SSE events queued for one connection whose client has stopped
- * reading — see the identical rationale this carried before the native-store
- * cutover: an event is a nudge, never the data, so a stalled consumer is
+ * reading. An event is a nudge, never the data, so a stalled consumer is
  * disconnected rather than buffered for.
  */
 export const MAX_PENDING_SSE_EVENTS = 100;
@@ -144,8 +143,6 @@ type MailboxListItem = {
   raw: string;
 };
 
-// The five single-message mutations that move or flag a message. `op` is the
-// event op published on success.
 /**
  * One node of `GET /me/inbox/threads(/:rootUid)`: `@intx/mailbox`'s
  * `executeThread`'s ref (recursively, as `children`) plus the same envelope

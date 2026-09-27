@@ -445,7 +445,7 @@ export const MIGRATIONS: Migration[] = [
     //
     // uid/modseq become NOT NULL: every remaining write path is
     // `NativeMailboxStore.append`, which always sets both. The backfill below
-    // is defense in depth for a row inserted by the pre-cutover write paths
+    // is defense in depth for a row inserted by a non-native write path
     // between `0004` running and this migration — same per-(tenant,
     // principal, folder) row_number() `0004` used, guarded by "uid" IS NULL
     // so an already-backfilled row is left alone.

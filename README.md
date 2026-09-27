@@ -94,7 +94,7 @@ export function wrapPersistMail<R>(
 }
 ```
 
-`authorizeSender` is the host's own check that a sender address is one it recognizes right now — a hub answers by looking up the tenant a mailbox-routable address (a person, or a live agent run) currently resolves to, and refusing anything else. `upstream` is the host's own pre-existing mail-persist path — the write it already made before this package existed; `createMailboxPersist` calls it unconditionally and layers the durable inbox write on top, so a transport failure never costs a recipient the copy that makes the message readable later. Call the wrapped `persistMail` wherever the host currently delegates an outbound frame; it does both writes.
+`authorizeSender` says whether a sender address is one the host recognizes right now, and which tenant it belongs to. `upstream` is the host's existing persist path; it always runs. See [CONTRIBUTING.md](./CONTRIBUTING.md#agent-originated-mail) for how the two writes interact.
 
 ## How it works
 

@@ -51,9 +51,20 @@ Shipped migrations are immutable. Each ledger row carries a checksum of the migr
 statements, so editing one that has already been applied fails loudly on the next boot
 rather than letting fresh and existing databases diverge. Add a new migration instead.
 
-`schema.ts` and `migrations.ts` must agree statement for statement — the drizzle table
-object is a public export, and `src/schema-ddl-parity.test.ts` diffs the two against a
-live database. Change one, change the other, in the same commit.
+`schema.ts` and `migrations.ts` must agree statement for statement — the runtime
+queries read through the drizzle table object, and `src/schema-ddl-parity.test.ts`
+diffs the two against a live database. Change one, change the other, in the same commit.
+
+## Agent-originated mail
+
+`createMailboxPersist` wraps the host's own persist function. `authorizeSender` is the
+host's check that a sender address is one it recognizes right now: a hub answers by
+looking up the tenant a mailbox-routable address (a person, or a live agent run)
+currently resolves to, and refuses anything else. `upstream` is the host's existing
+mail-persist path. The wrapper calls it unconditionally and layers the durable inbox
+write on top, so a transport failure never costs a recipient the copy that makes the
+message readable later. The host calls the wrapped function wherever it delegates an
+outbound frame; it does both writes.
 
 ## Pull requests
 
