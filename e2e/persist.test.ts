@@ -600,6 +600,24 @@ describe("frame size and recipient hard caps", () => {
   });
 });
 
+describe("cached columns", () => {
+  test("an RFC 2047 subject is cached decoded", async () => {
+    const persist = createMailboxPersist(db, {
+      upstream: async () => undefined,
+      authorizeSender: () => ACTIVE,
+    });
+    await persist(
+      args({
+        raw: new TextEncoder().encode(
+          `From: ${SENDER}\r\nSubject: =?UTF-8?B?w6nDqcOp?=\r\nMessage-ID: <enc@acme.example>\r\n\r\nhi\r\n`,
+        ),
+      }),
+    );
+    const [row] = await rowsFor("acme", "user-1");
+    expect(row?.subject).toBe("\u00e9\u00e9\u00e9");
+  });
+});
+
 describe("Message-ID dedupe", () => {
   test("keys on the authorized envelope sender, not the From header", async () => {
     const persist = createMailboxPersist(db, {

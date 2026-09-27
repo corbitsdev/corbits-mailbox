@@ -92,7 +92,7 @@ Paths are relative to where the host mounts the sub-app. Every route returns 403
 | POST   | `/me/inbox/:uid/unread`      | `mailbox:*` `manage` | Clear `\Seen` on a message in `?folder=` (INBOX by default).                                                   |
 | POST   | `/me/inbox/:uid/archive`     | `mailbox:*` `manage` | Move from INBOX to Archive.                                                                                    |
 | POST   | `/me/inbox/:uid/trash`       | `mailbox:*` `manage` | Move from INBOX to Trash.                                                                                      |
-| POST   | `/me/inbox/:uid/restore`     | `mailbox:*` `manage` | Move back to INBOX from `?folder=` (Archive by default).                                                       |
+| POST   | `/me/inbox/:uid/restore`     | `mailbox:*` `manage` | Move back to INBOX from `?folder=`: Archive (default) or Trash.                                                |
 
 The grant is `mailbox:*` rather than a per-message resource because every query is already scoped to the caller's own tenant and principal.
 

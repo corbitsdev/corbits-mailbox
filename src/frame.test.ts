@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { generateMessageId, parseHeaderSection } from "@intx/mime";
 import {
   buildMailFrame,
+  decodeEncodedWords,
   decodeMailFrame,
   generateMailboxMessageId,
   MESSAGE_ID_FALLBACK_DOMAIN,
@@ -189,5 +190,37 @@ describe("Message-ID domain fallback", () => {
     expect(generateMailboxMessageId("bot@example.com")).not.toBe(
       generateMailboxMessageId("bot@example.com"),
     );
+  });
+});
+
+describe("decodeEncodedWords", () => {
+  test("decodes B and Q words and joins adjacent ones", () => {
+    expect(decodeEncodedWords("=?UTF-8?B?w6nDqcOp?=")).toBe(
+      "\u00e9\u00e9\u00e9",
+    );
+    expect(decodeEncodedWords("Re: =?ISO-8859-1?Q?caf=E9_bar?=")).toBe(
+      "Re: caf\u00e9 bar",
+    );
+    expect(decodeEncodedWords("=?UTF-8?Q?a?= =?UTF-8?Q?b?= c")).toBe("ab c");
+  });
+
+  test("leaves plain text and unknown charsets as written", () => {
+    expect(decodeEncodedWords("plain ?= text")).toBe("plain ?= text");
+    expect(decodeEncodedWords("=?x-nope?B?YQ==?=")).toBe("=?x-nope?B?YQ==?=");
+  });
+
+  test("leaves a word that does not decode as written", () => {
+    expect(decodeEncodedWords("=?UTF-8?B?!!!!?=")).toBe("=?UTF-8?B?!!!!?=");
+    expect(decodeEncodedWords("=?UTF-8?Q?=C3?= x")).toBe("=?UTF-8?Q?=C3?= x");
+    expect(decodeEncodedWords("=?UTF-8?B?!!!!?= =?UTF-8?Q?b?=")).toBe(
+      "=?UTF-8?B?!!!!?= b",
+    );
+    expect(decodeEncodedWords("=?UTF-8?Q?a?= =?UTF-8?B?!!!!?=")).toBe(
+      "a =?UTF-8?B?!!!!?=",
+    );
+  });
+
+  test("keeps whitespace after a literal ?= that is not an encoded-word", () => {
+    expect(decodeEncodedWords("plain?= =?UTF-8?Q?b?=")).toBe("plain?= b");
   });
 });
