@@ -5,7 +5,7 @@ import { type } from "arktype";
  * (a new message landed, from `writeMailboxMessage`, `deliverInboxItems`, or
  * `createMailboxPersist`) plus the five verbs `mount.ts`'s route table
  * registers over the native store (`mark_read`, `mark_unread`, `archive`,
- * `trash`, `restore`).
+ * `trash`, `restore`), and `undelivered` (a Sent message whose delivery failed).
  */
 export const MAILBOX_EVENT_OPS = [
   "create",
@@ -14,6 +14,7 @@ export const MAILBOX_EVENT_OPS = [
   "trash",
   "archive",
   "restore",
+  "undelivered",
 ] as const;
 export type MailboxEventOp = (typeof MAILBOX_EVENT_OPS)[number];
 

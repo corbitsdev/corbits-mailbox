@@ -84,6 +84,13 @@ const DEFAULT_HEARTBEAT_INTERVAL_MS = 25_000;
 export const MAX_PENDING_SSE_EVENTS = 100;
 
 const DEFAULT_FOLDER = "INBOX";
+/**
+ * Set on a Sent message whose `deliver` call threw; the copy is kept. With
+ * several recipients the host may have delivered to some before throwing, so
+ * this means "deliver failed", not "nobody received it".
+ */
+export const UNDELIVERED_FLAG = "$Undelivered";
+
 /** Folders `?folder=` may name for `GET /me/inbox`. */
 const LIST_FOLDERS = ["INBOX", "Sent", "Archive", "Trash"] as const;
 type ListFolder = (typeof LIST_FOLDERS)[number];
@@ -455,7 +462,10 @@ export function createMailboxRoutes(
       description:
         "Builds an RFC 5322 message, appends a copy to the caller's Sent " +
         "folder via the native store, then hands it to the host's own " +
-        "`deliver` — this package owns no transport.",
+        "`deliver` — this package owns no transport. If `deliver` throws, the " +
+        "Sent copy is kept with the `$Undelivered` flag and the error propagates. " +
+        "The flag means `deliver` threw; with several recipients it may have " +
+        "reached some of them.",
       responses: {
         200: { description: "The Sent copy's messageId and uid" },
         400: {
@@ -569,7 +579,18 @@ export function createMailboxRoutes(
       if (uid === null) throw new Error(`Sent already holds ${messageId}`);
       publish(resolved, `Sent:${uid}`, "create");
 
-      await deliver({ raw, from: fromAddress, to: parsed.to, messageId });
+      try {
+        await deliver({ raw, from: fromAddress, to: parsed.to, messageId });
+      } catch (err) {
+        logger.error("deliver failed for Sent:{uid}", {
+          uid,
+          error: err instanceof Error ? err : new Error(String(err)),
+        });
+        sentStore.addFlags(uid, [UNDELIVERED_FLAG]);
+        await sentStore.settled;
+        publish(resolved, `Sent:${uid}`, "undelivered");
+        throw err;
+      }
 
       return c.json({ messageId, uid });
     },
@@ -584,7 +605,7 @@ export function createMailboxRoutes(
       description:
         "Emits a `mailbox` event per affected message, plus a heartbeat " +
         "comment every 25s. Each event carries `op` " +
-        "(create/mark_read/mark_unread/archive/trash/restore) when the " +
+        "(create/mark_read/mark_unread/archive/trash/restore/undelivered) when the " +
         "publisher knows it.",
       responses: {
         200: { description: "text/event-stream" },
