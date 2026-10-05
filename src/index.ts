@@ -2,7 +2,11 @@
 // human principals. This library exists ONLY to give a human principal a
 // native `@intx/mailbox` `MailboxStore` over Postgres, and the routes that
 // let a host's UI list, read, and file it — nothing else.
-export { createMailboxRoutes, MAX_MAILBOX_PAGE_LIMIT } from "./mount.js";
+export {
+  createMailboxRoutes,
+  MAX_MAILBOX_PAGE_LIMIT,
+  UNDELIVERED_FLAG,
+} from "./mount.js";
 export type {
   CreateMailboxRoutesDeps,
   ResolvedPrincipal,
