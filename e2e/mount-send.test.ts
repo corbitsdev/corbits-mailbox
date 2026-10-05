@@ -1,6 +1,7 @@
 // POST /me/inbox/send: builds an RFC 5322 message, appends it to the
 // caller's Sent folder, and hands it to the host's `deliver` — this package
 // owns no transport of its own.
+import { HTTPException } from "hono/http-exception";
 import { beforeEach, describe, expect, test } from "bun:test";
 import {
   createMailboxRoutes,
@@ -199,5 +200,70 @@ describe("POST /me/inbox/send", () => {
       body: JSON.stringify({ to: ["bob@example.com"], body: "Hi" }),
     });
     expect(res.status).toBe(403);
+  });
+});
+
+describe("POST /me/inbox/send when deliver fails", () => {
+  function failingApp(error: Error) {
+    return mountAs(
+      SCOPE,
+      createMailboxRoutes({
+        db,
+        requireGrant: allowAllGrants,
+        bus: createInMemoryMailboxEventBus(),
+        senderAddressFor: () => FROM,
+        deliver: () => {
+          throw error;
+        },
+      }),
+    );
+  }
+
+  function send(app: ReturnType<typeof failingApp>) {
+    return app.request("/me/inbox/send", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ to: ["bob@example.com"], body: "Hi" }),
+    });
+  }
+
+  test("keeps the Sent copy, flags it $Undelivered, and propagates the HTTP status", async () => {
+    const events: string[] = [];
+    const bus = createInMemoryMailboxEventBus();
+    bus.subscribe(SCOPE, (e) => events.push(`${e.id}:${e.op}`));
+    const app = mountAs(
+      SCOPE,
+      createMailboxRoutes({
+        db,
+        requireGrant: allowAllGrants,
+        bus,
+        senderAddressFor: () => FROM,
+        deliver: () => {
+          throw new HTTPException(409, { message: "run finished" });
+        },
+      }),
+    );
+
+    const res = await send(app);
+    expect(res.status).toBe(409);
+
+    const sent = await openNativeMailboxStore(db, { ...SCOPE, folder: "Sent" });
+    expect(sent.messages).toHaveLength(1);
+    expect([...sent.messages[0]!.flags]).toContain("$Undelivered");
+    expect(events).toEqual(["Sent:1:create", "Sent:1:undelivered"]);
+
+    const list = await app.request("/me/inbox?folder=Sent");
+    const { messages } = (await list.json()) as {
+      messages: { flags: string[] }[];
+    };
+    expect(messages[0]!.flags).toContain("$Undelivered");
+  });
+
+  test("a non-HTTP failure still rejects and flags the Sent copy", async () => {
+    const app = failingApp(new Error("transport down"));
+    const res = await send(app);
+    expect(res.status).toBe(500);
+    const sent = await openNativeMailboxStore(db, { ...SCOPE, folder: "Sent" });
+    expect([...sent.messages[0]!.flags]).toContain("$Undelivered");
   });
 });
