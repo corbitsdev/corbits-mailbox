@@ -206,7 +206,9 @@ describe("native MailboxStore over the principal mailbox tables", () => {
     });
     const msg = reopened.find(uid);
     expect(
-      Math.abs(msg!.envelope.date.getTime() - writeInstant.getTime()),
+      Math.abs(
+        (msg!.envelope.date ?? new Date()).getTime() - writeInstant.getTime(),
+      ),
     ).toBeLessThan(1000);
   });
 });
