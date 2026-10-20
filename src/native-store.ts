@@ -78,7 +78,7 @@ function withoutNul(value: string): string {
 function cleanEnvelope(envelope: StoredEnvelope): StoredEnvelope {
   return {
     messageId: withoutNul(envelope.messageId),
-    from: withoutNul(envelope.from),
+    from: withoutNul(envelope.from ?? ""),
     to: envelope.to.map(withoutNul),
     subject: withoutNul(envelope.subject),
     date: envelope.date,
@@ -264,7 +264,7 @@ export async function openNativeMailboxStore(
             ${envelope.from}, ${envelope.messageId || null}, ${envelope.inReplyTo ?? null},
             ${envelope.references.length > 0 ? JSON.stringify(envelope.references) : null},
             ${envelope.to.length > 0 ? JSON.stringify(envelope.to) : null},
-            ${envelope.date.toISOString()}, ${folder}, ${uid}, ${modseq}, ${pgTextArrayLiteral(flags)}::text[]
+            ${(envelope.date ?? new Date()).toISOString()}, ${folder}, ${uid}, ${modseq}, ${pgTextArrayLiteral(flags)}::text[]
           )
         `);
         await tx.execute(sql`
@@ -328,7 +328,7 @@ export async function openNativeMailboxStore(
               ${withoutNul(sender)}, ${envelope.messageId || null}, ${envelope.inReplyTo ?? null},
               ${envelope.references.length > 0 ? JSON.stringify(envelope.references) : null},
               ${envelope.to.length > 0 ? JSON.stringify(envelope.to) : null},
-              ${envelope.date.toISOString()}, ${folder}, ${uid}, ${modseq}, ${pgTextArrayLiteral(flags)}::text[]
+              ${(envelope.date ?? new Date()).toISOString()}, ${folder}, ${uid}, ${modseq}, ${pgTextArrayLiteral(flags)}::text[]
             )
             ON CONFLICT ("tenant_id", "principal_id", "folder", "message_id", "sender_address")
               WHERE "message_id" IS NOT NULL
