@@ -117,9 +117,9 @@ rules:
             - pattern: console.info($$$URL$$$)
             - pattern: console.error($$$URL$$$)
             - pattern: console.debug($$$URL$$$)
-        constraints:
-          URL:
-            regex: ^(req|request|raw)\.url$
+          constraints:
+            URL:
+              regex: ^(req|request|raw)\.url$
       - id: no-request-url-in-logs
         language: javascript
         message: Logs a request URL.
@@ -138,9 +138,9 @@ rules:
             - pattern: console.info($$$URL$$$)
             - pattern: console.error($$$URL$$$)
             - pattern: console.debug($$$URL$$$)
-        constraints:
-          URL:
-            regex: ^(req|request|raw)\.url$
+          constraints:
+            URL:
+              regex: ^(req|request|raw)\.url$
 actions:
   pass:
     - do: approve
